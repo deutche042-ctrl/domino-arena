@@ -35,15 +35,28 @@ function spawnFallingTiles(containerId) {
   const hero = $(containerId);
   if (!hero) return;
   hero.innerHTML = '';
-  for (let i = 0; i < 22; i++) {
-    const img = document.createElement('img');
-    img.src = tileImage(Math.floor(Math.random() * 7), Math.floor(Math.random() * 7));
-    img.className = 'fall';
-    img.style.left = Math.random() * 96 + 'vw';
-    img.style.width = 42 + Math.random() * 32 + 'px';
-    img.style.animationDuration = 7 + Math.random() * 8 + 's';
-    img.style.animationDelay = -Math.random() * 15 + 's';
-    hero.appendChild(img);
+  // 3 depth layers: far (small/blurred/faint) → near (large/sharp/brighter).
+  // Each tile drifts + tumbles with its own physics for a premium parallax feel.
+  const LAYERS = [
+    { cls: 'far',  count: 9,  size: [26, 40] },
+    { cls: 'mid',  count: 8,  size: [44, 62] },
+    { cls: 'near', count: 6,  size: [70, 98] },
+  ];
+  for (const layer of LAYERS) {
+    for (let i = 0; i < layer.count; i++) {
+      const img = document.createElement('img');
+      img.src = tileImage(Math.floor(Math.random() * 7), Math.floor(Math.random() * 7));
+      img.className = `fall ${layer.cls}`;
+      const size = layer.size[0] + Math.random() * (layer.size[1] - layer.size[0]);
+      img.style.left = Math.random() * 96 + 'vw';
+      img.style.width = size + 'px';
+      img.style.setProperty('--rot0', Math.random() * 360 + 'deg');
+      img.style.setProperty('--rot1', (Math.random() < .5 ? -1 : 1) * (200 + Math.random() * 360) + 'deg');
+      img.style.setProperty('--sway', (Math.random() < .5 ? -1 : 1) * (20 + Math.random() * 60) + 'px');
+      img.style.animationDuration = 9 + Math.random() * 12 + 's';
+      img.style.animationDelay = -Math.random() * 20 + 's';
+      hero.appendChild(img);
+    }
   }
 }
 
