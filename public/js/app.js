@@ -117,6 +117,8 @@ function renderLobby(st) {
   lastLobbyState = st;
   isHost = st.hostId === myId;
   $('lobbyCode').textContent = st.code;
+  const countEl = $('playerCount');
+  if (countEl) countEl.textContent = `${(st.players || []).length}/${st.config?.maxPlayers ?? 4}`;
   const list = $('lobbyPlayers');
   list.innerHTML = '';
   for (const p of (st.players || [])) {

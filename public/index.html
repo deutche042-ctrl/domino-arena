@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=Reem+Kufi:wght@500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/style.css?v=11">
+<link rel="stylesheet" href="css/style.css?v=12">
 <script type="importmap">
 {
   "imports": {
@@ -25,7 +25,8 @@
 <section id="screen-home" class="screen active">
   <div class="hero-tiles" id="heroTiles"></div>
   <div class="home-card">
-    <h1 class="logo">🁢 دومينو <span>أرينا</span></h1>
+    <div class="logo-emblem" aria-hidden="true">🁢</div>
+    <h1 class="logo">دومينو <span>أرينا</span></h1>
     <p class="tagline">العب الدومينو أونلاين في الوقت الفعلي مع أصحابك — برابط مباشر وبدون أي تثبيت.</p>
     <input id="inpName" maxlength="16" placeholder="اكتب اسمك هنا..." autocomplete="off">
     <div class="home-actions">
@@ -55,6 +56,7 @@
         <button id="btnCopyLink" class="btn small">نسخ رابط الدعوة</button>
       </div>
     </div>
+    <div class="players-title">اللاعبون <span id="playerCount" class="player-count"></span></div>
     <ul id="lobbyPlayers" class="player-list"></ul>
     <div id="hostConfig" class="host-config hidden">
       <label>نوع اللعبة
@@ -175,6 +177,6 @@
   </div>
 </section>
 
-<script type="module" src="js/app.js?v=11"></script>
+<script type="module" src="js/app.js?v=12"></script>
 </body>
 </html>
