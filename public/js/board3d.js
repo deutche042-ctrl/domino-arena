@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { tileFaceCanvas, tileBackCanvas, feltCanvas } from './tiles.js';
+import { tileFaceCanvas, tileBackCanvas, feltCanvas } from './tiles.js?v=11';
 
 const TILE_W = 1, TILE_L = 2, TILE_H = 0.42, GAP = 0.07;
 const MAX_X = 11.5;             // table boundary along X before turning
@@ -10,9 +10,11 @@ const MAX_Z = 6.5;              // table boundary along Z before turning
 const adv = isDbl => (isDbl ? TILE_W : TILE_L) + GAP;
 
 export class Board3D {
-  constructor(canvas, { onMarkerClick, onBoardMiss } = {}) {
+  constructor(canvas, { onMarkerClick, onBoardMiss, onBoneyardClick } = {}) {
     this.onMarkerClick = onMarkerClick;
     this.onBoardMiss = onBoardMiss;
+    this.onBoneyardClick = onBoneyardClick;
+    this.canDraw = false;
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -51,6 +53,12 @@ export class Board3D {
     rim.position.set(-8, 6, -6);
     this.scene.add(rim);
 
+    // Warm invite spotlight on boneyard when drawing is possible
+    this.boneLight = new THREE.PointLight(0xf4c055, 0, 12);
+    this.boneLight.position.set(10.5, 3.5, 7.0);
+    this.boneLight.visible = false;
+    this.scene.add(this.boneLight);
+
     this._buildTable();
 
     // groups
@@ -80,6 +88,19 @@ export class Board3D {
       const maxDist = e.pointerType === 'touch' ? 32 : 10;
       if (dist < maxDist && dur < 700) {
         this._pick(e);
+      }
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (!this.canDraw || !this.boneGroup || this.boneGroup.children.length === 0) return;
+      const r = this.renderer.domElement.getBoundingClientRect();
+      this._pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+      this._raycaster.setFromCamera(this._pointer, this.camera);
+      const boneTargets = this.boneGroup.children.filter(o => o.userData && o.userData.isBoneyard);
+      const hits = this._raycaster.intersectObjects(boneTargets, false);
+      if (hits.length > 0) {
+        this.renderer.domElement.style.cursor = 'pointer';
+      } else if (this.renderer.domElement.style.cursor === 'pointer') {
+        this.renderer.domElement.style.cursor = 'default';
       }
     });
     window.addEventListener('resize', () => this.resize());
@@ -324,17 +345,94 @@ export class Board3D {
     this._fitCamera(spots);
   }
 
+  setCanDraw(canDraw) {
+    this.canDraw = !!canDraw;
+    if (this.boneLight) {
+      this.boneLight.visible = this.canDraw;
+      if (!this.canDraw) this.boneLight.intensity = 0;
+    }
+    if (!this.canDraw && this.renderer?.domElement?.style?.cursor === 'pointer') {
+      this.renderer.domElement.style.cursor = 'default';
+    }
+  }
+
   _syncBoneyard(count = 0) {
-    if (count === this._boneCount) return;
+    if (count === this._boneCount && this.boneGroup.children.length > 0) return;
     this._boneCount = count;
     this.boneGroup.clear();
-    const shown = Math.min(count, 7);
-    for (let i = 0; i < shown; i++) {
+    const cols = 7;
+    for (let i = 0; i < count; i++) {
+      const row = Math.floor(i / cols);
+      const col = i % cols;
+      const x = 7.5 + col * 0.98;
+      const z = 6.0 + row * 2.15;
+      const jitterRot = (Math.sin(i * 137.5) * 0.05);
+
       const m = this._tileMesh(0, 0, false);
-      m.position.set(11.5 + (i % 3) * 1.3, (i % 2) * 0.1, 6.5 + Math.floor(i / 3) * 2.4);
-      m.rotation.y = Math.PI / 2 + (Math.random() - .5) * 0.25;
+      m.position.set(x, 0, z);
+      m.rotation.y = jitterRot;
+      m.userData = { isBoneyard: true, index: i };
+      m.castShadow = true;
+      m.receiveShadow = true;
       this.boneGroup.add(m);
+
+      // Hit area mesh for forgiving touch/mouse clicks
+      const hit = new THREE.Mesh(
+        new THREE.BoxGeometry(TILE_W * 1.3, 1.8, TILE_L * 1.3),
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
+      );
+      hit.position.set(x, 0.6, z);
+      hit.rotation.y = jitterRot;
+      hit.userData = { isBoneyard: true, index: i, targetMesh: m };
+      this.boneGroup.add(hit);
     }
+  }
+
+  animateDraw(drawnTile, isMe, sourceMesh = null) {
+    // 1. Determine starting position from sourceMesh or the last visible boneyard tile
+    let startPos = new THREE.Vector3(10.5, 0.21, 7.0);
+    let startRotY = 0;
+    if (sourceMesh && sourceMesh.isMesh) {
+      startPos.copy(sourceMesh.position);
+      startRotY = sourceMesh.rotation.y;
+      this.boneGroup.remove(sourceMesh);
+    } else {
+      const visibleBones = this.boneGroup.children.filter(c => c.isMesh && !c.userData.isHitArea);
+      if (visibleBones.length > 0) {
+        const last = visibleBones[visibleBones.length - 1];
+        startPos.copy(last.position);
+        startRotY = last.rotation.y;
+        this.boneGroup.remove(last);
+      }
+    }
+
+    // 2. Create the tile mesh:
+    // When isMe: Bottom face (-Y) has tileFaceCanvas(a, b), top face (+Y) has tileBackCanvas().
+    // Rotating 180° around Z flips the tile so the face with pips turns upward!
+    const mesh = isMe && drawnTile
+      ? this._tileMesh(drawnTile.a, drawnTile.b, false)
+      : this._tileMesh(0, 0, false);
+
+    mesh.position.copy(startPos);
+    mesh.rotation.set(0, startRotY, 0);
+    this.scene.add(mesh);
+
+    const anim = {
+      mesh,
+      isMe,
+      drawnTile,
+      startPos,
+      startRotY,
+      midPos: new THREE.Vector3(0, 5.2, 4.8),
+      endPos: isMe ? new THREE.Vector3(0, -1.0, 11.5) : new THREE.Vector3(0, 3.5, -8.0),
+      dur1: isMe ? 0.45 : 0.38,  // Phase 1: Lift & Flip
+      dur2: isMe ? 0.40 : 0.0,   // Phase 2: Pause in air to admire the pips
+      dur3: isMe ? 0.35 : 0.25,  // Phase 3: Glide into 2D hand (or opponent's side)
+      t: 0,
+      kind: 'draw',
+    };
+    anim.totalDur = anim.dur1 + anim.dur2 + anim.dur3;
+    this._anims.push(anim);
   }
 
   _fitCamera(spots) {
@@ -392,41 +490,77 @@ export class Board3D {
   clearMarkers() { this.markerGroup.clear(); }
 
   _pick(e) {
-    if (!this.markerGroup || this.markerGroup.children.length === 0) return;
     const r = this.renderer.domElement.getBoundingClientRect();
     this._pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     this._raycaster.setFromCamera(this._pointer, this.camera);
-    const hitTargets = this.markerGroup.children.filter(o => o.userData && o.userData.end !== undefined);
-    const hits = this._raycaster.intersectObjects(hitTargets, false);
-    if (hits.length) {
-      const hit = hits.find(h => h.object && h.object.userData && h.object.userData.end !== undefined);
-      if (hit) {
-        this.onMarkerClick?.(hit.object.userData.end);
+
+    // 1. Check ghost markers if move is active
+    if (this.markerGroup && this.markerGroup.children.length > 0) {
+      const hitTargets = this.markerGroup.children.filter(o => o.userData && o.userData.end !== undefined);
+      const hits = this._raycaster.intersectObjects(hitTargets, false);
+      if (hits.length) {
+        const hit = hits.find(h => h.object && h.object.userData && h.object.userData.end !== undefined);
+        if (hit) {
+          this.onMarkerClick?.(hit.object.userData.end);
+          return;
+        }
+      }
+
+      // 2D screen distance fallback for markers
+      const v = new THREE.Vector3();
+      let bestEnd = null, minDist = Infinity;
+      for (const t of hitTargets) {
+        if (!t.userData.isHitArea) continue;
+        t.getWorldPosition(v);
+        v.project(this.camera);
+        if (v.z > 1) continue;
+        const screenX = ((v.x + 1) / 2) * r.width + r.left;
+        const screenY = ((-v.y + 1) / 2) * r.height + r.top;
+        const screenDist = Math.hypot(e.clientX - screenX, e.clientY - screenY);
+        if (screenDist < minDist) {
+          minDist = screenDist;
+          bestEnd = t.userData.end;
+        }
+      }
+      if (minDist < 75 && bestEnd !== null) {
+        this.onMarkerClick?.(bestEnd);
         return;
       }
     }
 
-    // 2D screen distance fallback for touchscreens:
-    // If finger lands within 75px of the marker on screen, register as hit
-    const v = new THREE.Vector3();
-    let bestEnd = null, minDist = Infinity;
-    for (const t of hitTargets) {
-      if (!t.userData.isHitArea) continue;
-      t.getWorldPosition(v);
-      v.project(this.camera);
-      if (v.z > 1) continue;
-      const screenX = ((v.x + 1) / 2) * r.width + r.left;
-      const screenY = ((-v.y + 1) / 2) * r.height + r.top;
-      const screenDist = Math.hypot(e.clientX - screenX, e.clientY - screenY);
-      if (screenDist < minDist) {
-        minDist = screenDist;
-        bestEnd = t.userData.end;
+    // 2. Check boneyard click if player must draw
+    if (this.canDraw && this.boneGroup && this.boneGroup.children.length > 0) {
+      const boneTargets = this.boneGroup.children.filter(o => o.userData && o.userData.isBoneyard);
+      const hits = this._raycaster.intersectObjects(boneTargets, false);
+      if (hits.length > 0) {
+        const hit = hits[0].object;
+        const targetMesh = hit.userData.targetMesh || hit;
+        this.onBoneyardClick?.(targetMesh);
+        return;
+      }
+
+      // 2D screen distance fallback for boneyard
+      const v = new THREE.Vector3();
+      let bestBone = null, minBoneDist = Infinity;
+      for (const t of boneTargets) {
+        t.getWorldPosition(v);
+        v.project(this.camera);
+        if (v.z > 1) continue;
+        const screenX = ((v.x + 1) / 2) * r.width + r.left;
+        const screenY = ((-v.y + 1) / 2) * r.height + r.top;
+        const screenDist = Math.hypot(e.clientX - screenX, e.clientY - screenY);
+        if (screenDist < minBoneDist) {
+          minBoneDist = screenDist;
+          bestBone = t.userData.targetMesh || t;
+        }
+      }
+      if (minBoneDist < 65 && bestBone) {
+        this.onBoneyardClick?.(bestBone);
+        return;
       }
     }
-    if (minDist < 75 && bestEnd !== null) {
-      this.onMarkerClick?.(bestEnd);
-      return;
-    }
+
+    this.onBoardMiss?.();
   }
 
   // ── loop ──
@@ -435,22 +569,85 @@ export class Board3D {
     const dt = Math.min(this.clock ? (performance.now() - this.clock) / 1000 : 0.016, 0.05);
     this.clock = performance.now();
 
-    // pulse markers
     const t = performance.now() / 1000;
+
+    // pulse ghost markers
     for (const o of this.markerGroup.children) {
       if (o.isMesh && !o.userData.isHitArea) o.material.opacity = 0.26 + Math.sin(t * 4) * 0.12;
       else if (o.isPointLight) o.intensity = 3 + Math.sin(t * 4) * 1.5;
     }
 
-    // drop animations
+    // pulse warm boneyard light when canDraw is true
+    if (this.canDraw && this.boneLight) {
+      this.boneLight.intensity = 3.5 + Math.sin(t * 6) * 1.8;
+    }
+
+    // process active animations
     this._anims = this._anims.filter(a => {
       a.t += dt;
-      const k = Math.min(a.t / a.dur, 1);
-      const e2 = 1 - (1 - k) ** 3;
-      a.mesh.position.y = 7 * (1 - e2);
-      a.mesh.rotation.x = 0.6 * (1 - e2);
-      if (k >= 1) { a.mesh.position.y = 0; a.mesh.rotation.x = 0; return false; }
-      return true;
+
+      if (a.kind === 'drop') {
+        const k = Math.min(a.t / a.dur, 1);
+        const e2 = 1 - (1 - k) ** 3;
+        a.mesh.position.y = 7 * (1 - e2);
+        a.mesh.rotation.x = 0.6 * (1 - e2);
+        if (k >= 1) { a.mesh.position.y = 0; a.mesh.rotation.x = 0; return false; }
+        return true;
+      }
+
+      if (a.kind === 'draw') {
+        const { isMe, mesh, startPos, midPos, endPos, startRotY, dur1, dur2, dur3, totalDur } = a;
+        if (a.t >= totalDur) {
+          this.scene.remove(mesh);
+          mesh.geometry?.dispose?.();
+          return false;
+        }
+
+        if (a.t < dur1) {
+          // Phase 1: Lift from boneyard into air, flipping 180° around Z to reveal face
+          const k = a.t / dur1;
+          const ease = 1 - (1 - k) ** 3; // cubic ease out
+          mesh.position.lerpVectors(startPos, midPos, ease);
+          if (isMe) {
+            mesh.rotation.z = ease * Math.PI;               // 180° flip (showing face)
+            mesh.rotation.x = ease * 0.45;                  // tilt up toward camera
+            mesh.rotation.y = (1 - ease) * startRotY;
+            const s = 1.0 + ease * 0.35;                    // enlarge slightly for clarity
+            mesh.scale.set(s, s, s);
+          } else {
+            mesh.rotation.y = (1 - ease) * startRotY;
+            mesh.position.y = startPos.y + ease * 3.0;
+          }
+        } else if (a.t < dur1 + dur2) {
+          // Phase 2: Pause hovering in air to admire the drawn domino pips
+          const k = (a.t - dur1) / dur2;
+          const bob = Math.sin(k * Math.PI) * 0.12;
+          mesh.position.set(midPos.x, midPos.y + bob, midPos.z);
+          if (isMe) {
+            mesh.rotation.z = Math.PI;
+            mesh.rotation.x = 0.45;
+            mesh.rotation.y = 0;
+            mesh.scale.set(1.35, 1.35, 1.35);
+          }
+        } else {
+          // Phase 3: Glide smoothly into the hand dock at the bottom
+          const k = (a.t - dur1 - dur2) / dur3;
+          const ease = k * k; // quadratic ease in
+          mesh.position.lerpVectors(midPos, endPos, ease);
+          if (isMe) {
+            mesh.rotation.z = Math.PI;
+            mesh.rotation.x = 0.45 + ease * -0.25;
+            const s = 1.35 * (1 - ease * 0.65);
+            mesh.scale.set(s, s, s);
+          } else {
+            const s = Math.max(0.01, 1 - ease);
+            mesh.scale.set(s, s, s);
+          }
+        }
+        return true;
+      }
+
+      return false;
     });
 
     // camera easing toward fit

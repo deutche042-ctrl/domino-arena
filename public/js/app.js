@@ -1,7 +1,7 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=10';
-import { tileImage } from './tiles.js?v=10';
-import { sfx } from './sfx.js?v=10';
+import { Board3D } from './board3d.js?v=11';
+import { tileImage } from './tiles.js?v=11';
+import { sfx } from './sfx.js?v=11';
 
 const $ = id => document.getElementById(id);
 const VARIANT_DESC = {
@@ -13,6 +13,8 @@ const VARIANT_DESC = {
 // ── state ──
 let socket, myId, myToken, roomCode, isHost = false, lastLobbyState = null;
 let view = null;
+let prevHand = [];
+let newlyDrawnTileId = null;
 let selectedTile = null;
 let board = null;
 let lastActionKey = '';
@@ -23,7 +25,7 @@ function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   $(`screen-${name}`).classList.add('active');
   if (name === 'game' && !board) {
-    board = new Board3D($('table3d'), { onMarkerClick, onBoardMiss });
+    board = new Board3D($('table3d'), { onMarkerClick, onBoardMiss, onBoneyardClick: onBoneyardDraw });
   }
   if (name === 'game') setTimeout(() => board?.resize(), 50);
 }
@@ -177,6 +179,7 @@ function lobbyError(msg) { $('lobbyError').textContent = msg || ''; }
 function renderGame() {
   if (!view) return;
   board?.sync(view);
+  board?.setCanDraw(view.turn === myId && view.status === 'playing' && view.canDraw);
   renderScoreboard();
   renderOpponents();
   renderHand();
@@ -184,6 +187,7 @@ function renderGame() {
   renderTurnBanner();
   renderModals();
   playActionSounds();
+  prevHand = [...(view.hand || [])];
 }
 
 function renderScoreboard() {
@@ -250,6 +254,9 @@ function renderHand() {
   for (const t of view.hand) {
     const el = document.createElement('div');
     el.className = 'tile-h';
+    if (newlyDrawnTileId && t.id === newlyDrawnTileId) {
+      el.classList.add('newly-drawn');
+    }
     el.style.backgroundImage = `url(${tileImage(t.a, t.b)})`;
     if (myTurn) {
       if (playableIds.has(t.id)) el.classList.add('playable');
@@ -279,8 +286,17 @@ function renderTurnBanner() {
   const b = $('turnBanner');
   if (view.status !== 'playing') { b.textContent = ''; b.className = ''; return; }
   if (view.turn === myId) {
-    b.textContent = view.leadForcedTile ? 'دورك — العب الكارت المحدد للبداية'
-      : view.moves.length === 0 ? 'دورك — اختر أي كارت لبدء اللعبة' : 'دورك الآن';
+    if (view.leadForcedTile) {
+      b.textContent = 'دورك — العب الكارت المحدد للبداية';
+    } else if (view.moves.length === 0) {
+      b.textContent = 'دورك — اختر أي كارت لبدء اللعبة';
+    } else if (view.canDraw) {
+      b.textContent = 'دورك — اسحب كارت من الطاولة بالنقر عليه';
+    } else if (view.canPass) {
+      b.textContent = 'دورك — لا يوجد لعب متاح، اضغط تمرير (باص)';
+    } else {
+      b.textContent = 'دورك الآن';
+    }
     b.className = 'mine';
   } else {
     b.textContent = `دور ${view.names[view.turn] || 'اللاعب'}`;
@@ -332,12 +348,32 @@ function renderModals() {
 function playActionSounds() {
   const la = view.lastAction;
   if (!la) return;
-  const key = JSON.stringify(la) + view.moves.length + view.status;
+  const key = JSON.stringify(la) + view.moves.length + view.status + (view.boneyardCount ?? '');
   if (key === lastActionKey) return;
   const wasMyTurn = prevTurnKey === myId;
   lastActionKey = key;
   if (la.type === 'place') { sfx.place(); if (la.scored) { sfx.score(); floatText(`+${la.scored}`); } }
-  else if (la.type === 'draw') sfx.draw();
+  else if (la.type === 'draw') {
+    sfx.draw();
+    const isMe = la.pid === myId;
+    let drawnTile = null;
+    if (isMe) {
+      const prevIds = new Set(prevHand.map(t => t.id));
+      drawnTile = (view.hand || []).find(t => !prevIds.has(t.id)) || view.hand?.[view.hand.length - 1];
+      if (drawnTile) {
+        newlyDrawnTileId = drawnTile.id;
+        setTimeout(() => {
+          if (newlyDrawnTileId === drawnTile.id) {
+            newlyDrawnTileId = null;
+            renderHand();
+          }
+        }, 1200);
+      }
+    } else {
+      floatText(`${view.names[la.pid] || 'لاعب'}: سحب كارت`);
+    }
+    board?.animateDraw(drawnTile, isMe);
+  }
   else if (la.type === 'pass') { sfx.pass(); if (la.pid !== myId) floatText(`${view.names[la.pid] || 'لاعب'}: باص`); }
   else if (la.type === 'handEnd') sfx.handWin();
   else if (la.type === 'matchEnd') sfx.matchWin();
@@ -347,6 +383,11 @@ function playActionSounds() {
 let prevTurnKey = null;
 
 // ══════════ interaction ══════════
+function onBoneyardDraw(targetMesh) {
+  if (!view || view.status !== 'playing' || view.turn !== myId || !view.canDraw) return;
+  socket.emit('game:draw');
+  sfx.click();
+}
 function onTileClick(tile, el) {
   if (!view || view.status !== 'playing' || view.turn !== myId) {
     el.classList.add('shake'); setTimeout(() => el.classList.remove('shake'), 300);

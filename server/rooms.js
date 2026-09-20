@@ -23,7 +23,7 @@ export class RoomManager {
       code,
       hostId: player.id,
       state: 'lobby', // 'lobby' | 'playing'
-      config: { variant: 'block', targetScore: 100, maxPlayers: 4 },
+      config: { variant: 'draw', targetScore: 100, maxPlayers: 4 },
       players: [player],
       game: null,
       createdAt: Date.now(),

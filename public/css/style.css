@@ -571,6 +571,15 @@ input:focus, select:focus { border-color: var(--accent); }
 @keyframes shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-5px)} 75%{transform:translateX(5px)} }
 .tile-h.shake { animation: shake .25s; }
 
+@keyframes drawnPop {
+  0% { transform: scale(0.6) translateY(24px); opacity: 0; }
+  60% { transform: scale(1.12) translateY(-8px); opacity: 1; filter: drop-shadow(0 0 10px rgba(247, 179, 43, 0.8)); }
+  100% { transform: scale(1) translateY(0); opacity: 1; }
+}
+.tile-h.newly-drawn {
+  animation: drawnPop 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
 /* ── FLOATING CHAT TOASTS (SPEECH BUBBLES - 5 SECONDS) ── */
 .chat-toasts-container {
   position: absolute;
