@@ -281,12 +281,24 @@ export class DominoGame {
       this.scores[winnerId] += points;
     }
     this._lastHandWinner = winnerId || null;
+
+    // Guard against an un-winnable match: in Block, repeated blocked hands that
+    // tie on pips (winnerId null, 0 points) can stall the scoreboard forever.
+    if (!winnerId && points === 0) this._scorelessHands = (this._scorelessHands || 0) + 1;
+    else this._scorelessHands = 0;
+
     this.handResult = {
       blocked, winnerId, points,
       pips: Object.fromEntries(this.playerIds.map(id => [id, this.handPips(id)])),
     };
     this.lastAction = { type: 'handEnd', ...this.handResult };
     if (winnerId && this.scores[winnerId] >= this.targetScore) return this._endMatch(winnerId);
+
+    // Stalled match: end it and award the win to the current points leader.
+    if (this._scorelessHands >= 3) {
+      const leader = this.playerIds.slice().sort((x, y) => this.scores[y] - this.scores[x])[0];
+      return this._endMatch(leader);
+    }
     this.status = 'handEnd';
   }
 

@@ -242,6 +242,27 @@ test('allfives: match ends immediately when target hit mid-hand', () => {
   assert.equal(g.matchWinnerId, 'a');
 });
 
+test('block: repeated blocked ties cannot stall the match forever', () => {
+  // Regression: in Block with 3 players, when every hand ends blocked with a
+  // pip tie (no winner, 0 points), scores never advance and the match could
+  // previously loop indefinitely. The engine must force a conclusion.
+  const g = new DominoGame({ variant: 'block', playerIds: ['a', 'b', 'c'], seed: 56487 });
+  let hands = 0;
+  while (g.status !== 'matchEnd' && hands++ < 60) {
+    let guard = 0;
+    while (g.status === 'playing' && guard++ < 2000) {
+      const pid = g.turn;
+      const mv = g.legalMoves(pid);
+      if (mv.length) g.play(pid, mv[0].tileId, mv[0].end);
+      else if (g.canDraw(pid)) g.draw(pid);
+      else g.pass(pid);
+    }
+    if (g.status === 'handEnd') g.nextHand(56487);
+  }
+  assert.equal(g.status, 'matchEnd');
+  assert.ok(g.matchWinnerId, 'a winner is declared even in a stalled match');
+});
+
 test('fuzz: 300 random games per variant complete without errors', () => {
   for (const variant of ['block', 'draw', 'allfives']) {
     for (let s = 1; s <= 300; s++) {

@@ -164,11 +164,18 @@ io.on('connection', (socket) => {
 
   // ---- chat ----
 
+  // Simple per-socket rate limit: max 5 messages per 3 seconds (prevents spam floods).
+  let chatWindowStart = 0;
+  let chatCount = 0;
   socket.on('chat:send', ({ text, emoji } = {}) => {
     const { room, playerId } = currentCtx(socket);
     if (!room) return;
+    const now = Date.now();
+    if (now - chatWindowStart > 3000) { chatWindowStart = now; chatCount = 0; }
+    if (++chatCount > 5) return;
     const p = room.players.find(p => p.id === playerId);
-    const msg = { from: p.name, pid: p.id, at: Date.now() };
+    if (!p) return;
+    const msg = { from: p.name, pid: p.id, at: now };
     if (typeof text === 'string' && text.trim()) msg.text = text.trim().slice(0, 200);
     else if (typeof emoji === 'string' && emoji.length <= 8) msg.emoji = emoji;
     else return;

@@ -38,7 +38,7 @@ cloudflared tunnel --url http://localhost:3000         # public URL
 
 ```bash
 npm install
-npm test          # engine unit tests (15)
+npm test          # engine unit tests (17)
 npm run e2e 3100  # full protocol test against a running server on :3100
 ```
 

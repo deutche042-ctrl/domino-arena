@@ -11,7 +11,7 @@ const VARIANT_DESC = {
 };
 
 // ── state ──
-let socket, myId, myToken, roomCode, isHost = false, lastLobbyState = null;
+let socket, myId, myToken, myName, roomCode, isHost = false, lastLobbyState = null;
 let view = null;
 let prevHand = [];
 let newlyDrawnTileId = null;
@@ -98,7 +98,7 @@ function getName() {
 function homeError(msg) { $('homeError').textContent = msg || ''; }
 
 function afterJoin(res, name) {
-  myId = res.playerId; myToken = res.token; roomCode = res.code;
+  myId = res.playerId; myToken = res.token; myName = name; roomCode = res.code;
   sessionStorage.setItem('domino_token_' + roomCode, myToken);
   localStorage.setItem('domino_token_' + roomCode, myToken);
   localStorage.setItem('domino_last_code', roomCode);
@@ -697,7 +697,15 @@ function boot() {
   });
   socket.on('disconnect', () => { $('connPill').className = 'bad'; });
   socket.on('lobby:state', renderLobby);
-  socket.on('game:started', () => { showScreen('game'); sfx.start(); });
+  socket.on('game:started', () => {
+    // Fresh match: clear per-game transient UI state so a rematch starts clean.
+    selectedTile = null;
+    newlyDrawnTileId = null;
+    lastActionKey = '';
+    prevTurnKey = null;
+    showScreen('game');
+    sfx.start();
+  });
   socket.on('game:state', (st) => { view = st; isHost = st.hostId === myId; renderGame(); });
   socket.on('chat:msg', onChatMsg);
   socket.on('error', (e) => {
