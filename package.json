@@ -1,0 +1,22 @@
+{
+  "name": "domino-arena",
+  "version": "1.0.0",
+  "description": "Online multiplayer dominoes (Block / Draw / All Fives) over Cloudflare Tunnel",
+  "type": "module",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "test": "node --test tests/engine.test.js",
+    "e2e": "node scripts/e2e.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
+  }
+}

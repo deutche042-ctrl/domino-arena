@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>دومينو أرينا | Domino Arena</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=Reem+Kufi:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css?v=10">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.8.1/dist/socket.io.min.js"></script>
+</head>
+<body>
+
+<!-- ══════════ HOME ══════════ -->
+<section id="screen-home" class="screen active">
+  <div class="hero-tiles" id="heroTiles"></div>
+  <div class="home-card">
+    <h1 class="logo">🁢 دومينو <span>أرينا</span></h1>
+    <p class="tagline">العب الدومينو أونلاين في الوقت الفعلي مع أصحابك — برابط مباشر وبدون أي تثبيت.</p>
+    <input id="inpName" maxlength="16" placeholder="اكتب اسمك هنا..." autocomplete="off">
+    <div class="home-actions">
+      <button id="btnCreate" class="btn primary">إنشاء غرفة</button>
+      <div class="join-row">
+        <input id="inpCode" maxlength="4" placeholder="الكود" autocomplete="off">
+        <button id="btnJoin" class="btn">انضمام</button>
+      </div>
+    </div>
+    <p id="homeError" class="error"></p>
+  </div>
+  <footer class="home-foot">عادي (Block) · سحب (Draw) · خمسات (All Fives) — من 2 إلى 4 لاعبين</footer>
+</section>
+
+<!-- ══════════ LOBBY ══════════ -->
+<section id="screen-lobby" class="screen">
+  <div class="hero-tiles" id="lobbyHeroTiles"></div>
+  <div class="lobby-card">
+    <h2>غرفة الانتظار</h2>
+    <div class="code-box">
+      <div class="code-wrap">
+        <span class="code-sub">كود الغرفة</span>
+        <div class="code" id="lobbyCode">----</div>
+      </div>
+      <div class="code-actions">
+        <button id="btnCopyCode" class="btn small">نسخ الكود</button>
+        <button id="btnCopyLink" class="btn small">نسخ رابط الدعوة</button>
+      </div>
+    </div>
+    <ul id="lobbyPlayers" class="player-list"></ul>
+    <div id="hostConfig" class="host-config hidden">
+      <label>نوع اللعبة
+        <select id="selVariant">
+          <option value="block">عادي (كلاسيك)</option>
+          <option value="draw">سحب (Draw)</option>
+          <option value="allfives">خمسات (مضاعفات 5)</option>
+        </select>
+      </label>
+      <label>نقاط الفوز
+        <select id="selTarget">
+          <option>50</option><option selected>100</option><option>150</option>
+          <option>200</option><option>250</option>
+        </select>
+      </label>
+      <label>الحد الأقصى للاعبين
+        <select id="selMax">
+          <option>2</option><option>3</option><option selected>4</option>
+        </select>
+      </label>
+    </div>
+    <p id="variantDesc" class="variant-desc"></p>
+    <div class="lobby-actions">
+      <button id="btnReady" class="btn">أنا جاهز</button>
+      <button id="btnStart" class="btn primary hidden">بدء اللعبة</button>
+    </div>
+    <p id="lobbyError" class="error"></p>
+  </div>
+</section>
+
+<!-- ══════════ GAME ══════════ -->
+<section id="screen-game" class="screen">
+  <canvas id="table3d"></canvas>
+
+  <div id="hud">
+    <div id="scoreboard" class="panel"></div>
+    <div id="endsPill" class="hidden">الأطراف: <b id="endsTotal">0</b></div>
+    <div id="turnBanner"></div>
+    <div class="hud-right">
+      <div id="connPill" class="ok" title="حالة الاتصال">●</div>
+      <button id="btnFullscreen" class="hud-btn" title="ملء الشاشة" aria-label="تبديل ملء الشاشة">
+        <svg class="icon-expand" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
+        </svg>
+        <svg class="icon-compress" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"></path>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div id="actionBar">
+    <button id="btnDraw" class="btn hidden">سحب <span id="boneyardCount"></span></button>
+    <button id="btnPass" class="btn hidden">تمرير (باص)</button>
+  </div>
+
+  <div id="handWrap"><div id="hand"></div></div>
+
+  <button id="btnChat" class="fab" title="الدردشة والإيموجي">
+    <span class="fab-icon">💬</span>
+  </button>
+
+  <div id="chatDrawer" class="hidden">
+    <div class="chat-header">
+      <div class="chat-header-title">
+        <span class="chat-header-icon">💬</span>
+        <span>محادثة الطاولة</span>
+      </div>
+      <button id="chatClose" class="chat-close-btn" aria-label="إغلاق">✕</button>
+    </div>
+    <div id="chatMsgs"></div>
+    <div class="chat-emoji-wrap">
+      <div id="emojiBar" class="emoji-scroll">
+        <button type="button">😂</button>
+        <button type="button">🔥</button>
+        <button type="button">👏</button>
+        <button type="button">😎</button>
+        <button type="button">😮</button>
+        <button type="button">😢</button>
+        <button type="button">🎉</button>
+        <button type="button">🤝</button>
+        <button type="button">🧠</button>
+        <button type="button">🤫</button>
+      </div>
+    </div>
+    <div class="chat-input-row">
+      <input id="chatInput" maxlength="200" placeholder="اكتب رسالة…" autocomplete="off">
+      <button id="chatSend" class="chat-send-btn" title="إرسال">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+          <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div id="chatToasts" class="chat-toasts-container"></div>
+  <div id="floatLayer"></div>
+
+  <!-- hand end modal -->
+  <div id="modalHand" class="modal hidden">
+    <div class="modal-card">
+      <h2 id="handTitle">انتهت الجولة</h2>
+      <div id="handBreakdown"></div>
+      <button id="btnNextHand" class="btn primary hidden">الجولة التالية</button>
+      <p id="handWait" class="muted hidden">في انتظار المضيف لبدء الجولة…</p>
+    </div>
+  </div>
+
+  <!-- match end modal -->
+  <div id="modalMatch" class="modal hidden">
+    <div class="modal-card">
+      <h2>🏆 <span id="matchWinner"></span> فاز بالمباراة!</h2>
+      <div id="matchStandings"></div>
+      <canvas id="confetti"></canvas>
+      <button id="btnRematch" class="btn primary hidden">مباراة جديدة</button>
+      <p id="matchWait" class="muted hidden">في انتظار المضيف…</p>
+    </div>
+  </div>
+</section>
+
+<script type="module" src="js/app.js?v=10"></script>
+</body>
+</html>
