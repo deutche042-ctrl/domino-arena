@@ -281,6 +281,17 @@ input:focus, select:focus { border-color: var(--accent); }
 .lobby-actions { display: flex; gap: 12px; justify-content: center; }
 .lobby-actions .btn { flex: 1; padding: 13px; font-size: 16px; font-weight: 800; }
 #btnStart:not(:disabled) { animation: startGlow 2.2s ease-in-out infinite; }
+
+/* leave-room button (lobby) */
+.leave-btn {
+  margin-top: 2px; width: 100%;
+  background: transparent; border-color: rgba(255,92,122,.35);
+  color: var(--danger); font-weight: 700; font-size: 14px; padding: 10px;
+}
+.leave-btn:hover {
+  background: rgba(255,92,122,.1); border-color: rgba(255,92,122,.6);
+  box-shadow: 0 6px 18px rgba(255,92,122,.15);
+}
 @keyframes startGlow {
   0%,100% { box-shadow: 0 6px 18px rgba(0,0,0,.4); }
   50% { box-shadow: 0 6px 26px rgba(247,179,43,.5); }

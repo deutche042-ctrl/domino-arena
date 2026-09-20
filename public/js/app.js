@@ -167,6 +167,20 @@ function initLobby() {
   $('btnStart').onclick = () => emit('game:start').then(res => {
     if (res && !res.ok) lobbyError(res.error);
   });
+  $('btnLeave').onclick = () => {
+    // Stop auto-rejoin BEFORE telling the server, so a fast reconnect can't pull us back in.
+    sessionStorage.removeItem('domino_token_' + roomCode);
+    localStorage.removeItem('domino_token_' + roomCode);
+    localStorage.removeItem('domino_last_code');
+    emit('room:leave').catch(() => {});
+    myId = myToken = roomCode = null;
+    isHost = false;
+    lastLobbyState = null;
+    history.replaceState(null, '', location.pathname);
+    homeError('');
+    showScreen('home');
+    sfx.click();
+  };
   for (const id of ['selVariant', 'selTarget', 'selMax']) {
     $(id).onchange = () => emit('lobby:config', {
       variant: $('selVariant').value,

@@ -84,6 +84,32 @@ io.on('connection', (socket) => {
     if (room.state === 'playing') broadcastGame(room);
   });
 
+  // Leave the room entirely (lobby: remove player; in-game: mark disconnected)
+  socket.on('room:leave', (_, cb) => {
+    const s = sessions.get(socket.id);
+    if (!s) return cb?.({ ok: true });
+    sessions.delete(socket.id);
+    const room = manager.getRoom(s.roomCode);
+    socket.leave(s.roomCode);
+    if (!room) return cb?.({ ok: true });
+    const p = room.players.find(p => p.id === s.playerId);
+    if (p) {
+      if (room.state === 'lobby') {
+        const res = manager.removePlayer(room, p.id);
+        if (!res.empty) broadcastLobby(room);
+      } else {
+        p.connected = false;
+        p.socketId = null;
+        if (room.hostId === p.id) {
+          const next = room.players.find(x => x.connected);
+          if (next) room.hostId = next.id;
+        }
+        broadcastGame(room);
+      }
+    }
+    cb?.({ ok: true });
+  });
+
   socket.on('lobby:config', (config = {}, cb) => {
     const { room, playerId } = currentCtx(socket);
     if (!room) return;
