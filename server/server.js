@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import os from 'node:os';
 import { RoomManager, TURN_MS } from './rooms.js';
 import { IllegalMove } from '../engine/game.js';
 import { chooseAction } from '../engine/bot.js';
@@ -18,9 +19,22 @@ app.use((req, res, next) => {
 });
 app.use(express.static(path.join(__dirname, '..', 'public'), { etag: false, maxAge: 0 }));
 
+// LAN debug aid: which addresses the phone/host is reachable on (hotspot IP to share).
+app.get('/host-info', (req, res) => {
+  const ips = [];
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family === 'IPv4' && !a.internal) ips.push(a.address);
+    }
+  }
+  res.json({ port: PORT, ips });
+});
+
 const http = createServer(app);
 const io = new Server(http, {
-  // long-polling fallback keeps the game working through any tunnel/proxy
+  // long-polling fallback keeps the game working through any tunnel/proxy;
+  // APK clients are on a localhost origin connecting to the LAN host — allow it
+  cors: { origin: true },
   transports: ['websocket', 'polling'],
 });
 
@@ -194,6 +208,11 @@ io.on('connection', (socket) => {
   // ---- lobby ----
 
   socket.on('room:create', ({ name, vsBots, botLevel, botDelayMs } = {}, cb) => {
+    // Unbounded room creation would let any LAN peer memory-DoS the host phone.
+    if (manager.rooms.size >= (Number(process.env.MAX_ROOMS) || 50)) {
+      cb?.({ ok: false, error: 'الغرف كتير أوي على الخادم — جرب كمان شوية' });
+      return;
+    }
     const { room, player } = manager.createRoom(name);
     player.socketId = socket.id;
     socket.join(room.code);

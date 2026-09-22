@@ -1683,3 +1683,32 @@ input:focus, select:focus { border-color: var(--accent); }
 }
 
 
+
+/* ── APK network status + advanced settings (home card) ── */
+.net-status {
+  margin-top: 10px;
+  color: var(--muted); font-size: 12.5px;
+  background: rgba(0,0,0,.25);
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 12px;
+  padding: 8px 12px;
+  text-align: center;
+  line-height: 1.5;
+}
+.net-status.ok { color: #7ddc9a; border-color: rgba(125,220,154,.25); }
+.net-status.warn { color: #f7b32b; border-color: rgba(247,179,43,.35); }
+.adv-toggle {
+  margin-top: 8px; background: none; border: none;
+  color: var(--muted); font-family: inherit; font-size: 12px;
+  cursor: pointer; opacity: .8;
+}
+.adv-toggle:hover { opacity: 1; }
+.adv-panel { margin-top: 6px; display: flex; flex-direction: column; gap: 8px; }
+.adv-panel input {
+  background: rgba(0,0,0,.3); border: 1px solid rgba(255,255,255,.12);
+  border-radius: 12px; color: inherit; font-family: inherit;
+  padding: 9px 12px; font-size: 13px; text-align: center;
+}
+.adv-panel input:focus { outline: none; border-color: rgba(247,179,43,.4); }
+.adv-row { display: flex; gap: 8px; justify-content: center; }
+.adv-row .btn { padding: 8px 14px; font-size: 13px; }

@@ -40,6 +40,12 @@ const RTC_CONFIG = {
   ],
 };
 
+// LAN mode (APK on a hotspot) overrides this with `{ iceServers: [] }` — peers are
+// on the same subnet so plain host candidates connect, and the internet STUN/TURN
+// relays above are unreachable offline anyway (they only add connect timeouts).
+let rtcConfig = RTC_CONFIG;
+export function setIceConfig(cfg) { rtcConfig = cfg || RTC_CONFIG; }
+
 const SPEAK_ON = 0.035;          // RMS threshold to light up
 const SPEAK_OFF = 0.02;          // lower threshold to go dark (hysteresis)
 const POLL_MS = 180;             // speaking-detection poll interval
@@ -470,7 +476,7 @@ export class VoiceChat {
 
   _createPeer(pid) {
     if (sameId(pid, this.myId)) return null; // never a peer to ourselves
-    const pc = new RTCPeerConnection(RTC_CONFIG);
+    const pc = new RTCPeerConnection(rtcConfig);
     const peer = {
       pid,
       pc,

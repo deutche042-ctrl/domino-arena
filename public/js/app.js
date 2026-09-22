@@ -3,7 +3,7 @@ import { Board3D } from './board3d.js?v=16';
 import { Home3D } from './home3d.js?v=2';
 import { tileImage } from './tiles.js?v=11';
 import { sfx } from './sfx.js?v=14';
-import { VoiceChat } from './voice.js?v=2';
+import { VoiceChat, setIceConfig } from './voice.js?v=3';
 
 const $ = id => document.getElementById(id);
 const VARIANT_DESC = {
@@ -1335,8 +1335,25 @@ function applyVoiceSupport() {
 }
 
 // ══════════ boot ══════════
-function boot() {
-  socket = io({ transports: ['websocket', 'polling'] });
+// Web mode: same-origin (browser / Cloudflare Tunnel) — today's behaviour, untouched.
+// APK mode: the embedded node launcher elects one host phone on the LAN; the WebView
+// polls its status endpoint and connects to whichever serverUrl the election produced.
+const IN_APP = typeof window.Capacitor !== 'undefined';
+const STATUS_URL = 'http://127.0.0.1:3001';
+let startedServerUrl = null;
+
+function isLanUrl(u) {
+  try { return /^(192\.168\.|127\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(new URL(u).hostname); }
+  catch { return false; }
+}
+
+function startSocket(base) {
+  socket = io(base || undefined, { transports: ['websocket', 'polling'] });
+  if (base && isLanUrl(base)) {
+    // Offline LAN: peers share a subnet, so plain host candidates connect — the
+    // internet STUN/TURN relays are unreachable and would only add timeouts.
+    setIceConfig({ iceServers: [] });
+  }
   initVoice();
   applyVoiceSupport();
 
@@ -1378,8 +1395,90 @@ function boot() {
   socket.on('error', (e) => {
     setBanner('⚠ ' + (e.message || 'خطأ'), '');
   });
+}
 
-  initHome(); initLobby(); initGameUI();
+// ── APK network glue: poll the embedded launcher until it elects/discovers a server.
+// Status contract (mobile launcher): GET 127.0.0.1:3001/status →
+// { status: 'electing'|'host'|'client'|'lost', serverUrl, ips }
+function netPill(html, cls = '') {
+  const el = $('netStatus');
+  if (!el) return;
+  el.className = 'net-status' + (cls ? ' ' + cls : '');
+  el.innerHTML = html;
+}
+
+function startAppNet() {
+  const manual = (localStorage.getItem('domino_manual_server') || '').trim();
+  if (manual) {
+    netPill('🔌 خادم مخصص: ' + manual);
+    startSocket(/^https?:\/\//.test(manual) ? manual : 'http://' + manual);
+    return;
+  }
+  const t0 = Date.now();
+  const tick = async () => {
+    let s = null;
+    try { s = await (await fetch(STATUS_URL + '/status')).json(); } catch { /* launcher not up yet */ }
+    if (s && (s.status === 'host' || s.status === 'client')) {
+      if (startedServerUrl && s.serverUrl !== startedServerUrl) {
+        // the election changed under us (host died, a new one won) — restart clean
+        location.reload();
+        return;
+      }
+      if (!startedServerUrl) {
+        startedServerUrl = s.serverUrl;
+        startSocket(s.serverUrl);
+        netPill(s.status === 'host'
+          ? '📡 أنت مضيف الشبكة' + (s.ips && s.ips[0] ? ' — ' + s.ips[0] : '') + ' — اعمل غرفة وشارك الكود'
+          : '🔌 اتصلت بخادم الشبكة تلقائياً', 'ok');
+      }
+    } else if (s && s.status === 'lost' && startedServerUrl) {
+      startedServerUrl = null;
+      netPill('⚠ فقدنا المضيف — بنعمل لعبة جديدة…', 'warn');
+      if (socket) { socket.disconnect(); socket = null; }
+    } else if (!startedServerUrl) {
+      const wait = Math.round((Date.now() - t0) / 1000);
+      netPill('🔍 جاري البحث عن لعبة على الشبكة…' + (wait > 3 ? ' (' + wait + ' ث)' : ''));
+      if (Date.now() - t0 > 10000) $('advToggle')?.classList.remove('hidden');
+    }
+    setTimeout(tick, 300);
+  };
+  tick();
+}
+
+// ── advanced settings (APK only): manual server address / re-run discovery
+function initAppNetUI() {
+  const toggle = $('advToggle');
+  if (!toggle || !IN_APP) return;
+  toggle.classList.remove('hidden');
+  toggle.onclick = () => {
+    sfx.click();
+    $('advPanel').classList.toggle('hidden');
+  };
+  const inp = $('inpManualServer');
+  inp.value = localStorage.getItem('domino_manual_server') || '';
+  $('btnSaveServer').onclick = () => {
+    sfx.click();
+    const v = inp.value.trim().replace(/^https?:\/\//, '');
+    if (v) localStorage.setItem('domino_manual_server', v);
+    else localStorage.removeItem('domino_manual_server');
+    location.reload();
+  };
+  $('btnClearServer').onclick = () => {
+    sfx.click();
+    localStorage.removeItem('domino_manual_server');
+    location.reload();
+  };
+  $('btnReelect').onclick = async () => {
+    sfx.click();
+    netPill('🔍 بنبحث من جديد…');
+    try { await fetch(STATUS_URL + '/reelect', { method: 'POST' }); } catch { /* ignore */ }
+    location.reload();
+  };
+}
+
+function boot() {
+  if (IN_APP) startAppNet(); else startSocket('');
+  initHome(); initLobby(); initGameUI(); initAppNetUI();
   setInterval(updateTurnTimer, 200);
 }
 
