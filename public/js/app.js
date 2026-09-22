@@ -1,7 +1,9 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=11';
+import { Board3D } from './board3d.js?v=15';
+import { Home3D } from './home3d.js?v=2';
 import { tileImage } from './tiles.js?v=11';
-import { sfx } from './sfx.js?v=11';
+import { sfx } from './sfx.js?v=14';
+import { VoiceChat } from './voice.js?v=2';
 
 const $ = id => document.getElementById(id);
 const VARIANT_DESC = {
@@ -17,8 +19,34 @@ let prevHand = [];
 let newlyDrawnTileId = null;
 let selectedTile = null;
 let board = null;
+let home3d = null, lobby3d = null;
 let lastActionKey = '';
-let chatOpen = false, unread = 0;
+let chatOpen = false, unread = 0, emojiPopOpen = false;
+let voice = null;                                  // VoiceChat, created in boot()
+let voiceSelf = { joined: false, muted: false, speaking: false };
+let voicePeers = [];                               // roster for the voice panel
+let voicePanelOpen = false;
+let voiceUnsupported = false;                      // mic unavailable (unsupported/insecure) — buttons disabled in boot()
+const speakingSet = new Set();                     // pids currently lit as speaking
+
+// ── chat content ──
+const CHAT_PHRASES = [
+  'سلام عليكم 👋', 'يلا نلعب 🔥', 'حظ سعيد 🍀', 'لعبة حلوة 👏',
+  'شطارة يا وحش 😎', 'يا سلام 😂', 'يا ساتر 😅', 'قعدة جميلة 🤝', 'هههههه 😂',
+];
+// curated ≤ Emoji-13 glyphs so they render on older Windows/Android too
+// the important ones, always visible above the input — one tap sends instantly
+const CHAT_QUICK_EMOJIS = ['😂', '🔥', '👏', '😎', '😮', '😢', '🎉', '🤝', '👍', '🍀'];
+const CHAT_EMOJI_GROUPS = [
+  ['وجوه', '😀 😄 😅 😂 🤣 😉 😊 😍 🤩 😎 🤔 😮 😴 😢 😭 😤 🤯 🥵 😇 🙃 🙄 😬 😁 🥴'],
+  ['إشارات', '👍 👎 👏 🙌 🤝 🙏 💪 ✌️ 🤞 🤙 👊 👋'],
+  ['قلوب', '❤️ 🧡 💛 💚 💙 💜 🖤 💔 💯 ✨ 🔥 ⭐ 🌟 💥'],
+  ['متفرقات', '🎉 🎊 🏆 🥇 🥈 🥉 🍀 🎯 🃏 🎲 🧠 👀 🤫 😈 🤡 💀'],
+].map(([cat, list]) => [cat, list.split(' ')]);
+// per-player identity colors (index = seat order in view.players)
+const CHAT_COLORS = ['247,179,43', '46,230,168', '122,165,255', '255,122,149'];
+let lastTimerKey = null, lastTickSec = null;
+let clockOffset = 0; // server clock minus client clock, captured per state
 
 // ══════════ screens ══════════
 function showScreen(name) {
@@ -28,6 +56,8 @@ function showScreen(name) {
     board = new Board3D($('table3d'), { onMarkerClick, onBoardMiss, onBoneyardClick: onBoneyardDraw });
   }
   if (name === 'game') setTimeout(() => board?.resize(), 50);
+  home3d?.setActive(name === 'home');
+  lobby3d?.setActive(name === 'lobby');
 }
 
 // ══════════ home & lobby effects ══════════
@@ -42,13 +72,17 @@ function spawnFallingTiles(containerId) {
     { cls: 'mid',  count: 8,  size: [44, 62] },
     { cls: 'near', count: 6,  size: [70, 98] },
   ];
+  const total = LAYERS.reduce((s, l) => s + l.count, 0);
+  let slot = 0;
   for (const layer of LAYERS) {
     for (let i = 0; i < layer.count; i++) {
       const img = document.createElement('img');
       img.src = tileImage(Math.floor(Math.random() * 7), Math.floor(Math.random() * 7));
       img.className = `fall ${layer.cls}`;
       const size = layer.size[0] + Math.random() * (layer.size[1] - layer.size[0]);
-      img.style.left = Math.random() * 96 + 'vw';
+      // even horizontal spread with jitter — pure random clumps to one side
+      const left = (slot++ / total) * 96 + (Math.random() * 12 - 6);
+      img.style.left = Math.max(0, Math.min(94, left)) + 'vw';
       img.style.width = size + 'px';
       img.style.setProperty('--rot0', Math.random() * 360 + 'deg');
       img.style.setProperty('--rot1', (Math.random() < .5 ? -1 : 1) * (200 + Math.random() * 360) + 'deg');
@@ -61,8 +95,21 @@ function spawnFallingTiles(containerId) {
 }
 
 function initHome() {
-  spawnFallingTiles('heroTiles');
-  spawnFallingTiles('lobbyHeroTiles');
+  try {
+    home3d = new Home3D($('home3d'));
+    home3d.setActive(true);
+  } catch (err) {
+    console.warn('home3d unavailable — using 2D falling tiles', err);
+    home3d = null;
+    spawnFallingTiles('heroTiles');
+  }
+  try {
+    lobby3d = new Home3D($('lobby3d'));
+  } catch (err) {
+    console.warn('lobby3d unavailable — using 2D falling tiles', err);
+    lobby3d = null;
+    spawnFallingTiles('lobbyHeroTiles');
+  }
   $('inpName').value = localStorage.getItem('domino_name') || '';
   const params = new URLSearchParams(location.search);
   if (params.get('room')) {
@@ -86,6 +133,22 @@ function initHome() {
       if (!res.ok) return homeError(res.error);
       afterJoin(res, name);
       showScreen('lobby');
+    });
+  };
+  let botLevel = 'medium';
+  document.querySelectorAll('#diffRow .diff-chip').forEach(ch => {
+    ch.onclick = () => {
+      botLevel = ch.dataset.level;
+      document.querySelectorAll('#diffRow .diff-chip').forEach(c => c.classList.toggle('active', c === ch));
+      sfx.click();
+    };
+  });
+  $('btnBots').onclick = () => {
+    const name = getName(); if (!name) return;
+    emit('room:create', { name, vsBots: true, botLevel }).then(res => {
+      if (!res.ok) return homeError(res.error);
+      afterJoin(res, name);
+      showScreen('game');
     });
   };
   $('btnJoin').onclick = () => {
@@ -112,11 +175,14 @@ function homeError(msg) { $('homeError').textContent = msg || ''; }
 
 function afterJoin(res, name) {
   myId = res.playerId; myToken = res.token; myName = name; roomCode = res.code;
+  voice?.setSelf(myId);
   sessionStorage.setItem('domino_token_' + roomCode, myToken);
   localStorage.setItem('domino_token_' + roomCode, myToken);
   localStorage.setItem('domino_last_code', roomCode);
   history.replaceState(null, '', '?room=' + roomCode);
   $('lobbyCode').textContent = roomCode;
+  const chip = $('chatRoomChip');
+  if (chip) chip.textContent = 'غرفة ' + roomCode;
   if (res.lobby) {
     renderLobby(res.lobby);
   } else if (lastLobbyState) {
@@ -139,13 +205,28 @@ function renderLobby(st) {
     if (p.id === myId) li.className = 'me';
     const nameSpan = document.createElement('span');
     nameSpan.className = 'name';
-    nameSpan.textContent = p.name + (p.id === st.hostId ? ' 👑' : '');
+    nameSpan.textContent = p.name + (p.isBot ? ' 🤖' : '') + (p.id === st.hostId ? ' 👑' : '');
     const tag = document.createElement('span');
     tag.className = 'status' + (p.ready ? ' ready' : '');
     tag.textContent = p.id === st.hostId ? 'المضيف' : (p.ready ? 'جاهز' : 'في الانتظار');
     li.appendChild(nameSpan);
     li.appendChild(tag);
+    if (p.isBot && isHost) {
+      const rm = document.createElement('button');
+      rm.className = 'bot-remove';
+      rm.textContent = '✕';
+      rm.title = 'حذف البوت';
+      rm.onclick = () => { socket.emit('lobby:removeBot', { playerId: p.id }); sfx.click(); };
+      li.appendChild(rm);
+    }
     list.appendChild(li);
+  }
+
+  const btnAddBot = $('btnAddBot');
+  if (btnAddBot) {
+    const full = (st.players || []).length >= (st.config?.maxPlayers ?? 4);
+    btnAddBot.classList.toggle('hidden', !isHost || st.state !== 'lobby');
+    btnAddBot.disabled = full;
   }
 
   $('hostConfig').classList.toggle('hidden', !isHost);
@@ -169,6 +250,10 @@ function renderLobby(st) {
 }
 
 function initLobby() {
+  const btnAddBot = $('btnAddBot');
+  if (btnAddBot) {
+    btnAddBot.onclick = () => { socket.emit('lobby:addBot', {}); sfx.click(); };
+  }
   spawnFallingTiles('lobbyHeroTiles');
   $('btnCopyCode').onclick = () => copyText(roomCode, 'تم نسخ الكود!');
   $('btnCopyLink').onclick = () => copyText(location.origin + '?room=' + roomCode, 'تم نسخ رابط الدعوة!');
@@ -180,20 +265,8 @@ function initLobby() {
   $('btnStart').onclick = () => emit('game:start').then(res => {
     if (res && !res.ok) lobbyError(res.error);
   });
-  $('btnLeave').onclick = () => {
-    // Stop auto-rejoin BEFORE telling the server, so a fast reconnect can't pull us back in.
-    sessionStorage.removeItem('domino_token_' + roomCode);
-    localStorage.removeItem('domino_token_' + roomCode);
-    localStorage.removeItem('domino_last_code');
-    emit('room:leave').catch(() => {});
-    myId = myToken = roomCode = null;
-    isHost = false;
-    lastLobbyState = null;
-    history.replaceState(null, '', location.pathname);
-    homeError('');
-    showScreen('home');
-    sfx.click();
-  };
+  $('btnLeave').onclick = leaveRoom;
+  $('btnLobbyMic').onclick = () => toggleMic();
   for (const id of ['selVariant', 'selTarget', 'selMax']) {
     $(id).onchange = () => emit('lobby:config', {
       variant: $('selVariant').value,
@@ -204,69 +277,54 @@ function initLobby() {
 }
 function lobbyError(msg) { $('lobbyError').textContent = msg || ''; }
 
+// ── leaving the room (lobby button or in-game exit) ──
+function leaveRoom() {
+  // Stop auto-rejoin BEFORE telling the server, so a fast reconnect can't pull us back in.
+  if (roomCode) {
+    sessionStorage.removeItem('domino_token_' + roomCode);
+    localStorage.removeItem('domino_token_' + roomCode);
+  }
+  localStorage.removeItem('domino_last_code');
+  emit('room:leave').catch(() => {});
+  myId = myToken = roomCode = null;
+  voice?.setSelf(null);
+  isHost = false;
+  lastLobbyState = null;
+  view = null;
+  selectedTile = null;
+  board?.clearMarkers();
+  closeChat();
+  voice?.leave();
+  closeVoicePanel();
+  speakingSet.clear();
+  unread = 0;
+  updateBadge();
+  const msgs = $('chatMsgs');
+  if (msgs) msgs.innerHTML = '';
+  sfx.ambient(false);
+  closeLeaveConfirm();
+  history.replaceState(null, '', location.pathname);
+  homeError('');
+  showScreen('home');
+  sfx.click();
+}
+function openLeaveConfirm() { $('modalLeave').classList.remove('hidden'); }
+function closeLeaveConfirm() { $('modalLeave').classList.add('hidden'); }
+
 // ══════════ game rendering ══════════
 function renderGame() {
   if (!view) return;
   board?.sync(view);
   board?.setCanDraw(view.turn === myId && view.status === 'playing' && view.canDraw);
-  renderScoreboard();
   renderOpponents();
   renderHand();
   renderActions();
   renderTurnBanner();
+  updateTurnTimer();
+  renderScoreCard();
   renderModals();
   playActionSounds();
   prevHand = [...(view.hand || [])];
-}
-
-function renderScoreboard() {
-  const sb = $('scoreboard');
-  sb.innerHTML = '';
-
-  const header = document.createElement('div');
-  header.className = 'sb-header';
-  header.innerHTML = `
-    <span class="sb-title"><i class="sb-ico">🏆</i> النتائج</span>
-    <span class="sb-target">الهدف: <b>${view.targetScore}</b></span>
-  `;
-  sb.appendChild(header);
-
-  const list = document.createElement('div');
-  list.className = 'sb-list';
-
-  for (const pid of view.players) {
-    const isMe = pid === myId;
-    const isTurn = pid === view.turn && view.status === 'playing';
-    const score = view.scores[pid] || 0;
-    const pct = Math.min(100, (score / view.targetScore) * 100);
-    const name = view.names[pid] || 'لاعب';
-    const initial = (name.trim()[0] || '؟').toUpperCase();
-    const count = view.handCounts?.[pid] ?? 0;
-
-    const row = document.createElement('div');
-    row.className = 'sb-row' + (isMe ? ' me' : '') + (isTurn ? ' turn' : '');
-    row.innerHTML = `
-      <div class="sb-left">
-        <div class="sb-avatar ${isTurn ? 'active' : ''}">${initial}</div>
-        <div class="sb-user-meta">
-          <div class="sb-name-line">
-            <span class="sb-name" title="${esc(name)}">${esc(name)}</span>
-            ${isMe ? '<span class="sb-you-pill">أنت</span>' : `<span class="sb-tile-badge" title="${count} كروت">🁢 ${count}</span>`}
-            ${isTurn ? '<span class="sb-turn-badge">دوره</span>' : ''}
-          </div>
-          <div class="sb-progress-bar">
-            <div class="sb-fill" style="width: ${pct}%"></div>
-          </div>
-        </div>
-      </div>
-      <div class="sb-right">
-        <span class="sb-pts">${score}</span>
-        <span class="sb-pts-sub">نقطة</span>
-      </div>
-    `;
-    list.appendChild(row);
-  }
-  sb.appendChild(list);
 }
 
 function renderOpponents() {
@@ -311,25 +369,71 @@ function renderActions() {
   } else pill.classList.add('hidden');
 }
 
+function renderScoreCard() {
+  const card = $('scoreCard');
+  if (!card || !view) return;
+  const ranked = [...view.players].sort((a, b) => (view.scores[b] || 0) - (view.scores[a] || 0));
+  card.innerHTML = '';
+  ranked.forEach((pid, i) => {
+    const row = document.createElement('div');
+    row.className = 'sc-row' + (pid === myId ? ' me' : '') + (speakingSet.has(pid) ? ' speaking' : '');
+    row.innerHTML = `
+      <span class="sc-rank">${['🥇', '🥈', '🥉', '4.'][i] || (i + 1) + '.'}</span>
+      <span class="sc-name" title="${esc(view.names[pid] || 'لاعب')}">${view.isBot?.[pid] ? '🤖 ' : ''}${esc(view.names[pid] || 'لاعب')}</span>
+      <span class="sc-pts">${view.scores[pid] || 0}</span>
+    `;
+    card.appendChild(row);
+  });
+}
+
+function setBanner(text, cls) {
+  $('turnBannerText').textContent = text;
+  $('turnBanner').className = cls || '';
+}
+
 function renderTurnBanner() {
-  const b = $('turnBanner');
-  if (view.status !== 'playing') { b.textContent = ''; b.className = ''; return; }
+  if (view.status !== 'playing') { setBanner('', ''); return; }
   if (view.turn === myId) {
     if (view.leadForcedTile) {
-      b.textContent = 'دورك — العب الكارت المحدد للبداية';
+      setBanner('دورك — العب الكارت المحدد للبداية', 'mine');
     } else if (view.moves.length === 0) {
-      b.textContent = 'دورك — اختر أي كارت لبدء اللعبة';
+      setBanner('دورك — اختر أي كارت لبدء اللعبة', 'mine');
     } else if (view.canDraw) {
-      b.textContent = 'دورك — اسحب كارت من الطاولة بالنقر عليه';
+      setBanner('دورك — اسحب كارت من الطاولة بالنقر عليه', 'mine');
     } else if (view.canPass) {
-      b.textContent = 'دورك — لا يوجد لعب متاح، اضغط تمرير (باص)';
+      setBanner('دورك — لا يوجد لعب متاح، اضغط تمرير (باص)', 'mine');
     } else {
-      b.textContent = 'دورك الآن';
+      setBanner('دورك الآن', 'mine');
     }
-    b.className = 'mine';
   } else {
-    b.textContent = `دور ${view.names[view.turn] || 'اللاعب'}`;
-    b.className = '';
+    setBanner(`دور ${view.names[view.turn] || 'اللاعب'}`, '');
+  }
+}
+
+// ── turn countdown (ticks independently of game-state renders) ──
+// >10s left: small isolated number. Last 10s: big red number mid-screen.
+// Last 5s: alarm pulse + beeps (sound only on my turn).
+function updateTurnTimer() {
+  const wrap = $('turnTimer');
+  if (!wrap) return;
+  if (!view || view.status !== 'playing' || !view.turnEndsAt) {
+    wrap.classList.add('hidden');
+    lastTimerKey = null;
+    return;
+  }
+  if (view.turnEndsAt !== lastTimerKey) { lastTimerKey = view.turnEndsAt; lastTickSec = null; }
+  // clockOffset was captured when this state arrived, so Date.now() keeps ticking
+  const remainMs = view.turnEndsAt - (Date.now() + clockOffset);
+  if (remainMs <= 0) { wrap.classList.add('hidden'); return; } // server will advance the turn shortly
+  const secs = Math.ceil(remainMs / 1000);
+  wrap.classList.remove('hidden');
+  wrap.classList.toggle('warn', remainMs <= 10000);
+  wrap.classList.toggle('danger', remainMs <= 5000);
+  $('turnTimerSecs').textContent = secs;
+  if (view.turn === myId && secs !== lastTickSec) {
+    lastTickSec = secs;
+    if (secs <= 5) sfx.alarm();
+    else if (secs <= 10) sfx.tick();
   }
 }
 
@@ -404,6 +508,10 @@ function playActionSounds() {
     board?.animateDraw(drawnTile, isMe);
   }
   else if (la.type === 'pass') { sfx.pass(); if (la.pid !== myId) floatText(`${view.names[la.pid] || 'لاعب'}: باص`); }
+  else if (la.type === 'skip') {
+    sfx.pass();
+    floatText(la.pid === myId ? '⏰ انتهى وقتك!' : `⏰ ${view.names[la.pid] || 'لاعب'}: انتهى وقته`);
+  }
   else if (la.type === 'handEnd') sfx.handWin();
   else if (la.type === 'matchEnd') sfx.matchWin();
   if (view.status === 'playing' && view.turn === myId && !wasMyTurn) sfx.yourTurn();
@@ -448,12 +556,8 @@ function onTileClick(tile, el) {
   const uniqueEnds = [...new Set(moves.map(m => m.end))];
   board.showMarkers(uniqueEnds);
   renderHand();
-  if (uniqueEnds.length === 1) {
-    $('turnBanner').textContent = 'اضغط على النقطة الخضراء أو على الكارت مجدداً لتأكيد اللعب!';
-    $('turnBanner').className = 'mine';
-  } else {
-    $('turnBanner').textContent = 'اختر النقطة الخضراء للطرف الذي تريد اللعب عليه!';
-    $('turnBanner').className = 'mine';
+  if (uniqueEnds.length > 1) {
+    setBanner('اختر النقطة الخضراء للطرف الذي تريد اللعب عليه!', 'mine');
   }
 }
 
@@ -476,44 +580,86 @@ function initGameUI() {
   $('btnRematch').onclick = () => socket.emit('game:rematch');
   $('btnChat').onclick = (e) => {
     e.stopPropagation();
-    chatOpen = !chatOpen;
-    $('chatDrawer').classList.toggle('hidden', !chatOpen);
-    if (chatOpen) {
-      unread = 0;
-      updateBadge();
-      setTimeout(() => $('chatInput')?.focus(), 100);
-    }
+    chatOpen ? closeChat() : openChat();
   };
-  $('chatClose').onclick = () => {
-    chatOpen = false;
-    $('chatDrawer').classList.add('hidden');
+  $('btnMic').onclick = (e) => {
+    e.stopPropagation();
+    toggleMic();
+  };
+  $('chatClose').onclick = (e) => {
+    e.stopPropagation();
+    closeChat();
+  };
+  $('btnVoice').onclick = (e) => {
+    e.stopPropagation();
+    voicePanelOpen ? closeVoicePanel() : openVoicePanel();
+  };
+  $('voiceClose').onclick = (e) => {
+    e.stopPropagation();
+    closeVoicePanel();
+  };
+  $('btnVoiceSelfMute').onclick = () => toggleMic();
+  $('btnVoiceLeave').onclick = () => {
+    voice?.leave();
+    closeVoicePanel();
+    sfx.micOff();
+  };
+  // host-only: mute (or unmute) everyone except the host, server-enforced
+  $('btnVoiceMuteAll').onclick = async () => {
+    const btn = $('btnVoiceMuteAll');
+    if (!voice) return;
+    const anyHostMuted = voicePeers.some(p => p.hostMuted);
+    btn.disabled = true;
+    sfx.click();
+    try {
+      const res = await voice.hostMute({ all: true, muted: !anyHostMuted });
+      if (res && !res.ok) showVoiceError(res.error);
+    } finally { btn.disabled = false; }
   };
   document.addEventListener('click', (e) => {
     if (chatOpen && !$('chatDrawer').contains(e.target) && !$('btnChat').contains(e.target)) {
-      chatOpen = false;
-      $('chatDrawer').classList.add('hidden');
+      closeChat();
+    } else if (emojiPopOpen && !$('emojiPop').contains(e.target) && !$('btnEmoji').contains(e.target)) {
+      closeEmojiPop();
+    } else if (voicePanelOpen && !$('voicePanel').contains(e.target) && !$('btnVoice').contains(e.target)) {
+      closeVoicePanel();
     }
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && chatOpen) {
-      chatOpen = false;
-      $('chatDrawer').classList.add('hidden');
+    if (e.key === 'Escape') {
+      if (!$('modalLeave').classList.contains('hidden')) {
+        sfx.click();
+        closeLeaveConfirm();
+      } else if (emojiPopOpen) {
+        closeEmojiPop();
+      } else if (voicePanelOpen) {
+        closeVoicePanel();
+      } else if (chatOpen) {
+        closeChat();
+      }
     }
   });
+  $('btnEmoji').onclick = (e) => {
+    e.stopPropagation();
+    emojiPopOpen ? closeEmojiPop() : openEmojiPop();
+  };
   $('chatSend').onclick = sendChat;
   $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+  $('chatInput').addEventListener('input', updateChatCount);
+  buildChatWidgets();
+  updateChatCount();
   const btnFs = $('btnFullscreen');
   if (btnFs) {
     btnFs.onclick = toggleFullscreen;
   }
+  $('btnExit').onclick = () => { sfx.click(); openLeaveConfirm(); };
+  $('btnLeaveCancel').onclick = () => { sfx.click(); closeLeaveConfirm(); };
+  $('btnLeaveConfirm').onclick = leaveRoom;
+  $('modalLeave').addEventListener('click', (e) => {
+    if (e.target === $('modalLeave')) { sfx.click(); closeLeaveConfirm(); }
+  });
   ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach(ev => {
     document.addEventListener(ev, updateFullscreenState);
-  });
-  document.querySelectorAll('#emojiBar button').forEach(b => {
-    b.onclick = () => {
-      socket.emit('chat:send', { emoji: b.textContent.trim() });
-      sfx.click();
-    };
   });
 }
 
@@ -551,39 +697,273 @@ function sendChat() {
   if (!text) return;
   socket.emit('chat:send', { text });
   inp.value = '';
+  updateChatCount();
+  inp.focus();
+}
+
+function updateChatCount() {
+  const inp = $('chatInput');
+  if (!inp) return;
+  const send = $('chatSend');
+  if (send) send.disabled = inp.value.trim().length === 0;
+  const cnt = $('chatCount');
+  if (cnt) {
+    cnt.textContent = String(200 - inp.value.length);
+    cnt.classList.toggle('hidden', inp.value.length <= 150);
+  }
+}
+
+function sendEmoji(em) {
+  socket.emit('chat:send', { emoji: em });
+  sfx.select();
+}
+
+function buildChatWidgets() {
+  const quick = $('chatQuick');
+  if (quick) {
+    quick.innerHTML = '';
+    for (const em of CHAT_QUICK_EMOJIS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = em;
+      b.title = 'إرسال ' + em;
+      b.setAttribute('aria-label', 'إرسال إيموجي ' + em);
+      b.onclick = () => sendEmoji(em);
+      quick.appendChild(b);
+    }
+  }
+  const pop = $('emojiPop');
+  if (pop) {
+    pop.innerHTML = '';
+    const phrases = document.createElement('div');
+    phrases.className = 'pop-phrases';
+    for (const phrase of CHAT_PHRASES) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chat-chip';
+      chip.textContent = phrase;
+      chip.onclick = () => { socket.emit('chat:send', { text: phrase }); sfx.select(); };
+      phrases.appendChild(chip);
+    }
+    pop.appendChild(phrases);
+    const grid = document.createElement('div');
+    grid.className = 'emoji-grid';
+    for (const [cat, list] of CHAT_EMOJI_GROUPS) {
+      const h = document.createElement('div');
+      h.className = 'emoji-cat';
+      h.textContent = cat;
+      grid.appendChild(h);
+      for (const em of list) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = em;
+        b.title = 'إرسال ' + em;
+        b.onclick = () => sendEmoji(em);
+        grid.appendChild(b);
+      }
+    }
+    pop.appendChild(grid);
+  }
+}
+// a text message made only of emoji (typed on a keyboard) still shows big & bubble-less
+const EMOJI_ONLY_RE = (() => {
+  try { return new RegExp('^[\\p{Extended_Pictographic}\\u{1F3FB}-\\u{1F3FF}\\u200D\\uFE0F\\u20E3\\s]+$', 'u'); }
+  catch { return null; }
+})();
+function isEmojiOnly(s) {
+  return !!s && !!EMOJI_ONLY_RE && EMOJI_ONLY_RE.test(s);
+}
+
+function isMineMsg(msg) {
+  return msg.pid ? msg.pid === myId : msg.from === myName;
+}
+
+function chatColor(pid) {
+  const idx = view?.players ? view.players.indexOf(pid) : -1;
+  if (idx >= 0) return CHAT_COLORS[idx % CHAT_COLORS.length];
+  let h = 0;
+  const s = String(pid ?? '');
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return CHAT_COLORS[h % CHAT_COLORS.length];
+}
+
+function openChat() {
+  chatOpen = true;
+  $('chatDrawer')?.classList.remove('hidden');
+  closeEmojiPop();
+  renderChatEmpty();
+  unread = 0;
+  updateBadge();
+  const box = $('chatMsgs');
+  if (box) box.scrollTop = box.scrollHeight;
+  setTimeout(() => $('chatInput')?.focus(), 80);
+}
+
+function closeChat() {
+  chatOpen = false;
+  $('chatDrawer')?.classList.add('hidden');
+  closeEmojiPop();
+}
+
+function openEmojiPop() {
+  emojiPopOpen = true;
+  $('emojiPop')?.classList.remove('hidden');
+  $('btnEmoji')?.setAttribute('aria-expanded', 'true');
+}
+
+function closeEmojiPop() {
+  emojiPopOpen = false;
+  $('emojiPop')?.classList.add('hidden');
+  $('btnEmoji')?.setAttribute('aria-expanded', 'false');
+}
+
+function renderChatEmpty() {
+  const box = $('chatMsgs');
+  if (!box || box.children.length) return;
+  const el = document.createElement('div');
+  el.className = 'chat-empty';
+  const big = document.createElement('span');
+  big.className = 'big';
+  big.textContent = '👋';
+  el.appendChild(big);
+  el.appendChild(document.createTextNode('قول سلام للاعبين الطاولة وابدأ الكلام…'));
+  box.appendChild(el);
+}
+
+function appendChatMsg(msg) {
+  const box = $('chatMsgs');
+  if (!box) return;
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 48;
+  box.querySelector('.chat-empty')?.remove();
+
+  const mine = isMineMsg(msg);
+  const sys = !msg.pid && msg.from === 'النظام';
+
+  if (sys) {
+    const el = document.createElement('div');
+    el.className = 'chat-sys';
+    el.textContent = msg.text || '';
+    box.appendChild(el);
+  } else {
+    const prev = box.lastElementChild;
+    const grouped = !!prev && prev.classList.contains(mine ? 'mine' : 'other')
+      && prev.dataset.pid === (msg.pid || '')
+      && Date.now() - (Number(prev.dataset.at) || 0) < 3 * 60 * 1000;
+
+    const row = document.createElement('div');
+    row.className = 'chat-row ' + (mine ? 'mine' : 'other') + (grouped ? ' grouped' : '');
+    row.dataset.pid = msg.pid || '';
+    row.dataset.at = String(msg.at || Date.now());
+
+    const col = document.createElement('div');
+    col.className = 'chat-col';
+
+    if (!grouped) {
+      const meta = document.createElement('span');
+      meta.className = 'chat-meta';
+      const timeStr = new Date(msg.at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (mine) {
+        meta.textContent = timeStr;
+      } else {
+        const rgb = chatColor(msg.pid);
+        const nm = document.createElement('b');
+        nm.textContent = msg.from || 'لاعب';
+        nm.style.color = 'rgb(' + rgb + ')';
+        meta.appendChild(nm);
+        meta.appendChild(document.createTextNode(' · ' + timeStr));
+      }
+      col.appendChild(meta);
+    }
+
+    const bubble = document.createElement('div');
+    const emojiBody = (msg.emoji && !msg.text) || isEmojiOnly(msg.text || '');
+    if (emojiBody) {
+      bubble.className = 'chat-bubble emoji-only';
+      bubble.textContent = msg.emoji || (msg.text || '').trim();
+    } else {
+      bubble.className = 'chat-bubble';
+      bubble.textContent = msg.text || '';
+    }
+    col.appendChild(bubble);
+
+    if (!mine) {
+      const rgb = chatColor(msg.pid);
+      const av = document.createElement('span');
+      av.className = 'chat-av';
+      av.textContent = (msg.from || '؟').trim().charAt(0).toUpperCase();
+      av.style.setProperty('--av-bg', 'rgba(' + rgb + ',.18)');
+      av.style.setProperty('--av-fg', 'rgb(' + rgb + ')');
+      row.appendChild(av);
+    }
+    row.appendChild(col);
+    box.appendChild(row);
+  }
+
+  if (atBottom || (mine && !sys)) box.scrollTop = box.scrollHeight;
 }
 
 function showChatToast(msg) {
   const container = $('chatToasts');
   if (!container) return;
 
-  // Maximum 3 visible toasts to prevent spam from covering the screen
+  // Maximum 3 floating bubbles so the table never gets covered
   while (container.children.length >= 3) {
     container.firstChild.remove();
   }
 
-  const isMine = (msg.pid && msg.pid === myId) || msg.from === myName;
-  const initial = (msg.from ? msg.from.trim()[0] : '؟').toUpperCase();
-  const toast = document.createElement('div');
-  toast.className = 'chat-toast' + (isMine ? ' mine' : ' other');
+  const sys = !msg.pid || msg.from === 'النظام';
+  const mine = isMineMsg(msg);
+  const rgb = sys ? '139,150,184' : (mine ? CHAT_COLORS[1] : chatColor(msg.pid));
 
-  if (msg.emoji) {
-    toast.innerHTML = `
-      <div class="toast-avatar">${initial}</div>
-      <div class="toast-body">
-        <div class="toast-sender">${isMine ? 'أنت' : esc(msg.from)}</div>
-        <div class="toast-emoji-content">${esc(msg.emoji)}</div>
-      </div>
-    `;
-  } else {
-    toast.innerHTML = `
-      <div class="toast-avatar">${initial}</div>
-      <div class="toast-body">
-        <div class="toast-sender">${isMine ? 'أنت' : esc(msg.from)}</div>
-        <div class="toast-text-content">${esc(msg.text)}</div>
-      </div>
-    `;
+  // emoji-only messages float as a single glass circle — no name, no rectangle
+  if ((msg.emoji && !msg.text) || isEmojiOnly(msg.text || '')) {
+    const round = document.createElement('button');
+    round.type = 'button';
+    round.className = 'chat-toast emoji-toast' + (mine ? ' mine' : '');
+    round.title = (mine ? 'أنت' : (msg.from || '')) + ' · ' + (msg.emoji || (msg.text || '').trim());
+    round.addEventListener('click', openChat);
+    const em = document.createElement('span');
+    em.className = 'toast-emoji';
+    em.textContent = msg.emoji || (msg.text || '').trim();
+    round.appendChild(em);
+    container.appendChild(round);
+    setTimeout(() => {
+      round.classList.add('toast-fade');
+      setTimeout(() => round.remove(), 400);
+    }, 5000);
+    return;
   }
+
+  const toast = document.createElement('button');
+  toast.type = 'button';
+  toast.className = 'chat-toast' + (mine ? ' mine' : '');
+  toast.addEventListener('click', openChat);
+
+  const av = document.createElement('span');
+  av.className = 'chat-av';
+  av.style.setProperty('--av-bg', 'rgba(' + rgb + ',.18)');
+  av.style.setProperty('--av-fg', 'rgb(' + rgb + ')');
+  av.textContent = (msg.from || '؟').trim().charAt(0).toUpperCase();
+  toast.appendChild(av);
+
+  const body = document.createElement('span');
+  body.className = 'toast-body';
+  const nm = document.createElement('span');
+  nm.className = 'toast-name';
+  nm.textContent = mine ? 'أنت' : (msg.from || 'النظام');
+  if (!sys && !mine) nm.style.color = 'rgb(' + rgb + ')';
+  body.appendChild(nm);
+
+  const content = document.createElement('span');
+  if ((msg.emoji && !msg.text) || isEmojiOnly(msg.text || '')) {
+    content.className = 'toast-emoji';
+    content.textContent = msg.emoji || (msg.text || '').trim();
+  } else {
+    content.className = 'toast-text';
+    content.textContent = msg.text || '';
+  }
+  body.appendChild(content);
+  toast.appendChild(body);
 
   container.appendChild(toast);
 
@@ -595,34 +975,9 @@ function showChatToast(msg) {
 }
 
 function onChatMsg(msg) {
-  // 1. Show floating speech toast for 5 seconds on table
   showChatToast(msg);
-
-  // 2. Append to chat drawer history
-  const box = $('chatMsgs');
-  if (box) {
-    const isMine = (msg.pid && msg.pid === myId) || msg.from === myName;
-    const timeStr = new Date(msg.at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-    const msgEl = document.createElement('div');
-    msgEl.className = 'chat-bubble-wrap' + (isMine ? ' mine' : ' other');
-
-    if (msg.emoji) {
-      msgEl.innerHTML = `
-        <div class="bubble-meta">${isMine ? 'أنت' : esc(msg.from)} · ${timeStr}</div>
-        <div class="bubble-content emoji-only">${esc(msg.emoji)}</div>
-      `;
-    } else {
-      msgEl.innerHTML = `
-        <div class="bubble-meta">${isMine ? 'أنت' : esc(msg.from)} · ${timeStr}</div>
-        <div class="bubble-content">${esc(msg.text)}</div>
-      `;
-    }
-    box.appendChild(msgEl);
-    box.scrollTop = box.scrollHeight;
-  }
-
-  // 3. Update unread badge on fab if drawer is closed
+  appendChatMsg(msg);
+  if (msg.pid && msg.pid !== myId) sfx.chatPop();
   if (!chatOpen) {
     unread++;
     updateBadge();
@@ -630,10 +985,267 @@ function onChatMsg(msg) {
 }
 
 function updateBadge() {
-  const fab = $('btnChat');
-  if (!fab) return;
-  fab.innerHTML = '<span class="fab-icon">💬</span>' + (unread ? `<span class="badge">${unread > 9 ? '9+' : unread}</span>` : '');
+  const badge = $('chatBadge');
+  if (!badge) return;
+  badge.textContent = unread > 9 ? '9+' : String(unread);
+  badge.classList.toggle('hidden', !unread);
 }
+
+// ══════════ voice chat ══════════
+// Mic FAB cycles off → on → muted → on. The headset FAB opens a panel with
+// per-player controls: anyone can locally mute or set the volume of anyone
+// else, without affecting the rest of the room.
+
+// shared voice error routing: game → turn banner, lobby → lobbyError, else home
+function showVoiceError(msg) {
+  if (!msg) return;
+  if ($('screen-game').classList.contains('active')) setBanner('⚠ ' + msg, '');
+  else if ($('screen-lobby').classList.contains('active')) lobbyError(msg);
+  else homeError(msg);
+}
+
+// neutral transient hint (voice info, e.g. "reconnecting voice") — small toast
+// beside the mic FAB stack so it never clobbers the turn banner
+let voiceInfoTimer = null;
+function showVoiceInfo(msg) {
+  if (!msg) return;
+  document.querySelectorAll('.vp-info').forEach(el => el.remove());
+  const el = document.createElement('div');
+  el.className = 'vp-info';
+  el.textContent = '🎙 ' + msg;
+  document.body.appendChild(el);
+  clearTimeout(voiceInfoTimer);
+  voiceInfoTimer = setTimeout(() => {
+    el.classList.add('fade');
+    setTimeout(() => el.remove(), 350);
+  }, 3000);
+}
+
+function initVoice() {
+  voice = new VoiceChat(socket, {
+    onSelf: (s) => { voiceSelf = s; updateMicUI(); renderVoicePanel(); },
+    onPeers: (list) => {
+      voicePeers = list;
+      for (const p of list) {
+        if (p.speaking) speakingSet.add(p.id); else speakingSet.delete(p.id);
+      }
+      updateMicUI();
+      renderVoicePanel();
+      markSpeakingRows();
+    },
+    onSpeaking: (pid, on) => {
+      if (!pid) return;
+      if (on) speakingSet.add(pid); else speakingSet.delete(pid);
+      markSpeakingRows();
+      updateMicUI();
+    },
+    onError: (msg) => showVoiceError(msg),
+    onInfo: (msg) => showVoiceInfo(msg),
+  });
+  if (myId) voice.setSelf(myId);
+}
+
+async function toggleMic() {
+  if (!voice || !voice.supported) return;
+  if (!voiceSelf.joined) {
+    sfx.click();
+    const res = await voice.join();
+    if (res?.ok) sfx.micOn();
+    else {
+      // join failed — force the buttons back to .off even if voice.js
+      // didn't broadcast an idle onSelf after the error
+      voiceSelf = { ...voiceSelf, joined: false, status: 'idle' };
+      updateMicUI();
+    }
+  } else {
+    voice.toggleMute();
+    voiceSelf.muted ? sfx.micOff() : sfx.micOn();
+  }
+}
+
+function updateMicUI() {
+  const waiting = voiceSelf.status === 'requesting' || voiceSelf.status === 'connecting';
+  const hostMuted = !!voiceSelf.hostMuted;
+  const muted = !!voiceSelf.muted || hostMuted;
+  const waitTitle = voiceSelf.status === 'connecting' ? 'بنوصل بالصوت…' : 'بنطلب إذن المايك…';
+  const btn = $('btnMic');
+  if (btn && !voiceUnsupported) {
+    btn.classList.toggle('waiting', waiting);
+    btn.classList.toggle('off', !voiceSelf.joined && !waiting);
+    btn.classList.toggle('on', voiceSelf.joined && !muted);
+    btn.classList.toggle('muted', voiceSelf.joined && muted);
+    btn.classList.toggle('talking', voiceSelf.joined && !muted && voiceSelf.speaking);
+    btn.title = waiting ? waitTitle
+      : voiceSelf.joined && hostMuted ? 'المضيف كتّمك'
+      : !voiceSelf.joined ? 'فتح المايك'
+      : muted ? 'فك كتم المايك' : 'كتم المايك';
+    btn.setAttribute('aria-label', btn.title);
+  }
+  const lb = $('btnLobbyMic');
+  if (lb && !voiceUnsupported) {
+    lb.classList.toggle('waiting', waiting);
+    lb.classList.toggle('active', voiceSelf.joined && !muted);
+    lb.classList.toggle('muted', voiceSelf.joined && muted);
+    lb.textContent = waiting ? (voiceSelf.status === 'connecting' ? '🎤 بنوصل بالصوت…' : '🎤 بنطلب إذن المايك…')
+      : !voiceSelf.joined ? '🎤 فتح المايك'
+      : hostMuted ? '🔇 المضيف كتّمك'
+      : muted ? '🔇 المايك مكتوم — اضغط للكلام' : '🎙 المايك شغال — اضغط للكتم';
+    const lbTitle = waiting ? waitTitle : (voiceSelf.joined && hostMuted ? 'المضيف كتّمك' : '');
+    if (lbTitle) lb.title = lbTitle;
+    else lb.removeAttribute('title');
+  }
+  const badge = $('voiceBadge');
+  if (badge) {
+    const n = voicePeers.length + (voiceSelf.joined ? 1 : 0);
+    badge.textContent = String(n);
+    badge.classList.toggle('hidden', !n);
+  }
+}
+
+function openVoicePanel() {
+  voicePanelOpen = true;
+  $('voicePanel')?.classList.remove('hidden');
+  renderVoicePanel();
+  sfx.click();
+}
+
+function closeVoicePanel() {
+  voicePanelOpen = false;
+  $('voicePanel')?.classList.add('hidden');
+}
+
+function renderVoicePanel() {
+  const list = $('voiceList');
+  if (!list) return;
+  list.innerHTML = '';
+
+  if (!voiceSelf.joined && !voicePeers.length) {
+    const empty = document.createElement('div');
+    empty.className = 'vp-empty';
+    empty.textContent = 'لسه محدش فاتح المايك. دوس زرار المايك وابدأ الكلام 🎙';
+    list.appendChild(empty);
+  }
+
+  if (voiceSelf.joined) {
+    const hostMuted = !!voiceSelf.hostMuted;
+    const muted = !!voiceSelf.muted || hostMuted;
+    const row = document.createElement('div');
+    row.className = 'vp-row me' + (voiceSelf.speaking && !muted ? ' speaking' : '');
+    row.innerHTML = `
+      <span class="vp-dot" aria-hidden="true"></span>
+      <span class="vp-name">${esc(myName || 'أنت')} <span class="vp-you">(أنت)</span></span>
+      <span class="vp-state">${hostMuted ? 'مكتوم من المضيف' : muted ? 'مكتوم' : 'بتتكلم'}</span>`;
+    list.appendChild(row);
+  }
+
+  for (const p of voicePeers) {
+    const row = document.createElement('div');
+    row.className = 'vp-row' + (p.speaking ? ' speaking' : '');
+    row.dataset.pid = p.id;
+
+    const dot = document.createElement('span');
+    dot.className = 'vp-dot' + (p.conn === 'connected' ? ' connected'
+      : p.conn === 'connecting' ? ' connecting'
+      : p.conn === 'failed' ? ' failed' : '');
+    row.appendChild(dot);
+
+    const name = document.createElement('span');
+    name.className = 'vp-name';
+    name.textContent = p.name;
+    row.appendChild(name);
+
+    // hostMuted takes precedence over self-mute; empty while live & unmuted
+    const st = document.createElement('span');
+    st.className = 'vp-state';
+    st.textContent = p.hostMuted ? 'مكتوم من المضيف'
+      : p.muted ? 'مكتوم نفسه'
+      : p.speaking ? 'بتتكلم' : '';
+    row.appendChild(st);
+
+    const muteBtn = document.createElement('button');
+    muteBtn.className = 'vp-mute' + (p.mutedLocal ? ' muted' : '');
+    muteBtn.title = p.mutedLocal ? 'فك الكتم عنه' : 'اكتموا عندي بس';
+    muteBtn.setAttribute('aria-label', muteBtn.title);
+    muteBtn.innerHTML = p.mutedLocal
+      ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>'
+      : '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>';
+    muteBtn.onclick = () => { voice.setPeerMuted(p.id, !p.mutedLocal); sfx.click(); };
+    row.appendChild(muteBtn);
+
+    // host-only: mute this player for EVERYONE (server-enforced)
+    if (isHost) {
+      const hm = document.createElement('button');
+      hm.className = 'vp-hostmute' + (p.hostMuted ? ' muted' : '');
+      hm.title = p.hostMuted ? 'فك الكتم عنه (للجميع)' : 'كتمه عن الجميع';
+      hm.setAttribute('aria-label', hm.title);
+      hm.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>';
+      hm.onclick = async () => {
+        hm.disabled = true;
+        try {
+          const res = await voice.hostMute({ pid: p.id, muted: !p.hostMuted });
+          if (res && !res.ok) showVoiceError(res.error);
+        } finally { hm.disabled = false; }
+      };
+      row.appendChild(hm);
+    }
+
+    const vol = document.createElement('input');
+    vol.type = 'range';
+    vol.className = 'vp-vol';
+    vol.min = '0'; vol.max = '100';
+    vol.value = String(Math.round((p.volume ?? 1) * 100));
+    vol.title = 'صوت ' + p.name;
+    vol.setAttribute('aria-label', vol.title);
+    vol.oninput = () => voice.setPeerVolume(p.id, Number(vol.value) / 100);
+    row.appendChild(vol);
+
+    list.appendChild(row);
+  }
+
+  const selfMuteBtn = $('btnVoiceSelfMute');
+  if (selfMuteBtn) {
+    selfMuteBtn.disabled = !voiceSelf.joined || !!voiceSelf.hostMuted;
+    selfMuteBtn.textContent = voiceSelf.hostMuted ? 'المضيف كتّمك'
+      : voiceSelf.muted ? 'فك كتم نفسي' : 'كتم نفسي';
+  }
+  // host-only mute-all toggle in the panel header
+  const muteAll = $('btnVoiceMuteAll');
+  if (muteAll) {
+    muteAll.classList.toggle('hidden', !(isHost && voiceSelf.joined));
+    const anyHostMuted = voicePeers.some(p => p.hostMuted);
+    muteAll.textContent = anyHostMuted ? 'فك الكل' : 'كتم الكل';
+    muteAll.title = anyHostMuted ? 'فك الكتم عن الجميع (ما عداك)' : 'كتم الجميع (ما عداك)';
+  }
+  const sub = $('voiceSub');
+  if (sub) {
+    const n = voicePeers.length + (voiceSelf.joined ? 1 : 0);
+    sub.textContent = n ? `${n} في المكالمة` : 'المكالمة داخل الغرفة دي بس';
+  }
+}
+
+// light up speaking players on the scoreboard + voice panel
+function markSpeakingRows() {
+  const card = $('scoreCard');
+  if (card && view) {
+    card.querySelectorAll('.sc-row').forEach((row, i) => {
+      const ranked = [...view.players].sort((a, b) => (view.scores[b] || 0) - (view.scores[a] || 0));
+      row.classList.toggle('speaking', speakingSet.has(ranked[i]));
+    });
+  }
+  $('voiceList')?.querySelectorAll('.vp-row[data-pid]').forEach(row => {
+    const pid = row.dataset.pid;
+    row.classList.toggle('speaking', speakingSet.has(pid));
+    // keep the row's state text in sync between roster re-renders
+    const p = voicePeers.find(x => x.id === pid);
+    const st = row.querySelector('.vp-state');
+    if (p && st) {
+      st.textContent = p.hostMuted ? 'مكتوم من المضيف'
+        : p.muted ? 'مكتوم نفسه'
+        : speakingSet.has(pid) ? 'بتتكلم' : '';
+    }
+  });
+}
+
 
 // ══════════ effects ══════════
 function floatText(txt, isEmoji = false) {
@@ -704,9 +1316,29 @@ function emit(event, payload) {
   return new Promise(resolve => socket.emit(event, payload, resolve));
 }
 
+// mic unavailable (unsupported browser / insecure context): disable the mic
+// buttons with an explanation but never block the rest of the UI
+function applyVoiceSupport() {
+  voiceUnsupported = !!(voice && (!voice.supported || !voice.secure));
+  if (!voiceUnsupported) return;
+  const msg = 'المايك مش متاح هنا — افتح اللعبة في كروم أو إيدج بدل المتصفح جوه التطبيقات.';
+  for (const id of ['btnMic', 'btnLobbyMic']) {
+    const b = $(id);
+    if (!b) continue;
+    b.disabled = true;
+    b.classList.add('off');
+    b.title = msg;
+    b.setAttribute('aria-label', msg);
+  }
+  const lb = $('btnLobbyMic');
+  if (lb) lb.textContent = '🎤 المايك مش متاح';
+}
+
 // ══════════ boot ══════════
 function boot() {
   socket = io({ transports: ['websocket', 'polling'] });
+  initVoice();
+  applyVoiceSupport();
 
   socket.on('connect', () => {
     $('connPill').className = 'ok';
@@ -719,6 +1351,8 @@ function boot() {
       emit('room:join', { code: targetCode, name, token }).then(res => {
         if (res?.ok) {
           afterJoin(res, name);
+          // was in voice before the drop? announce again — the mesh rebuilds
+          if (voiceSelf.joined) voice.rejoin();
           showScreen(res.state === 'playing' ? 'game' : 'lobby');
         }
       });
@@ -734,16 +1368,19 @@ function boot() {
     prevTurnKey = null;
     showScreen('game');
     sfx.start();
+    sfx.ambient(true);
   });
-  socket.on('game:state', (st) => { view = st; isHost = st.hostId === myId; renderGame(); });
+  socket.on('game:state', (st) => {
+    clockOffset = st.serverNow ? st.serverNow - Date.now() : 0;
+    view = st; isHost = st.hostId === myId; renderGame();
+  });
   socket.on('chat:msg', onChatMsg);
   socket.on('error', (e) => {
-    const b = $('turnBanner');
-    b.textContent = '⚠ ' + (e.message || 'خطأ');
-    b.className = '';
+    setBanner('⚠ ' + (e.message || 'خطأ'), '');
   });
 
   initHome(); initLobby(); initGameUI();
+  setInterval(updateTurnTimer, 200);
 }
 
 boot();

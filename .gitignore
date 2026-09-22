@@ -7,3 +7,8 @@ Thumbs.db
 *.log
 .workbuddy-ai/
 scratch/
+
+# throwaway / workspace-local (never ship)
+.zcode/
+gui-test-screenshots/
+scratch_diff.txt

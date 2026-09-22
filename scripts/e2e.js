@@ -106,9 +106,42 @@ a.emit('chat:send', { text: 'gg' });
 const msg = await once(b, 'chat:msg');
 ok(msg && msg.from === 'Alice' && msg.text === 'gg', 'chat delivered');
 
+// ── voice signaling: roster, mute flag, relay, disconnect cleanup ──
+const rosterB = new Promise(r => b.once('voice:state', r));
+ok((await emit(a, 'voice:join', {})).ok, 'alice opened her mic');
+const roster1 = await rosterB;
+ok(roster1 && roster1.length === 1 && roster1[0].id === cr.playerId &&
+   roster1[0].name === 'Alice' && roster1[0].muted === false, 'voice roster broadcast to the room');
+
+const rosterA = new Promise(r => a.once('voice:state', r));
+ok((await emit(b, 'voice:join', {})).ok, 'bob opened his mic');
+const roster2 = await rosterA;
+ok(roster2 && roster2.length === 2, 'roster lists both voice players');
+
+const muteState = new Promise(r => b.once('voice:state', r));
+emit(a, 'voice:mute', { muted: true });
+const roster3 = await muteState;
+ok(roster3 && roster3.find(p => p.id === cr.playerId)?.muted === true, 'mute flag broadcasts');
+
+const relayed = new Promise(r => b.once('voice:signal', r));
+emit(a, 'voice:signal', { to: jr.playerId, data: { description: { type: 'offer', sdp: 'fake' } } });
+const sig = await relayed;
+ok(sig && sig.from === cr.playerId && sig.data.description?.type === 'offer', 'signaling relayed to the target peer');
+
+b.emit('voice:leave');
+const rosterLeft = await new Promise(r => a.once('voice:state', r));
+ok(rosterLeft && rosterLeft.length === 1, 'voice:leave removes bob from the roster');
+
+// disconnect drops the player from the voice roster
+ok((await emit(b, 'voice:join', {})).ok, 'bob re-opened his mic');
+await sleep(80);
+const rosterDropP = new Promise(r => a.once('voice:state', r));
+b.close();
+const rosterDrop = await rosterDropP;
+ok(rosterDrop && rosterDrop.length === 1, 'disconnect removes bob from the voice roster');
+
 // reconnect mid-game with token
 const bToken = jr.token;
-b.close();
 await sleep(120);
 const b2 = await client();
 const rj = await emit(b2, 'room:join', { code: cr.code, name: 'Bob', token: bToken });
@@ -116,7 +149,62 @@ ok(rj.ok && rj.reconnected && rj.state === 'playing', 'reconnect with token mid-
 const b2state = await once(b2, 'game:state');
 ok(b2state && Array.isArray(b2state.hand) && b2state.names, 'reconnected player receives state');
 
-a.close(); b2.close();
+// ── bots mode: instant room, bots drive the game, room dies with the human ──
+const h = await client();
+const bcr = await emit(h, 'room:create', { name: 'Human', vsBots: true, botDelayMs: 25 });
+ok(bcr.ok && bcr.state === 'playing', 'bot room created and started instantly');
+
+const botIds = new Set();
+let botMoves = 0, humanPlayed = false, hg = null;
+let botDoneResolve;
+const botDone = new Promise(r => { botDoneResolve = r; });
+h.on('game:state', s => {
+  hg = s;
+  for (const pid of s.players) if (s.isBot?.[pid]) botIds.add(pid);
+  if (s.lastAction && botIds.has(s.lastAction.pid)) botMoves++;
+  // test human auto-plays every own turn so the table keeps flowing
+  if (s.status === 'playing' && s.turn === bcr.playerId) {
+    humanPlayed = true;
+    if (s.legalMoves.length) h.emit('game:play', { tileId: s.legalMoves[0].tileId, end: s.legalMoves[0].end });
+    else if (s.canDraw) h.emit('game:draw');
+    else if (s.canPass) h.emit('game:pass');
+  }
+  if (botMoves >= 5 || s.status === 'matchEnd') botDoneResolve();
+});
+await botDone;
+ok(botIds.size === 3, 'table has 3 bots');
+ok(hg && hg.players.length === 4, 'game state shows 4 players');
+ok(botMoves >= 5, `bots play on their own (${botMoves} bot moves observed)`);
+ok(humanPlayed, 'human got a turn and played');
+
+await emit(h, 'room:leave');
+h.close();
+await sleep(120);
+const ghost = await client();
+const rejoin = await emit(ghost, 'room:join', { code: bcr.code, name: 'Ghost' });
+ok(rejoin.ok === false, 'bot room deleted after the human left');
+ghost.close();
+
+// ── bots in a normal lobby: host adds/removes, bot is auto-ready ──
+const c = await client();
+const d = await client();
+const ncr = await emit(c, 'room:create', { name: 'Host' });
+ok((await emit(d, 'room:join', { code: ncr.code, name: 'Guest' })).ok, 'guest joined normal room');
+const addBotRes = await emit(c, 'lobby:addBot', {});
+const botPlayer = addBotRes.lobby?.players?.at(-1);
+ok(addBotRes.ok && addBotRes.lobby.players.length === 3 && botPlayer.isBot === true,
+  'host added a bot to the lobby');
+ok(!(await emit(d, 'lobby:addBot', {})).ok, 'non-host cannot add bots');
+ok((await emit(c, 'lobby:removeBot', { playerId: botPlayer.id })).ok, 'host removed the bot');
+ok((await emit(c, 'lobby:addBot', { level: 'hard' })).ok, 're-added a bot with hard level');
+d.emit('lobby:ready', { ready: true });
+await sleep(60);
+const cStatePromise = once(c, 'game:state');   // register BEFORE start: server broadcasts before the ack
+ok((await emit(c, 'game:start')).ok, 'bot is auto-ready: game starts');
+const cState = await cStatePromise;
+ok(cState && cState.players.length === 3, 'game started with the bot seated (host + guest + bot)');
+
+a.close(); b2.close(); c.close(); d.close();
 clearTimeout(watchdog);
 console.log(`\n  E2E PASSED — ${passed} checks ✓\n`);
 process.exit(0);

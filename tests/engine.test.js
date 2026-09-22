@@ -242,6 +242,37 @@ test('allfives: match ends immediately when target hit mid-hand', () => {
   assert.equal(g.matchWinnerId, 'a');
 });
 
+test('turn timer: forceSkip penalizes a timed-out player even with legal moves', () => {
+  const g = new DominoGame({
+    variant: 'block', playerIds: ['a', 'b'],
+    deal: { hands: { a: ['4-4', '0-1'], b: ['0-2', '3-3'] }, boneyard: [] },
+  });
+  assert.equal(g.turn, 'a');                 // a holds the highest double
+  assert.ok(g.legalMoves('a').length > 0);   // a could play, but timed out
+  g.forceSkip('a');
+  assert.equal(g.turn, 'b');
+  assert.equal(g.lastAction.type, 'skip');
+  assert.equal(g.lastAction.pid, 'a');
+  // b has no 4 and cannot draw (block) → force-skip too → 2 consecutive skips = players → blocked
+  g.forceSkip('b');
+  assert.equal(g.status, 'handEnd');
+  assert.equal(g.handResult.blocked, true);
+  assert.equal(g.handResult.winnerId, 'b');  // b: 8 pips vs a: 9 pips
+  assert.equal(g.scores.b, 9);
+});
+
+test('turn timer: forceSkip counts toward block detection like a pass', () => {
+  const g = new DominoGame({
+    variant: 'block', playerIds: ['a', 'b'],
+    deal: { hands: { a: ['0-1', '3-3'], b: ['0-2', '4-4'] }, boneyard: [] },
+  });
+  g.play('b', '4-4', null);
+  g.pass('a');                               // normal pass: passCount = 1
+  g.forceSkip('b');                          // timeout skip: passCount = 2 → blocked
+  assert.equal(g.status, 'handEnd');
+  assert.equal(g.handResult.blocked, true);
+});
+
 test('block: repeated blocked ties cannot stall the match forever', () => {
   // Regression: in Block with 3 players, when every hand ends blocked with a
   // pip tie (no winner, 0 points), scores never advance and the match could

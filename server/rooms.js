@@ -4,6 +4,10 @@ import { DominoGame } from '../engine/game.js';
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no confusing chars
 
+// Per-turn time limit shared with clients. The enforcement timer itself lives in
+// server.js (the engine must stay timer-free); this is the single source of truth.
+export const TURN_MS = Math.max(1000, Number(process.env.TURN_TIME_MS) || 30000);
+
 function makeCode() {
   let c = '';
   for (let i = 0; i < 4; i++) c += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
@@ -52,6 +56,35 @@ export class RoomManager {
 
   getRoom(code) { return this.rooms.get((code || '').toUpperCase().trim()); }
 
+  /** Seat a bot player (lobby only). Bots are always ready and never own a
+   *  token, so the token-reconnect path can never attach a socket to them. */
+  addBot(room, name, level = 'medium') {
+    if (room.state !== 'lobby') return { error: 'بدأت اللعبة بالفعل في هذه الغرفة.' };
+    if (room.players.length >= room.config.maxPlayers) return { error: 'الغرفة ممتلئة بالكامل.' };
+    const bot = {
+      id: randomUUID(),
+      token: null,
+      name: (name || 'بوت').slice(0, 16),
+      ready: true,
+      connected: true,
+      socketId: null,
+      isBot: true,
+      botLevel: ['easy', 'medium', 'hard'].includes(level) ? level : 'medium',
+    };
+    room.players.push(bot);
+    return { bot };
+  }
+
+  removeBot(room, botId) {
+    const before = room.players.length;
+    room.players = room.players.filter(p => p.id !== botId || !p.isBot);
+    return room.players.length < before;
+  }
+
+  hasHumans(room) {
+    return room.players.some(p => !p.isBot);
+  }
+
   startGame(room) {
     room.game = new DominoGame({
       variant: room.config.variant,
@@ -72,11 +105,12 @@ export class RoomManager {
 
   removePlayer(room, playerId) {
     room.players = room.players.filter(p => p.id !== playerId);
-    if (room.players.length === 0) {
+    // Bots alone can't keep a room alive.
+    if (room.players.length === 0 || !room.players.some(p => !p.isBot)) {
       this.rooms.delete(room.code);
       return { empty: true };
     }
-    if (room.hostId === playerId) room.hostId = room.players[0].id;
+    if (room.hostId === playerId) room.hostId = room.players.find(p => !p.isBot).id;
     return { empty: false, newHost: room.hostId };
   }
 
@@ -87,7 +121,7 @@ export class RoomManager {
       state: room.state,
       config: room.config,
       players: room.players.map(p => ({
-        id: p.id, name: p.name, ready: p.ready, connected: p.connected,
+        id: p.id, name: p.name, ready: p.ready, connected: p.connected, isBot: !!p.isBot,
       })),
     };
   }
@@ -98,8 +132,13 @@ export class RoomManager {
     const view = room.game.viewFor(playerId);
     view.names = Object.fromEntries(room.players.map(p => [p.id, p.name]));
     view.connected = Object.fromEntries(room.players.map(p => [p.id, p.connected]));
+    view.isBot = Object.fromEntries(room.players.map(p => [p.id, !!p.isBot]));
     view.roomCode = room.code;
     view.hostId = room.hostId;
+    // Turn countdown (server clock epoch ms). serverNow lets clients correct for clock skew.
+    view.turnEndsAt = room.turnEndsAt || null;
+    view.turnMs = TURN_MS;
+    view.serverNow = Date.now();
     return view;
   }
 

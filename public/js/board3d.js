@@ -176,60 +176,77 @@ export class Board3D {
     const spots = [];   // {x, z, rotY, dbl}
     let curL = null, curR = null, curU = null, curD = null, spinner = null;
 
+    // One cursor per open end. pos = exact far-end point of the last placed tile (the
+    // face the next tile continues from); dir = unit travel direction, exactly one
+    // component nonzero; prevDx = X-direction of the horizontal segment before the
+    // current vertical one (a column bends back into an anti-parallel row: two clean
+    // L-bends forming an S-curve). armCol marks a fresh spinner-arm column: arms bend
+    // at MAX_Z, while columns born from a bend run one tile deeper (MAX_Z + TILE_L +
+    // GAP) so their return row skirts OUTSIDE the spinner arms' zone instead of
+    // cutting through it.
     const step = (cur, dbl) => {
-      const advLen = dbl ? (GAP + TILE_W) : (GAP + TILE_L);
+      const advLen = (dbl ? TILE_W : TILE_L) + GAP;
       const nextX = cur.pos.x + cur.dir.dx * advLen;
+      const nextZ = cur.pos.z + cur.dir.dz * advLen;
+      const zLim = cur.armCol ? MAX_Z : MAX_Z + TILE_L + GAP;
 
-      // Turn corner when approaching boundary along X:
-      if (cur.dir.dx !== 0 && Math.abs(nextX) > MAX_X) {
-        const dZ = cur.side === 'R' ? 1 : -1;
-        let center;
-        if (cur.lastDbl) {
-          center = {
-            x: cur.lastCenter.x,
-            z: cur.rowZ + dZ * (2.0 + GAP),
-          };
+      // Boundary → this tile is a BEND: the classic corner-to-corner L-joint that
+      // starts the new segment. Identical code path for both axes.
+      if ((cur.dir.dx !== 0 && Math.abs(nextX) > MAX_X) || (cur.dir.dz !== 0 && Math.abs(nextZ) > zLim)) {
+        let newDir;
+        if (cur.dir.dx !== 0) {
+          // horizontal row → vertical column, turning away from the centre
+          newDir = { dx: 0, dz: cur.side === 'R' ? 1 : -1 };
+          cur.prevDx = cur.dir.dx;
         } else {
-          center = {
-            x: cur.lastCenter.x + cur.dir.dx * 0.5,
-            z: cur.rowZ + dZ * (1.5 + GAP),
-          };
+          // vertical column → horizontal row, anti-parallel to the row before it
+          // (spinner arms default clockwise: U row heads +X, D row heads −X)
+          newDir = { dx: -(cur.prevDx || (cur.side === 'U' ? -1 : 1)), dz: 0 };
         }
-        const rotY = dZ === 1 ? 0 : Math.PI; // vertical corner piece: matching pip faces previous tile
-
-        cur.rowZ = cur.rowZ + dZ * (2.0 + GAP);
-        cur.dir = { dx: -cur.dir.dx, dz: 0 };
-        cur.pos = {
-          x: center.x + cur.dir.dx * 0.5,
-          z: cur.rowZ,
-        };
+        cur.armCol = false;
+        let center, rotY;
+        if (!dbl) {
+          // Elbow: end-to-end from the cursor and corner-to-corner against the old
+          // line (GAP clearance on both axes); long axis along the NEW direction.
+          center = {
+            x: cur.pos.x + cur.dir.dx * (GAP + TILE_W / 2) + newDir.dx * (TILE_W / 2 + GAP + TILE_L / 2),
+            z: cur.pos.z + cur.dir.dz * (GAP + TILE_W / 2) + newDir.dz * (TILE_W / 2 + GAP + TILE_L / 2),
+          };
+          rotY = Math.atan2(newDir.dx, newDir.dz);
+          cur.pos = { x: center.x + newDir.dx * (TILE_L / 2), z: center.z + newDir.dz * (TILE_L / 2) };
+        } else {
+          // Double at the corner: crosswise to the NEW direction (long axis along the
+          // old one), near end butted flush to the cursor; the column continues off
+          // its long side, like any double in a line. Doubles ignore f.
+          center = {
+            x: cur.pos.x + cur.dir.dx * (GAP + TILE_L / 2) + newDir.dx * (TILE_W / 2 + GAP),
+            z: cur.pos.z + cur.dir.dz * (GAP + TILE_L / 2) + newDir.dz * (TILE_W / 2 + GAP),
+          };
+          rotY = cur.dir.dx !== 0 ? Math.PI / 2 : 0;
+          cur.pos = { x: center.x + newDir.dx * (TILE_W / 2), z: center.z + newDir.dz * (TILE_W / 2) };
+        }
+        cur.dir = newDir;
         cur.lastCenter = center;
         cur.lastDbl = dbl;
         return { x: center.x, z: center.z, rotY, dbl };
       }
 
-      // Normal placement along current row:
+      // Normal placement, identical formulas for both axes.
       let center, rotY;
       if (dbl) {
-        rotY = 0; // vertical crosswise
+        rotY = cur.dir.dx !== 0 ? 0 : Math.PI / 2; // crosswise: long axis ⟂ travel
         center = {
           x: cur.pos.x + cur.dir.dx * (GAP + TILE_W / 2),
-          z: cur.rowZ,
+          z: cur.pos.z + cur.dir.dz * (GAP + TILE_W / 2),
         };
-        cur.pos = {
-          x: center.x + cur.dir.dx * (TILE_W / 2),
-          z: cur.rowZ,
-        };
+        cur.pos = { x: center.x + cur.dir.dx * (TILE_W / 2), z: center.z + cur.dir.dz * (TILE_W / 2) };
       } else {
-        rotY = Math.atan2(cur.dir.dx, 0); // horizontal
+        rotY = Math.atan2(cur.dir.dx, cur.dir.dz); // long axis along travel; a-half (local -Z) faces the connection
         center = {
           x: cur.pos.x + cur.dir.dx * (GAP + TILE_L / 2),
-          z: cur.rowZ,
+          z: cur.pos.z + cur.dir.dz * (GAP + TILE_L / 2),
         };
-        cur.pos = {
-          x: center.x + cur.dir.dx * (TILE_L / 2),
-          z: cur.rowZ,
-        };
+        cur.pos = { x: center.x + cur.dir.dx * (TILE_L / 2), z: center.z + cur.dir.dz * (TILE_L / 2) };
       }
       cur.lastCenter = center;
       cur.lastDbl = dbl;
@@ -242,18 +259,18 @@ export class Board3D {
         let spot;
         if (dbl) {
           spot = { x: 0, z: 0, rotY: 0, dbl };
-          curL = { pos: { x: -TILE_W / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', rowZ: 0, lastCenter: { x: 0, z: 0 }, lastDbl: true };
-          curR = { pos: { x: TILE_W / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', rowZ: 0, lastCenter: { x: 0, z: 0 }, lastDbl: true };
+          curL = { pos: { x: -TILE_W / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', prevDx: -1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
+          curR = { pos: { x: TILE_W / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', prevDx: 1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
           if (isAllFives) {
             spinner = { x: 0, z: 0, extZ: TILE_L / 2 };
-            curU = { pos: { x: 0, z: -TILE_L / 2 }, dir: { dx: 0, dz: -1 }, side: 'U', rowZ: -TILE_L / 2, lastCenter: { x: 0, z: 0 }, lastDbl: true };
-            curD = { pos: { x: 0, z: TILE_L / 2 }, dir: { dx: 0, dz: 1 }, side: 'D', rowZ: TILE_L / 2, lastCenter: { x: 0, z: 0 }, lastDbl: true };
+            curU = { pos: { x: 0, z: -TILE_L / 2 }, dir: { dx: 0, dz: -1 }, side: 'U', prevDx: -1, armCol: true, lastCenter: { x: 0, z: 0 }, lastDbl: true };
+            curD = { pos: { x: 0, z: TILE_L / 2 }, dir: { dx: 0, dz: 1 }, side: 'D', prevDx: 1, armCol: true, lastCenter: { x: 0, z: 0 }, lastDbl: true };
           }
         } else {
           const rotY = Math.PI / 2 + (mv.f ? Math.PI : 0);
           spot = { x: 0, z: 0, rotY, dbl };
-          curL = { pos: { x: -TILE_L / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', rowZ: 0, lastCenter: { x: 0, z: 0 }, lastDbl: false };
-          curR = { pos: { x: TILE_L / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', rowZ: 0, lastCenter: { x: 0, z: 0 }, lastDbl: false };
+          curL = { pos: { x: -TILE_L / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', prevDx: -1, lastCenter: { x: 0, z: 0 }, lastDbl: false };
+          curR = { pos: { x: TILE_L / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', prevDx: 1, lastCenter: { x: 0, z: 0 }, lastDbl: false };
         }
         spots.push(spot);
         continue;
@@ -268,8 +285,8 @@ export class Board3D {
       if (dbl && !spinner && isAllFives) {
         const extZ = Math.abs(Math.sin(spot.rotY)) > 0.5 ? TILE_W / 2 : TILE_L / 2;
         spinner = { x: spot.x, z: spot.z, extZ };
-        curU = { pos: { x: spot.x, z: spot.z - extZ }, dir: { dx: 0, dz: -1 }, side: 'U', rowZ: spot.z - extZ, lastCenter: spot, lastDbl: true };
-        curD = { pos: { x: spot.x, z: spot.z + extZ }, dir: { dx: 0, dz: 1 }, side: 'D', rowZ: spot.z + extZ, lastCenter: spot, lastDbl: true };
+        curU = { pos: { x: spot.x, z: spot.z - extZ }, dir: { dx: 0, dz: -1 }, side: 'U', prevDx: -1, armCol: true, lastCenter: { x: spot.x, z: spot.z }, lastDbl: true };
+        curD = { pos: { x: spot.x, z: spot.z + extZ }, dir: { dx: 0, dz: 1 }, side: 'D', prevDx: 1, armCol: true, lastCenter: { x: spot.x, z: spot.z }, lastDbl: true };
       }
     }
 
@@ -292,24 +309,28 @@ export class Board3D {
     if (!cur) return null;
     const advLen = GAP + TILE_L;
     const nextX = cur.pos.x + cur.dir.dx * advLen;
+    const nextZ = cur.pos.z + cur.dir.dz * advLen;
 
-    if (cur.dir.dx !== 0 && Math.abs(nextX) > MAX_X) {
-      const dZ = cur.side === 'R' ? 1 : -1;
-      let x, z;
-      if (cur.lastDbl) {
-        x = cur.lastCenter.x;
-        z = cur.rowZ + dZ * (2.0 + GAP);
-      } else {
-        x = cur.lastCenter.x + cur.dir.dx * 0.5;
-        z = cur.rowZ + dZ * (1.5 + GAP);
-      }
-      return { x, z, rotY: dZ === 1 ? 0 : Math.PI };
+    // Mirror step() exactly one tile ahead (non-double orientation assumption): a
+    // boundary crossing returns the corner-to-corner elbow spot, anything else the
+    // straight continuation.
+    const zLim = cur.armCol ? MAX_Z : MAX_Z + TILE_L + GAP;
+    if ((cur.dir.dx !== 0 && Math.abs(nextX) > MAX_X) || (cur.dir.dz !== 0 && Math.abs(nextZ) > zLim)) {
+      const newDir = cur.dir.dx !== 0
+        ? { dx: 0, dz: cur.side === 'R' ? 1 : -1 }
+        : { dx: -(cur.prevDx || (cur.side === 'U' ? -1 : 1)), dz: 0 };
+      return {
+        x: cur.pos.x + cur.dir.dx * (GAP + TILE_W / 2) + newDir.dx * (TILE_W / 2 + GAP + TILE_L / 2),
+        z: cur.pos.z + cur.dir.dz * (GAP + TILE_W / 2) + newDir.dz * (TILE_W / 2 + GAP + TILE_L / 2),
+        rotY: Math.atan2(newDir.dx, newDir.dz),
+      };
     }
 
-    const x = cur.pos.x + cur.dir.dx * (GAP + TILE_L / 2);
-    const z = cur.rowZ;
-    const rotY = Math.atan2(cur.dir.dx, 0);
-    return { x, z, rotY };
+    return {
+      x: cur.pos.x + cur.dir.dx * (GAP + TILE_L / 2),
+      z: cur.pos.z + cur.dir.dz * (GAP + TILE_L / 2),
+      rotY: Math.atan2(cur.dir.dx, cur.dir.dz),
+    };
   }
 
   // ── public sync ──

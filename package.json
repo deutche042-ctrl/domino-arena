@@ -6,7 +6,7 @@
   "main": "server/server.js",
   "scripts": {
     "start": "node server/server.js",
-    "test": "node --test tests/engine.test.js",
+    "test": "node --test tests/engine.test.js tests/bot.test.js",
     "e2e": "node scripts/e2e.js"
   },
   "dependencies": {

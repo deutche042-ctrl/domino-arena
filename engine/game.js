@@ -229,6 +229,17 @@ export class DominoGame {
     this._advanceTurn(pid);
   }
 
+  /** Turn-timer support: the current player ran out of time, so their turn is
+   *  force-skipped — legal even when they have moves, that is the penalty.
+   *  Counts toward the blocked-hand pass limit so an all-AFK table still resolves. */
+  forceSkip(pid) {
+    this._assertTurn(pid);
+    this.passCount++;
+    this.lastAction = { type: 'skip', pid };
+    if (this.passCount >= this.playerIds.length) return this._endHand(null, true);
+    this._advanceTurn(pid);
+  }
+
   /** Advance to the next hand after handEnd (winner leads). Keeps match scores. */
   nextHand(seed) {
     if (this.status !== 'handEnd') throw new Error('hand not over');
