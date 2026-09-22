@@ -9,7 +9,11 @@ import { RoomManager, TURN_MS } from './rooms.js';
 import { IllegalMove } from '../engine/game.js';
 import { chooseAction } from '../engine/bot.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Bundle-safe directory resolution: in the mobile CJS bundle esbuild replaces
+// import.meta.url with undefined, where node's own CJS __dirname is correct.
+const here = typeof import.meta.url === 'string'
+  ? path.dirname(fileURLToPath(import.meta.url))
+  : typeof __dirname !== 'undefined' ? __dirname : process.cwd();
 const PORT = process.env.PORT || 3000;
 
 const app = express();
@@ -17,7 +21,7 @@ app.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   next();
 });
-app.use(express.static(path.join(__dirname, '..', 'public'), { etag: false, maxAge: 0 }));
+app.use(express.static(process.env.DOMINO_PUBLIC_DIR || path.join(here, '..', 'public'), { etag: false, maxAge: 0 }));
 
 // LAN debug aid: which addresses the phone/host is reachable on (hotspot IP to share).
 app.get('/host-info', (req, res) => {
@@ -566,3 +570,10 @@ http.listen(PORT, () => {
   console.log(`\n  🁢 DOMINO ARENA running at http://localhost:${PORT}`);
   console.log(`  Share it: cloudflared tunnel --url http://localhost:${PORT}\n`);
 });
+
+// Mobile: the embedded launcher can stop the server in-process — the host-yield
+// path (a superior rival host appeared on the LAN). Unused on desktop.
+globalThis.__dominoStop = () => {
+  try { io.close(); } catch {}
+  try { http.close(); } catch {}
+};
