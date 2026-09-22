@@ -194,8 +194,11 @@ export class Board3D {
       }
     } else if (cur.dir.dz !== 0) {
       if (!cur.isArm) {
-        mustBend = true;
-        newDir = { dx: -(cur.prevDx || (cur.side === 'R' ? 1 : -1)), dz: 0 };
+        // If the corner was a double, let 1 tile advance in the column before bending into return row
+        if (!cur.lastDbl) {
+          mustBend = true;
+          newDir = { dx: -(cur.prevDx || (cur.side === 'R' ? 1 : -1)), dz: 0 };
+        }
       } else {
         if (Math.abs(nextZ) > MAX_Z) {
           mustBend = true;
@@ -206,27 +209,46 @@ export class Board3D {
 
     if (mustBend) {
       const oldDir = cur.dir;
-      let center, rotY;
-      if (!dbl) {
-        // Corner elbow: Square A matches Tile 1's end 1:1; Square B extends in newDir.
+      let center, rotY, nextPos;
+
+      if (cur.lastDbl && cur.lastCenter) {
+        // Double preceding the turn: its long axis is already aligned with newDir!
+        // The chain extends straight out of the double's short end facing newDir:
+        center = {
+          x: cur.lastCenter.x + newDir.dx * (TILE_L / 2 + GAP + (dbl ? TILE_W / 2 : TILE_L / 2)),
+          z: cur.lastCenter.z + newDir.dz * (TILE_L / 2 + GAP + (dbl ? TILE_W / 2 : TILE_L / 2)),
+        };
+        rotY = dbl
+          ? (newDir.dx !== 0 ? 0 : Math.PI / 2)
+          : Math.atan2(newDir.dx, newDir.dz);
+        nextPos = {
+          x: center.x + newDir.dx * (dbl ? TILE_W / 2 : TILE_L / 2),
+          z: center.z + newDir.dz * (dbl ? TILE_W / 2 : TILE_L / 2),
+        };
+      } else if (!dbl) {
+        // Normal elbow corner between two non-doubles
         center = {
           x: cur.pos.x + oldDir.dx * (GAP + TILE_W / 2) + newDir.dx * (TILE_W / 2),
           z: cur.pos.z + oldDir.dz * (GAP + TILE_W / 2) + newDir.dz * (TILE_W / 2),
         };
         rotY = Math.atan2(newDir.dx, newDir.dz);
+        nextPos = {
+          x: center.x + newDir.dx * (TILE_L / 2),
+          z: center.z + newDir.dz * (TILE_L / 2),
+        };
       } else {
-        // Double at corner: crosswise to oldDir, centered at far end of oldDir
+        // Double placed AT the corner:
+        // Crosswise to oldDir so its short end points in newDir
         center = {
           x: cur.pos.x + oldDir.dx * (GAP + TILE_W / 2),
           z: cur.pos.z + oldDir.dz * (GAP + TILE_W / 2),
         };
         rotY = oldDir.dx !== 0 ? 0 : Math.PI / 2;
+        nextPos = {
+          x: center.x + newDir.dx * (TILE_L / 2),
+          z: center.z + newDir.dz * (TILE_L / 2),
+        };
       }
-
-      const nextPos = {
-        x: center.x + newDir.dx * (TILE_L / 2),
-        z: center.z + newDir.dz * (TILE_L / 2),
-      };
 
       const nextCur = {
         pos: nextPos,
@@ -235,6 +257,8 @@ export class Board3D {
         bendCount: (cur.bendCount || 0) + 1,
         isArm: false,
         side: cur.side,
+        lastCenter: center,
+        lastDbl: dbl,
       };
 
       return { spot: { x: center.x, z: center.z, rotY, dbl }, nextCur };
@@ -242,6 +266,25 @@ export class Board3D {
 
     // Normal straight placement
     let center, rotY;
+    if (cur.lastDbl && cur.lastCenter && cur.dir.dz !== 0) {
+      // Continuing straight in a column off the end of a double
+      center = {
+        x: cur.lastCenter.x + cur.dir.dx * (TILE_L / 2 + GAP + (dbl ? TILE_W / 2 : TILE_L / 2)),
+        z: cur.lastCenter.z + cur.dir.dz * (TILE_L / 2 + GAP + (dbl ? TILE_W / 2 : TILE_L / 2)),
+      };
+      rotY = dbl
+        ? (cur.dir.dx !== 0 ? 0 : Math.PI / 2)
+        : Math.atan2(cur.dir.dx, cur.dir.dz);
+      const nextPos = {
+        x: center.x + cur.dir.dx * (dbl ? TILE_W / 2 : TILE_L / 2),
+        z: center.z + cur.dir.dz * (dbl ? TILE_W / 2 : TILE_L / 2),
+      };
+      return {
+        spot: { x: center.x, z: center.z, rotY, dbl },
+        nextCur: { ...cur, pos: nextPos, lastCenter: center, lastDbl: dbl },
+      };
+    }
+
     if (dbl) {
       // Crosswise: perpendicular to line of travel
       rotY = cur.dir.dx !== 0 ? 0 : Math.PI / 2;
@@ -255,7 +298,7 @@ export class Board3D {
       };
       return {
         spot: { x: center.x, z: center.z, rotY, dbl },
-        nextCur: { ...cur, pos: nextPos },
+        nextCur: { ...cur, pos: nextPos, lastCenter: center, lastDbl: true },
       };
     } else {
       // Long axis along travel direction
@@ -270,7 +313,7 @@ export class Board3D {
       };
       return {
         spot: { x: center.x, z: center.z, rotY, dbl },
-        nextCur: { ...cur, pos: nextPos },
+        nextCur: { ...cur, pos: nextPos, lastCenter: center, lastDbl: false },
       };
     }
   }
@@ -285,18 +328,18 @@ export class Board3D {
         let spot;
         if (dbl) {
           spot = { x: 0, z: 0, rotY: 0, dbl };
-          curL = { pos: { x: -TILE_W / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', prevDx: -1 };
-          curR = { pos: { x: TILE_W / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', prevDx: 1 };
+          curL = { pos: { x: -TILE_W / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', prevDx: -1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
+          curR = { pos: { x: TILE_W / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', prevDx: 1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
           if (isAllFives) {
             spinner = { x: 0, z: 0, extZ: TILE_L / 2 };
-            curU = { pos: { x: 0, z: -TILE_L / 2 }, dir: { dx: 0, dz: -1 }, side: 'U', isArm: true, prevDx: -1 };
-            curD = { pos: { x: 0, z: TILE_L / 2 }, dir: { dx: 0, dz: 1 }, side: 'D', isArm: true, prevDx: 1 };
+            curU = { pos: { x: 0, z: -TILE_L / 2 }, dir: { dx: 0, dz: -1 }, side: 'U', isArm: true, prevDx: -1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
+            curD = { pos: { x: 0, z: TILE_L / 2 }, dir: { dx: 0, dz: 1 }, side: 'D', isArm: true, prevDx: 1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
           }
         } else {
           const rotY = Math.PI / 2 + (mv.f ? Math.PI : 0);
           spot = { x: 0, z: 0, rotY, dbl };
-          curL = { pos: { x: -TILE_L / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', prevDx: -1 };
-          curR = { pos: { x: TILE_L / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', prevDx: 1 };
+          curL = { pos: { x: -TILE_L / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', prevDx: -1, lastCenter: { x: 0, z: 0 }, lastDbl: false };
+          curR = { pos: { x: TILE_L / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', prevDx: 1, lastCenter: { x: 0, z: 0 }, lastDbl: false };
         }
         spots.push(spot);
         continue;
@@ -312,8 +355,8 @@ export class Board3D {
       if (dbl && !spinner && isAllFives) {
         const extZ = Math.abs(Math.sin(spot.rotY)) > 0.5 ? TILE_W / 2 : TILE_L / 2;
         spinner = { x: spot.x, z: spot.z, extZ };
-        curU = { pos: { x: spot.x, z: spot.z - extZ }, dir: { dx: 0, dz: -1 }, side: 'U', isArm: true, prevDx: -1 };
-        curD = { pos: { x: spot.x, z: spot.z + extZ }, dir: { dx: 0, dz: 1 }, side: 'D', isArm: true, prevDx: 1 };
+        curU = { pos: { x: spot.x, z: spot.z - extZ }, dir: { dx: 0, dz: -1 }, side: 'U', isArm: true, prevDx: -1, lastCenter: { x: spot.x, z: spot.z }, lastDbl: true };
+        curD = { pos: { x: spot.x, z: spot.z + extZ }, dir: { dx: 0, dz: 1 }, side: 'D', isArm: true, prevDx: 1, lastCenter: { x: spot.x, z: spot.z }, lastDbl: true };
       }
     }
 
@@ -464,7 +507,7 @@ export class Board3D {
   _fitCamera(spots) {
     if (!spots.length) {
       this.controls.target.set(0, 0, 0);
-      this._camGoal = { x: 0, y: 20, z: 13 };
+      this._camGoal = { x: 0, y: 16, z: 11 };
       return;
     }
     let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
@@ -472,14 +515,10 @@ export class Board3D {
       minX = Math.min(minX, s.x); maxX = Math.max(maxX, s.x);
       minZ = Math.min(minZ, s.z); maxZ = Math.max(maxZ, s.z);
     }
-    if (this._boneCount > 0) {
-      maxX = Math.max(maxX, 12.8);
-      maxZ = Math.max(maxZ, 11.5);
-    }
     const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
-    const span = Math.max(maxX - minX + 5, (maxZ - minZ) * 1.9 + 7, 14);
+    const span = Math.max(maxX - minX + 5, (maxZ - minZ) * 1.9 + 7, 13);
     this.controls.target.set(cx, 0, cz);
-    const dist = Math.min(Math.max(span, 14), 44);
+    const dist = Math.min(Math.max(span, 13), 42);
     this._camGoal = { x: cx, y: dist * 0.78, z: cz + dist * 0.62 };
   }
 

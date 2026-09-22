@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=15';
+import { Board3D } from './board3d.js?v=16';
 import { Home3D } from './home3d.js?v=2';
 import { tileImage } from './tiles.js?v=11';
 import { sfx } from './sfx.js?v=14';
@@ -1134,7 +1134,7 @@ function renderVoicePanel() {
     row.innerHTML = `
       <span class="vp-dot" aria-hidden="true"></span>
       <span class="vp-name">${esc(myName || 'أنت')} <span class="vp-you">(أنت)</span></span>
-      <span class="vp-state">${hostMuted ? 'مكتوم من المضيف' : muted ? 'مكتوم' : 'بتتكلم'}</span>`;
+      <span class="vp-state">${hostMuted ? 'مكتوم من المضيف' : muted ? 'مكتوم' : voiceSelf.speaking ? 'بتتكلم' : ''}</span>`;
     list.appendChild(row);
   }
 
