@@ -226,6 +226,205 @@ cloudflared tunnel --url http://localhost:3000  # prints https://<random>.tryclo
 | All Fives spinner scoring bugs    | TDD against the official pagat.com worked example            |
 | Friends on mobile                 | Responsive layout is Phase 6 acceptance criteria             |
 
+---
+
+# 📱 Android (APK) Conversion Plan — LAN Hotspot Multiplayer
+
+*Added 2026-09-23. Supersedes nothing — the web/tunnel flow above stays exactly as is.*
+
+## A. Goal
+
+One installable **APK** of Domino Arena that Android phones can install directly (no Play Store).
+On a hotspot with **zero internet**, one phone hosts the game server and the others join it and play —
+same 2–4 player matches, same bots, same chat, **same WebRTC voice**, no PC and no Cloudflare Tunnel.
+
+**Non-goals:** iOS build (Capacitor makes it a later freebie), Play Store publication, rewriting the
+engine or the socket protocol, accounts/leaderboards, any framework or build step for the game client itself.
+
+## B. The architecture decision (everything else follows from it)
+
+**One APK = Capacitor WebView shell + embedded Node.js runtime (nodejs-mobile). Each phone serves the
+client to *itself*; the host phone additionally runs the real Node server.**
+
+```
+HOTSPOT (no internet)
+┌─────────────────────────── host phone ────────────────────────────┐
+│  APK: [ Capacitor WebView → bundled client (http://localhost) ]   │
+│        └─ io("http://127.0.0.1:3000")                             │
+│  APK: [ embedded Node.js  →  server/server.js on 0.0.0.0:3000 ]   │
+│        shows its LAN IP (e.g. 192.168.43.1:3000) + room code      │
+└───────────────▲───────────────────────────────────────────────────┘
+                │  socket.io (ws) + WebRTC voice (P2P on LAN)
+┌───────────────┴──────────── guest phone ──────────────────────────┐
+│  APK: [ Capacitor WebView → bundled client (http://localhost) ]   │
+│        └─ io("http://192.168.43.1:3000")  ← typed or remembered   │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+Why each piece is forced:
+
+1. **The server must run somewhere.** Rewriting rooms/timers/voice-signaling as native Kotlin (or a
+   QuickJS engine host) throws away `rooms.js`/`server.js` and every protocol guarantee — rejected.
+   Embedding Node (nodejs-mobile) reuses **100% of the server + engine + bots unchanged**.
+2. **Every device loads the client from its own local copy, never from the host's IP.** This is the
+   subtle load-bearing choice: `getUserMedia` (voice) only works in a **secure context**. If a guest's
+   WebView opened `http://192.168.x.x:3000`, the mic would be silently dead — insecure origin. When the
+   client is served by Capacitor's own local server the page origin is `http://localhost`, which *is*
+   secure, so voice works on plain-LAN HTTP. (Note `app.js:1321 applyVoiceSupport()` already disables
+   mic buttons when `voice.secure` is false — with this design it simply never trips.)
+3. **Capacitor over Cordova/React Native/WebView-Activity:** Capacitor exists precisely to wrap a
+   vanilla-JS app, gives local HTTP serving, permission bridging, splash/icon tooling, and a clean
+   plugin API for starting/stopping the embedded Node. No framework touches the game code.
+
+Three runtime modes, one codebase:
+
+| Mode | WebView origin | socket.io target | Used when |
+|---|---|---|---|
+| **Host (APK)** | Capacitor local server | `http://127.0.0.1:3000` (embedded node) | "استضافة على هذا الجهاز" |
+| **Join (APK)** | Capacitor local server | `http://<host-ip>:3000` (typed/persisted) | friends on the hotspot |
+| **Web (unchanged)** | the real server | same-origin (current default) | browser / Cloudflare Tunnel — today's flow, untouched |
+
+## C. What the deep dive established (facts this plan relies on)
+
+- **Single connection point.** `public/js/app.js:1339` — `socket = io({ transports: [...] })`, default
+  same-origin. One line to make pluggable. The voice client receives that same socket (`voice.js`), so
+  signaling needs no changes at all.
+- **Server already binds all interfaces.** `server/server.js:546` `http.listen(PORT)` → reachable on the
+  hotspot LAN as-is. Static serving at `server/server.js:19`.
+- **Offline is currently impossible — three CDN dependencies in `public/index.html`:**
+  jsdelivr importmap (`three@0.160.0` + addons), jsdelivr `socket.io-client@4.8.1`, Google Fonts
+  (Cairo, Reem Kufi). Actual usage is tiny: `three.module.js` + `OrbitControls.js` +
+  `RoundedBoxGeometry.js` (checked `home3d.js:4-5`, `board3d.js:2-4`), one client bundle, two font
+  families. All vendorable as static files (~1 MB total).
+- **Voice ICE is hardcoded to internet relays.** `public/js/voice.js:27-41` — Google STUN + OpenRelay
+  TURN. Unreachable offline; on the same hotspot plain host-candidates connect, so LAN mode should ship
+  with **empty `iceServers`** (faster connect, no dead-server timeouts), keeping STUN/TURN only for web mode.
+- **Node feature floor:** server/engine ESM + `node:path`, `node:http`, `node:url`, `node:crypto`
+  (`randomUUID` in `rooms.js:2` → Node ≥ 14.17). Both deps (express 4, socket.io 4) are pure JS →
+  **esbuild-bundleable to a single CJS file**, which sidesteps the fragile ESM support of embedded Node
+  runtimes entirely.
+- **No CORS is configured** (same-origin by design). APK guests (origin `http://localhost`) talking to
+  `http://<host-ip>:3000` is cross-origin → server needs `cors: { origin: true }` on Socket.IO (fine for
+  a game; additive change, e2e unaffected).
+- **Viewport/RTL/mobile meta are already right** (`index.html:5`, 7 media queries, Arabic UI throughout).
+  Remaining mobile work is touch ergonomics and keyboard/resizing behaviour, not a layout rewrite.
+- **Repo state:** no `android/`/`mobile/` dirs yet; cache-busting `?v=` convention is live
+  (`index.html:319` etc.) and must be bumped for every touched client file per AGENTS.md.
+
+## D. Phase plan (each phase = verified change = its own commit)
+
+### Phase 0 — Vendor all client dependencies (offline-proof the web client)
+- Download into `public/vendor/`: `three/0.160.0/build/three.module.js`,
+  `three/0.160.0/examples/jsm/controls/OrbitControls.js`,
+  `three/0.160.0/examples/jsm/geometries/RoundedBoxGeometry.js`, `socket.io.min.js` (4.8.1),
+  Cairo + Reem Kufi woff2 subsets + a small `@font-face` block appended to `style.css`.
+- Repoint the importmap to `./vendor/...`, replace the CDN `<script>` with the local one
+  (keep exact versions pinned), bump `?v=` on every touched import line.
+- **Verify:** block CDN hosts in devtools/hosts file → full game still works (3D board, fonts, sockets);
+  `npm test` + `npm run e2e` green. Files: `index.html`, `css/style.css`, `board3d.js`, `home3d.js`, `app.js` (v-bumps).
+
+### Phase 1 — Pluggable server URL + host-info endpoint
+- `app.js`: resolve `SERVER_URL = localStorage['domino_server_url'] || ''` → `io(SERVER_URL || { transports })`
+  (empty string preserves today's same-origin behaviour; localStorage set by APK glue or a hidden
+  "خادم مخصص" field on the home screen for power users).
+- `server/server.js`: `cors: { origin: true }` on the Socket.IO constructor; new tiny
+  `GET /host-info` → `{ port, ips: [LAN IPv4s from os.networkInterfaces()] }` (HTTP only — no protocol
+  change, e2e untouched).
+- **Verify:** `npm run e2e 3100` + manual: laptop browser joins a room by IP over LAN.
+
+### Phase 2 — Capacitor shell (guest-only APK, internet server still required)
+- Tooling on the PC: JDK 17 + Android SDK (Android Studio) — one-time.
+- New self-contained `mobile/` tree: Capacitor app, `package.json` for cap deps only,
+  `mobile/sync.mjs` (plain `node:fs` copy of `public/` → `mobile/www/`), npm scripts at root:
+  `mobile:sync`, `mobile:apk:debug`. Source of truth stays the repo root — `mobile/` only ever holds copies.
+- Debug APK on a real phone: verify home3d/board3d rendering + touch, 60fps feel, fullscreen button,
+  back-button behaviour, WebView version note.
+- **Verify:** phone (guest) plays a full match against a PC-hosted server over hotspot. This phase alone
+  de-risks all WebView/cleartext/permission issues before the hard part.
+
+### Phase 3 — Embedded Node host (the core milestone, ~50% of total risk)
+- Bundle: `mobile/build-server.mjs` → esbuild `server/server.js` (+engine) to one CJS file
+  `mobile/node/server-bundle.cjs` with prod deps inlined; output committed to `mobile/node/`.
+- Runtime: **nodejs-mobile** — time-boxed spike first: try the community Capacitor plugin for
+  nodejs-mobile; if stale, hand-roll a ~100-line Kotlin Capacitor plugin over the nodejs-mobile AAR
+  (start/stop `server-bundle.cjs`, stdout → logcat). Spike acceptance: `node -e`-style script runs,
+  HTTP listens, both `arm64-v8a` and `armeabi-v7a` ship in the AAR.
+- Host mode UX (Arabic): home screen button **"استضافة على هذا الجهاز"** → start node → poll
+  `127.0.0.1:3000/host-info` until up → set `domino_server_url=127.0.0.1:3000` → normal flow; host
+  screen shows "شارك كود الغرفة + IP: 192.168.x.x". Join mode: **"انضمام"** with an IP field next to the
+  code field (persisted; defaults to last host). Full offline airplane-mode play vs bots also works here
+  (engine is pure) — free bonus.
+- Android lifecycle (the part that actually bites): **foreground service** + ongoing notification
+  ("اللعبة تعمل") so the server survives host screen-lock/app-switch; `FLAG_KEEP_SCREEN_ON` while hosting
+  (toggleable); request battery-optimization exemption on first host run.
+- Manifest: `INTERNET`, `RECORD_AUDIO`, `ACCESS_NETWORK_STATE`, `usesCleartextTraffic=true`
+  (cleartext LAN HTTP is the whole point; acceptable for this app).
+- **Verify:** two real phones, hotspot, full multi-hand match; host locks screen mid-game → game continues;
+  guest leaves → host migration fires (existing logic, never to a bot — unchanged).
+
+### Phase 4 — Voice on LAN
+- Mic runtime permission via Capacitor's WebView permission bridge (`RECORD_AUDIO` already in manifest).
+- `voice.js`: accept an optional ICE config (set once by `app.js`): LAN mode → `iceServers: []`
+  (host candidates connect peers on the same subnet); web mode → existing STUN/TURN untouched.
+  Update `voice.js` header note + bump `?v=`.
+- **Verify:** 3-phone voice call on hotspot; check host↔guest and **guest↔guest** P2P (see AP-isolation risk below).
+
+### Phase 5 — Mobile UI pass
+- Small-screen audit of all three screens: hand-tile tap targets, hand scrolling, chat drawer vs the
+  Android soft keyboard (window resize), lobby/game safe-areas (notch), double-tap zoom prevention,
+  room-code input keyboard (`inputmode`/`enterkeyhint` — chat already has `enterkeyhint`).
+- Decide & lock orientation (portrait-first, board auto-fits already).
+- **Verify:** on the smallest and largest physical phones available.
+
+### Phase 6 — Release build & distribution
+- Identity: `com.mahmoud.dominoarena`, name **"دومينو أرينا"**, adaptive icon from the existing tile SVG
+  emblem (`index.html:38-56`), splash, `versionCode` 1.
+- Signing: generate `mobile/keystore/domino.jks` (gitignored, password stored offline) + release signing
+  config → `assembleRelease`. Ship **arm64-v8a release APK** (~35–45 MB with libnode) + optional universal
+  debug APK. Friends: share APK file → "install unknown apps" → done.
+- Docs: README section "اللعب على الهاتف بدون إنترنت" (host/join steps, hotspot notes, WebView update
+  note) + AGENTS.md commands/architecture sync. Commit policy per AGENTS.md throughout.
+
+## E. Test matrix (Phase 3/4 acceptance)
+
+| Scenario | Expected |
+|---|---|
+| Airplane mode, host phone, Play vs 3 bots | fully playable (engine + bots are offline-capable) |
+| Hotspot, 1 host + 3 guest APKs, Draw variant | full match, scores, hand-end flow |
+| Voice: host↔guest and guest↔guest on hotspot | audio both directions, speaking rings |
+| Host phone screen lock / app switch mid-game | turn timers keep firing (foreground service) |
+| Guest airplane→wifi toggle / socket drop | token reconnect rejoins room (existing mechanism) |
+| Host leaves app entirely | game dies with the host — **inherent to LAN hosting; document it** |
+| Same APK, web mode via tunnel URL in WebView/browser | unchanged today-behaviour |
+| Desktop regression | `npm test`, `npm run e2e`, `npm run e2e:voice` all green |
+
+## F. Risks & mitigations
+
+| Risk | Mitigation |
+|---|---|
+| nodejs-mobile maintenance/state in 2026 unknown | Phase 3 spike is time-boxed and first; esbuild-CJS bundle maximizes runtime compatibility; fallbacks below |
+| **Plan B** if embedded Node fails | Native Kotlin WebSocket server + QuickJS running only `engine/` (rewrite of rooms/timers/protocol) — ~3× cost of Phase 3, avoided unless forced |
+| **Plan C** (no APK blocker) | PWA + Termux on host phone — rejected as primary (no APK, mic broken on guest origins) |
+| Hotspot AP-isolation blocks guest↔guest P2P | Game traffic always goes through the host so play is safe; voice (mesh P2P) is the only casualty — document + future option: relay audio over the socket through the host |
+| Android "no internet on this Wi-Fi" prompt confuses guests | one line in the Arabic install instructions: tap "keep connection" |
+| Hotspot IP changes between sessions | `/host-info` prints current IP on the host screen; guests' last-host remembered |
+| Old/stale Android System WebView lacks importmap | minSdk 24 (Android 7) + troubleshooting note; WebView auto-updates via Play |
+| libnode bloats APK | arm64-only release; universal kept as debug variant |
+| Timers/`sessions` regressions during server edits | server changes are CORS + one read-only endpoint only — engine, protocol, and timer hygiene untouched |
+
+## G. Open questions (defaults chosen — change before Phase 6 if wanted)
+
+1. Package name `com.mahmoud.dominoarena` and app name "دومينو أرينا" — ok?
+2. minSdk 24 (Android 7, ~97% devices) — ok, or lower?
+3. Ship arm64-only release APK (recommended) or universal?
+4. APK also keeps internet/tunnel play (recommended, free) — yes?
+
+## H. Draft phone instructions (final wording goes in README, Arabic)
+
+1. المضيف: افتح التطبيق ← "استضافة على هذا الجهاز" ← شارك الكود والـ IP الظاهر.
+2. الأصدقاء: اتصلوا بالـ hotspot ← افتحوا التطبيق ← اكتبوا الـ IP + كود الغرفة ← انضمام.
+3. أول تثبيت: اسمحوا "التثبيت من مصادر غير معروفة". لو ظهر "لا يوجد إنترنت" على الـ hotspot اضغطوا "الاحتفاظ بالاتصال".
+
 
 
 
