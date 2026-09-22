@@ -507,12 +507,13 @@ io.on('connection', (socket) => {
     p.connected = false;
     p.socketId = null;
     // Voice is tied to the live socket — drop it now; a reconnected client
-    // re-announces itself with voice:join and the mesh rebuilds.
-    if (p.voice) {
-      p.voice = false;
-      p.voiceMuted = false;
-      broadcastVoice(room);
-    }
+    // re-announces itself with voice:join and the mesh rebuilds. Disconnect is
+    // a full cleanup: voiceMuted and hostMuted both reset (clean slate).
+    const hadVoice = !!p.voice;
+    p.voice = false;
+    p.voiceMuted = false;
+    p.hostMuted = false;
+    if (hadVoice) broadcastVoice(room);
 
     // In lobby: remove the player after grace period (allows quick page refresh)
     if (room.state === 'lobby') {

@@ -107,19 +107,29 @@ const msg = await once(b, 'chat:msg');
 ok(msg && msg.from === 'Alice' && msg.text === 'gg', 'chat delivered');
 
 // ── voice signaling: roster, mute flag, relay, disconnect cleanup ──
+// voice:state listeners are registered BEFORE each trigger and every broadcast
+// copy is consumed in order — a stale in-flight roster must never be caught by
+// the next once() (loopback delivery to two sockets is not ordered, so the
+// previous register-after-emit pattern was flaky here).
+const rosterA1 = new Promise(r => a.once('voice:state', r));
 const rosterB = new Promise(r => b.once('voice:state', r));
 ok((await emit(a, 'voice:join', {})).ok, 'alice opened her mic');
 const roster1 = await rosterB;
 ok(roster1 && roster1.length === 1 && roster1[0].id === cr.playerId &&
    roster1[0].name === 'Alice' && roster1[0].muted === false, 'voice roster broadcast to the room');
+await rosterA1;   // drain alice's own copy
 
 const rosterA = new Promise(r => a.once('voice:state', r));
+const rosterB2 = new Promise(r => b.once('voice:state', r));
 ok((await emit(b, 'voice:join', {})).ok, 'bob opened his mic');
 const roster2 = await rosterA;
+await rosterB2;   // drain bob's own copy
 ok(roster2 && roster2.length === 2, 'roster lists both voice players');
 
+const muteStateA = new Promise(r => a.once('voice:state', r));
 const muteState = new Promise(r => b.once('voice:state', r));
 emit(a, 'voice:mute', { muted: true });
+await muteStateA;   // drain alice's copy first
 const roster3 = await muteState;
 ok(roster3 && roster3.find(p => p.id === cr.playerId)?.muted === true, 'mute flag broadcasts');
 
@@ -128,13 +138,17 @@ emit(a, 'voice:signal', { to: jr.playerId, data: { description: { type: 'offer',
 const sig = await relayed;
 ok(sig && sig.from === cr.playerId && sig.data.description?.type === 'offer', 'signaling relayed to the target peer');
 
+const rosterLeftP = new Promise(r => a.once('voice:state', r));
 b.emit('voice:leave');
-const rosterLeft = await new Promise(r => a.once('voice:state', r));
+const rosterLeft = await rosterLeftP;
 ok(rosterLeft && rosterLeft.length === 1, 'voice:leave removes bob from the roster');
 
 // disconnect drops the player from the voice roster
+const rejoinB = new Promise(r => b.once('voice:state', r));
+const rejoinA = new Promise(r => a.once('voice:state', r));
 ok((await emit(b, 'voice:join', {})).ok, 'bob re-opened his mic');
-await sleep(80);
+await rejoinB;   // bob's copy: the leave roster (if still in flight) or the rejoin roster
+await rejoinA;   // alice's rejoin roster
 const rosterDropP = new Promise(r => a.once('voice:state', r));
 b.close();
 const rosterDrop = await rosterDropP;
@@ -169,7 +183,9 @@ h.on('game:state', s => {
     else if (s.canDraw) h.emit('game:draw');
     else if (s.canPass) h.emit('game:pass');
   }
-  if (botMoves >= 5 || s.status === 'matchEnd') botDoneResolve();
+  // default variant is draw: one bot may chain several draw actions while the
+  // turn stays on it, so don't stop before the human has also had a turn
+  if ((botMoves >= 5 && humanPlayed) || s.status === 'matchEnd') botDoneResolve();
 });
 await botDone;
 ok(botIds.size === 3, 'table has 3 bots');
