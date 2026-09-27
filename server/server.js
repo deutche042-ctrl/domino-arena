@@ -41,7 +41,7 @@ app.get('/host-info', (req, res) => {
     rooms++;
     players += room.players.filter((p) => !p.isBot).length;
   }
-  res.json({ port: PORT, ips, rooms, players });
+  res.json({ port: Number(PORT), ips, rooms, players });
 });
 
 const http = createServer(app);
