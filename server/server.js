@@ -17,13 +17,18 @@ const here = typeof import.meta.url === 'string'
 const PORT = process.env.PORT || 3000;
 
 const app = express();
+app.set('trust proxy', 1);   // behind Render/Cloudflare — correct client IPs + secure req.protocol
 app.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   next();
 });
+
+// Uptime probe: Render health check + free keep-alive ping target.
+app.get('/healthz', (req, res) => res.status(200).send('ok'));
 app.use(express.static(process.env.DOMINO_PUBLIC_DIR || path.join(here, '..', 'public'), { etag: false, maxAge: 0 }));
 
 // LAN debug aid: which addresses the phone/host is reachable on (hotspot IP to share).
+// Also reports live room/player counts so the APK discovery list can label each host.
 app.get('/host-info', (req, res) => {
   const ips = [];
   for (const addrs of Object.values(os.networkInterfaces())) {
@@ -31,7 +36,12 @@ app.get('/host-info', (req, res) => {
       if (a.family === 'IPv4' && !a.internal) ips.push(a.address);
     }
   }
-  res.json({ port: PORT, ips });
+  let rooms = 0, players = 0;
+  for (const room of manager.rooms.values()) {
+    rooms++;
+    players += room.players.filter((p) => !p.isBot).length;
+  }
+  res.json({ port: PORT, ips, rooms, players });
 });
 
 const http = createServer(app);
