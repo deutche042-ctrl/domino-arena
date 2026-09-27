@@ -38,7 +38,10 @@ npm run apk:release  # sync + assembleRelease (arm64 only; needs DOMINO_STORE en
 ```
 
 Needs JDK 21 (`JAVA_HOME`) and Android SDK with NDK 27.2 + CMake 3.22.1 (the nodejs plugin compiles
-a JNI shim against the libnode it downloads). Release signing reads `DOMINO_STORE` (keystore path),
+a JNI shim against the libnode it downloads). This machine's JDK 21 lives at
+`%USERPROFILE%\.jdks\temurin-21\jdk-21.0.12.1+1` (the system default `JAVA_HOME` is 17 → set
+`JAVA_HOME` per-build command or the gradle compile fails with `invalid source release: 21`).
+Release signing reads `DOMINO_STORE` (keystore path),
 `DOMINO_STORE_PASS`, `DOMINO_KEY_PASS` env vars; keystore lives at `mobile/keystore/` (gitignored).
 
 Architecture: every device runs the embedded node (`mobile/launcher.cjs` = node project entry),

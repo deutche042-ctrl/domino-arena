@@ -245,29 +245,29 @@ ceiling** — Android SoftAP typically caps at 10–30 stations (OEM-dependent).
 
 **Non-goals:** iOS build (Capacitor makes it a later freebie), Play Store publication, rewriting the
 engine or the socket protocol, accounts/leaderboards, any framework or build step for the game client
-itself, room-state migration between hosts (host death = game restarts, see D).
+itself, room-state migration (room-owner death = that room dies, see D).
 
 ## B. The architecture decision (everything else follows from it)
 
 **One APK = Capacitor WebView shell + embedded Node.js runtime. Each phone serves the client to
-*itself* from the Capacitor local server; a launcher script inside the embedded Node elects exactly
-one phone on the network to run the real game server, and every other phone auto-connects to it.**
+*itself* from the Capacitor local server, and EVERY device starts its own full game server on
+0.0.0.0:3000 at app launch. Nearby servers announce themselves over UDP and the app shows them as a
+tap-to-join list. A room belongs to the phone that created it — if that phone leaves, only their room
+dies; nobody else is affected. There is no single host, no leader contention, no re-election.**
 
 ```
 HOTSPOT / LAN (no internet)
-┌───────────────────────── elected host phone ───────────────────────┐
+┌──────────────────────── every phone runs this ─────────────────────┐
 │  WebView → bundled client (origin http://localhost, secure ctx)    │
-│            └─ io("http://127.0.0.1:3000")   ← from /status         │
-│  embedded node: launcher won election → game server :3000 (TCP)    │
-│                  + discovery responder :3000 (UDP) + 2s beacon     │
-│                  + status endpoint 127.0.0.1:3001                  │
+│            └─ io(serverUrl)  ← from /status + tap-to-join list     │
+│  embedded node: launcher.cjs — game server :3000 (TCP, always on)  │
+│                  + discovery beacon :3000 (UDP QUERY / OFFER)      │
+│                  + status endpoint 127.0.0.1:3001 (/status,        │
+│                    /peer/<ip> proxy for the discovery list)        │
 └───────────────▲───────────────────────────────────────────────────┘
                 │ socket.io (ws) + WebRTC voice (P2P on LAN)
-┌───────────────┴───────────────── guest phone ──────────────────────┐
-│  WebView → bundled client (origin http://localhost, secure ctx)    │
-│            └─ io("http://<host-ip>:3000")   ← from /status         │
-│  embedded node: launcher lost election → discovery client only     │
-└───────────────────────────────────────────────────────────────────┘
+                └─ rooms live on the phone that created them;
+                   guests connect to that phone's 192.168.* address
 ```
 
 Why each piece is forced:
@@ -281,12 +281,14 @@ Why each piece is forced:
    voice works on plain-LAN HTTP (`app.js applyVoiceSupport()` never trips). **Consequence: pin
    `androidScheme: 'http'`** — do not let Capacitor 8's https default create an https WebView origin,
    which would make the `ws://…:3000` socket blocked mixed content.
-3. **Guest nodes never load the game server.** Every device runs the embedded node (it is the discovery
-   participant), but only the elected host requires the server bundle — a guest's node is a small
-   dgram + loopback-HTTP shim. On a 30-device LAN, 29 phones skip the express/socket.io footprint.
-4. **Election happens on the NETWORK, not via port binding.** (v1 flaw caught in debate: TCP binds are
-   per-device — two phones both "succeed" binding 0.0.0.0:3000, so EADDRINUSE can never elect a winner
-   across devices.) Spec in section D.
+3. **Every device runs the full server anyway — so there is no election to lose.** The express/socket.io
+   footprint is identical on all phones (one bundle); discovery decides only *where each player plays*,
+   not *who hosts*. Host death can never cascade: only that phone's rooms die. (Supersedes the v1
+   election design — split-brain, YIELD and re-election are not needed when nobody is elected.)
+4. **Discovery, not binding, is the network protocol.** (v1 flaw caught in debate: TCP binds are
+   per-device, so EADDRINUSE can never coordinate across devices — with the every-device-hosts model
+   this stops mattering entirely; UDP presence + a TCP /24 sweep fallback find the servers.) Spec in
+   section D.
 5. **Capacitor 8 + `@capawesome/capacitor-nodejs@0.1.1`** (researched 2026-09: the only maintained,
    16KB-page-aligned embedded-Node path; Node 18.20.4 runtime; auto-starts the node project at app
    launch on a background thread, stdout → logcat). Alternatives rejected: janeasystems upstream
@@ -299,8 +301,8 @@ Two modes, one codebase:
 
 | Mode | WebView origin | socket.io target | How decided |
 |---|---|---|---|
-| **Host (APK)** | Capacitor local server | `http://127.0.0.1:3000` | launcher won the network election |
-| **Guest (APK)** | Capacitor local server | `http://<host-ip>:3000` | launcher lost/discovered |
+| **Local (APK default)** | Capacitor local server | `http://127.0.0.1:3000` | every device hosts; play solo or with anyone who taps this phone's entry |
+| **Guest via discovery (APK)** | Capacitor local server | `http://<peer-ip>:3000` | user tapped that phone in the nearby-list (rooms live on the creating phone) |
 | **Web (unchanged)** | the real server | same-origin (current default) | no `window.Capacitor` → today's behaviour, untouched |
 
 ## C. Facts the plan relies on (deep dive + packaging research, 2026-09)
@@ -333,55 +335,48 @@ Two modes, one codebase:
   a runtime permission on 13+ (FGS runs even if denied). `android:usesCleartextTraffic="true"` for
   plain-LAN HTTP. `abiFilters arm64-v8a` for release size.
 
-## D. Zero-config server election — `launcher.cjs` spec
+## D. Zero-config discovery — `launcher.cjs` spec (as implemented)
 
 One hand-written CJS file is the node project entry (`package.json.main`). It never writes to its own
 dir (the plugin re-copies assets on app update) and never calls `process.exit` (embedded-node rule) —
-idle loops only. One node process, three listeners: UDP :3000 (discovery), TCP :3000 (game server, host
-only), HTTP :3001 **bound to 127.0.0.1 explicitly** (`GET /status`, `POST /reelect`, CORS `*`).
+idle loops only. One node process, three listeners: UDP :3000 (discovery), TCP :3000 (game server,
+**always started immediately on 0.0.0.0**), HTTP :3001 **bound to 127.0.0.1 explicitly** (`GET /status`,
+`GET /peer/<ip>`, CORS `*`).
 
-**Packet** (UDP, < 200 B): 4-byte magic `DMA1` + JSON. QUERY `{t:'q',v:1,id}`, OFFER
-`{t:'o',v:1,id,prio,port}`, CLAIM `{t:'c',v:1,id,prio,port}`. Election tuple `(prio,id)` = two random
-u32s, compared lexicographically. Replies unicast to the source addr:port. Packets from non-192.168.*
-sources are ignored (cellular-interface garbage / CGNAT 10.x never auto-connects anyone).
+**Packet** (UDP, < 200 B): 4-byte magic `DMA1` + JSON. QUERY `{t:'q',v:1}`, OFFER
+`{t:'o',v:1,id,port}`. Replies unicast to the source addr:port. Packets from non-192.168.* sources are
+ignored for presence (cellular-interface garbage / CGNAT 10.x never auto-connects anyone); queries are
+answered from any source (loopback sim + debugging). A device never reacts to its own datagrams
+(all local 192.168.* addresses are filtered, not just the first interface — VirtualBox/second adapters
+would otherwise self-list).
 
-**State machine:** `PROBE → CLAIM → HOST | CLIENT`; `CLIENT → (host lost) → PROBE`; `HOST → (superior
-offer heard) → CLIENT` (split-brain backstop).
-
+**Flow (no state machine — it's just presence):**
 ```
-PROBE   broadcast QUERY every 500 ms ×5 (2.5 s window absorbs AP DTIM delay);
-        first OFFER → becomeClient(offer); none → CLAIM.
-        (fallback when broadcast looks dead: TCP connect-sweep of the wifi /24 on :3000,
-        254 sockets ~1.5 s — also discovers a PC running `npm start`)
-CLAIM   broadcast CLAIM every 400 ms ×5, collect rivals; after 2 s the superior (prio,id) wins:
-        winner → becomeHost(); loser → awaitOfferLoop (QUERY ×10 @1 s; OFFER → client;
-        none → re-elect — winner died before announcing)
-HOST    require the esbuild-bundled game server in-process (TCP :3000 bind failure = own zombie
-        launcher from a previous run → becomeClient('http://127.0.0.1:3000'), idempotent);
-        await 127.0.0.1:3000 listening → role=host, serverUrl=http://127.0.0.1:3000;
-        broadcast OFFER beacon every 2 s (late joiners + YIELD trigger for a rival host)
-CLIENT  serverUrl = offer's ip:port; watchdog: unicast QUERY to last host every 2 s;
-        3 misses (≈6 s) → status 'lost' → PROBE after a 15 s re-election cooldown
-YIELD   a HOST hearing an OFFER with superior (prio,id): stop io+http server → becomeClient
-        (asymmetric-UDP-loss backstop; converges to one host; WebView reloads on serverUrl change)
+BOOT   start the game server on 0.0.0.0:3000 right away; bind UDP; status server on 3001.
+BEACON broadcast OFFER every 2 s on each 192.168.* iface + 255.255.255.255 (late joiners).
+QUERY  an OFFER is unicast back instantly (newcomers appear without waiting a beacon cycle).
+PEERS  ip → { ip, port, lastSeen }; dropped after 6 s of silence.
+SWEEP  fallback for ROMs that block UDP broadcast: TCP connect-sweep of our /24 on :3000,
+       validated against /host-info before trusting anything it finds; runs at startup and
+       every 20 s while no peers are known (also discovers a PC running `npm start`).
 ```
 
 **Status contract** — `GET http://127.0.0.1:3001/status` → JSON, CORS `*`:
-`{ status: 'electing'|'host'|'client'|'lost', serverUrl, ips: [192.168.* IPv4s] }`.
-The WebView (only when `window.Capacitor` exists) polls every 300 ms: `electing` →
-"جاري البحث عن لعبة على الشبكة…" shimmer; `host`/`client` → `io(serverUrl)` (re-init if it ever
-changes); `lost` → toast "فقدنا المضيف — تم إنشاء لعبة جديدة" + reload when a new serverUrl appears;
-10 s total timeout → "إعدادات متقدمة" escape hatch (manual IP / custom tunnel URL / بحث مجدداً button
-→ `POST /reelect`). Web mode never polls — zero regression surface.
+`{ status: 'ready', serverUrl: 'http://127.0.0.1:3000', ips: [192.168.* IPv4s], peers: [...] }`.
+`GET /peer/<ip>` proxies a remote host's `/host-info` (validated against a strict 192.168.* regex) so
+the discovery list can label each server with live room/player counts — the WebView itself can't fetch
+remote hosts cross-origin, so everything rides this loopback server.
 
-**Timings:** node boot 0.3–1 s + election ≤ 5 s → a host is decided ≤ 6 s after app open; a guest
-connects on first OFFER (≤ 1 s with a live host via beacon). Failure paths: airplane mode / no wifi →
-becomes HOST → solo-vs-bots offline play with zero special-casing; broadcast blocked by ROM → TCP sweep;
-duplicate launcher → :3001 EADDRINUSE → stay idle (an older instance owns the status port); winner dies
-pre-announce → losers re-elect; two hosts from UDP loss → YIELD converges.
+The WebView (only when `window.Capacitor` exists) polls `/status` every 300 ms, connects to the local
+server by default, and renders `peers` as a tap-to-join list ("اللعبات القريبة"); tapping a peer
+switches `io(serverUrl)` to that phone (with a reconnect if it ever changes). "إعدادات متقدمة" keeps
+the escape hatch (manual IP / custom tunnel URL). Web mode never polls — zero regression surface.
 
-**Host death = game restarts, never state migration.** Guests re-elect and a *fresh* server starts;
-rooms are lost by design (snapshotting is out of scope forever). Everyone lands on the home screen.
+**Timings:** node boot 0.3–1 s → the local server answers ≤ 2 s after app open; a peer appears on the
+list ≤ 2 s after its app opens (beacon) or instantly via QUERY. Failure paths: airplane mode / no wifi →
+local server + solo-vs-bots offline play with zero special-casing; broadcast blocked by ROM → TCP sweep;
+duplicate launcher → :3001 already owned → status server stays with the older instance (harmless);
+a phone leaves → only its rooms die, every other phone keeps playing untouched.
 
 ## E. Phase plan (each phase = verified change = its own commit)
 
@@ -442,15 +437,13 @@ rooms are lost by design (snapshotting is out of scope forever). Everyone lands 
 
 | Scenario | Expected |
 |---|---|
-| Airplane mode, one phone | becomes HOST; solo vs 3 bots fully playable |
-| Hotspot, first phone opens → second opens 30 s later | second auto-joins as guest, zero typing |
-| 3+ phones open simultaneously | exactly one HOST (network election); others guests |
-| Hotspot, 1 host + 3 guests, Draw variant | full match, scores, hand-end flow, rematch |
+| Airplane mode, one phone | local server; solo vs 3 bots fully playable |
+| Hotspot, first phone opens → second opens 30 s later | second sees the first in the nearby-list, taps, joins — zero typing |
+| 3+ phones open simultaneously | each runs its own server; the nearby-list shows all; no election anywhere |
+| Hotspot, 1 room + 3 guests, Draw variant | full match, scores, hand-end flow, rematch |
 | Voice: host↔guest and guest↔guest on hotspot | audio both directions, speaking rings, no `.local` candidates |
-| Host screen lock / app switch mid-game | FGS holds node; turn timers keep firing; laptop curl still answers |
-| Host app killed | guests detect ≤ 8 s → re-elect → fresh server; home screen + system message |
-| Two hosts simulated (asymmetric UDP loss) | YIELD backstop converges to one host; WebView reloads |
-| Guest leaves room | host migration logic unchanged (never to a bot) |
+| Room owner screen lock / app switch mid-game | FGS holds node; turn timers keep firing; laptop curl still answers |
+| Room-owner app killed | only that room dies; every other phone keeps playing untouched |
 | Same APK, custom tunnel URL via advanced settings | unchanged web behaviour |
 | Desktop regression | `npm test`, `npm run e2e`, `npm run e2e:voice` green; bundled server passes e2e black-box |
 
@@ -459,7 +452,7 @@ rooms are lost by design (snapshotting is out of scope forever). Everyone lands 
 | Risk | Mitigation |
 |---|---|
 | Hotspot station cap (10–30, OEM) not 100 | README expectation-setting; the server itself handles 100 ws easily |
-| UDP broadcast blocked by a ROM | TCP /24 sweep fallback in PROBE (both also find PC hosts) |
+| UDP broadcast blocked by a ROM | TCP /24 sweep fallback (both also find PC hosts) |
 | Broadcast garbage from cellular interface | 192.168.* source filter + per-iface 192.168.* broadcast targets only |
 | 16KB-page devices crash on old libnode builds | capawesome runtime is 16KB-aligned — the reason it was chosen |
 | JDK 17 present but Capacitor 8 needs 21 | install Temurin 21; JAVA_HOME set per-build command only |
@@ -478,17 +471,18 @@ rooms are lost by design (snapshotting is out of scope forever). Everyone lands 
 2. minSdk 24 (Android 7) — forced by Capacitor 8.
 3. Release APK arm64-v8a only; debug universal for emulator/testing.
 4. APK keeps web/tunnel play via "إعدادات متقدمة" (custom server URL) — free.
-5. Host death = fresh server (no room migration, ever).
+5. Room-owner death = that room dies; every other phone keeps playing (no room migration, ever).
 6. Global room cap 50 per server.
 
 ## I. Draft phone instructions (final wording in README, Arabic)
 
 1. نزّل الـ APK ← اسمح "التثبيت من مصادر غير معروفة" ← ثبّت.
-2. شغّل الـ hotspot على موبايل واحد (أو راوتر)، وافتح التطبيق عند الكل — التطبيق لوحده بيعمل
-   الخادم على أول جهاز يفتح، والباقي بيتوصل أوتوماتيك. مفيش كتابة IP.
-3. واحد يعمل غرفة ويقول الكود (4 حروف)، والباقي ينضم. المايك والشات شغالين.
-4. لو ظهر "لا يوجد إنترنت" على الـ hotspot اضغطوا "الاحتفاظ بالاتصال". الخادم هو أول جهاز فتح
-   التطبيق؛ لو اتقفل، اللعبة بتعيد الإنشاء تلقائياً (الغرف القديمة بتتمسح).
+2. شغّل الـ hotspot على موبايل واحد (أو راوتر)، وافتح التطبيق عند الكل — كل جهاز بيظهر في قائمة
+   "اللعبات القريبة" عند الباقيين أوتوماتيك. مفيش كتابة IP.
+3. واحد يعمل غرفة ويقول الكود (4 حروف)، والباقي يضغط على اسم الجهاز في القائمة وينضم.
+   المايك والشات شغالين.
+4. لو ظهر "لا يوجد إنترنت" على الـ hotspot اضغطوا "الاحتفاظ بالاتصال". كل غرفة بتشتغل على الموبايل
+   اللي عملها؛ لو اتقفل بتتمسح غرفته هو بس — الباقي بيكمل لعب عادي.
 
 
 
