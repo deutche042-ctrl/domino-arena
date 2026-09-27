@@ -1,0 +1,10 @@
+# Render blueprint: https://render.com/docs/blueprint-spec
+# Deploy: push to GitHub → Render "New +" → Blueprint → pick this repo.
+services:
+  - type: web
+    name: domino-arena
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz

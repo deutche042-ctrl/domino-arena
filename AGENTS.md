@@ -2,7 +2,7 @@
 
 ## Project overview
 
-**Domino Arena** — real-time online dominoes (2–4 players, variants: Block / Draw / All Fives). Node.js + Express + Socket.IO server hosting a vanilla-JS + Three.js browser client. No build step, no framework, no accounts — rooms with 4-letter codes shared via Cloudflare Tunnel.
+**Domino Arena** — real-time online dominoes (2–4 players, variants: Block / Draw / All Fives). Node.js + Express + Socket.IO server hosting a vanilla-JS + Three.js browser client. No build step, no framework, no accounts — rooms with 4-letter codes shared via the live Render URL or Cloudflare Tunnel.
 
 Node >= 18, ESM throughout (`"type": "module"`).
 
@@ -22,9 +22,50 @@ and each ends with a watchdog that exits non-zero on a hang.
 `play.bat` (Windows): starts the server + a cloudflared tunnel for public play. The tunnel is not just
 for convenience — WebRTC voice only works in a secure context, so remote players need the `https://` URL.
 
-Env knobs: `PORT` (server, default 3000), `TURN_TIME_MS` (per-turn limit, default 30000, min 1000).
+Env knobs: `PORT` (server, default 3000), `TURN_TIME_MS` (per-turn limit, default 30000, min 1000),
+`MAX_ROOMS` (room-create cap, default 50 — LAN memory guard).
 
 There is no linter or formatter configured; do not introduce one or add build tooling.
+
+### Android app (`mobile/`) — offline LAN/hotspot play
+
+```bash
+cd mobile
+npm install          # once: capacitor 8 + @capawesome/capacitor-nodejs + esbuild
+npm run sync         # rebuild www/ (client copy + node project + esbuild server bundle) + cap sync
+npm run apk:debug    # sync + assembleDebug  (arm64 + x86_64)
+npm run apk:release  # sync + assembleRelease (arm64 only; needs DOMINO_STORE env vars, see below)
+```
+
+Needs JDK 21 (`JAVA_HOME`) and Android SDK with NDK 27.2 + CMake 3.22.1 (the nodejs plugin compiles
+a JNI shim against the libnode it downloads). Release signing reads `DOMINO_STORE` (keystore path),
+`DOMINO_STORE_PASS`, `DOMINO_KEY_PASS` env vars; keystore lives at `mobile/keystore/` (gitignored).
+
+Architecture: every device runs the embedded node (`mobile/launcher.cjs` = node project entry),
+which starts its own FULL game server on 0.0.0.0:3000 (the esbuild-bundled `server-bundle.cjs`,
+CJS, target node18) and announces itself via UDP broadcast (magic `DMA1`, QUERY/OFFER, every 2 s;
+TCP /24 sweep with `/host-info` validation as broadcast fallback; peers expire after 6 s).
+There is NO election and NO single host — rooms belong to the phone that created them, and a
+phone dying only ends its own room. The WebView reads `http://127.0.0.1:3001/status`
+(loopback-only, CORS `*`) → `{ status: 'ready', serverUrl, ips, peers: [{ ip, port }] }`,
+connects to its own `serverUrl` by default, and renders `peers` as a tap-to-join list
+(`startAppNet`/`tickLan` in `app.js`; web mode is untouched when `window.Capacitor` is absent).
+`/peer/<ip>` on the status server proxies a remote host's `/host-info` (which now also reports
+`rooms`/`players` counts) so the list can label entries without WebView CORS problems. A
+`specialUse` foreground service (`NodeServerService`) keeps the process alive with the screen
+off. Edge-to-edge: `plugins.SystemBars.insetsHandling = 'native'` in capacitor.config.json +
+`env(safe-area-inset-*)` rules in `public/css/style.css` (targetSdk 36 is edge-to-edge forced).
+
+Hosting: `render.yaml` blueprint (free plan, `healthCheckPath: /healthz`); free-tier sleep is
+defeated by a cron-job.org ping on `/healthz` every 5 min. `server.js` also sets
+`trust proxy 1` for correct client IPs behind the Render/Cloudflare proxy.
+
+When editing anything the APK consumes: `server/server.js`, `server/rooms.js`, `engine/`,
+`public/js/*`, `public/index.html` — re-run `cd mobile && npm run sync` (the android assets are
+generated copies). `server.js` must stay esbuild-safe: it already handles being bundled to CJS
+(`import.meta.url` guard) — keep new imports pure/JS-only (no native modules).
+`mobile/launcher.cjs` is CJS by design (embedded runtime), never uses `process.exit`, and never
+writes to its own directory.
 
 ## Architecture
 
@@ -60,8 +101,10 @@ as `voice:state`. Voice state lives on the player object and is room-scoped, so 
 
 ### `public/` — client, plain ES modules loaded from index.html (no bundler)
 
-Three.js and socket.io-client come from CDN via the `<script type="importmap">` in `index.html` — no npm
-client deps. Screens are the three `<section class="screen">` elements: home → lobby → game.
+Three.js (0.160.0), socket.io-client (4.8.1) and the Cairo/Reem Kufi fonts are **vendored** under
+`public/vendor/` (served through the importmap + one script tag) — the game runs fully offline; do not
+reintroduce CDN URLs. No npm client deps. Screens are the three `<section class="screen">` elements:
+home → lobby → game.
 
 - `js/app.js` — UI orchestration + socket client: screen switching, scoreboard, hand rendering, modals, chat, voice panel, confetti. Talks to server only via the socket events above.
 - `js/board3d.js` — Three.js board: snake layout with L/R ends plus U/D spinner arms, auto-fit camera, click targets for ends (`onMarkerClick`).
