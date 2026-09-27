@@ -1734,3 +1734,14 @@ input:focus, select:focus { border-color: var(--accent); }
   margin: 0; font-size: 11.5px; color: var(--muted);
   text-align: center; line-height: 1.5;
 }
+
+/* ── system-bar clearance (APK edge-to-edge: notch/status/nav bars) ──
+   With SystemBars.insetsHandling=native + viewport-fit=cover, env(safe-area-inset-*)
+   carries the real insets; these rules lift the interactive DOM overlays clear. */
+@supports (padding: env(safe-area-inset-top)) {
+  #hud { top: max(12px, calc(env(safe-area-inset-top) + 4px)); }
+  #actionBar { bottom: max(150px, calc(env(safe-area-inset-bottom) + 24px)); }
+  .exit-fab { bottom: max(16px, calc(env(safe-area-inset-bottom) + 8px)); }
+  .home-foot { bottom: max(18px, calc(env(safe-area-inset-bottom) + 8px)); }
+  .lobby-card { max-height: calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 24px); }
+}
