@@ -1712,3 +1712,25 @@ input:focus, select:focus { border-color: var(--accent); }
 .adv-panel input:focus { outline: none; border-color: rgba(247,179,43,.4); }
 .adv-row { display: flex; gap: 8px; justify-content: center; }
 .adv-row .btn { padding: 8px 14px; font-size: 13px; }
+.lan-peers {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.lan-peer {
+  background: rgba(0,0,0,.3);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 13px;
+  text-align: center;
+  color: var(--muted);
+}
+.lan-peer:not(.none) { cursor: pointer; color: inherit; }
+.lan-peer:not(.none):hover { border-color: rgba(247,179,43,.45); }
+.lan-peer.active { border-color: rgba(125,220,154,.5); color: #7ddc9a; }
+.lan-peer.self { border-color: rgba(247,179,43,.4); }
+.lan-peer.none { cursor: default; font-size: 12px; }
+.lan-self {
+  margin: 0; font-size: 11.5px; color: var(--muted);
+  text-align: center; line-height: 1.5;
+}

@@ -1336,11 +1336,10 @@ function applyVoiceSupport() {
 
 // ══════════ boot ══════════
 // Web mode: same-origin (browser / Cloudflare Tunnel) — today's behaviour, untouched.
-// APK mode: the embedded node launcher elects one host phone on the LAN; the WebView
-// polls its status endpoint and connects to whichever serverUrl the election produced.
+// APK mode: every phone runs its own game server; the launcher discovers nearby
+// phones and the app shows them as a tap-to-join list (startAppNet below).
 const IN_APP = typeof window.Capacitor !== 'undefined';
 const STATUS_URL = 'http://127.0.0.1:3001';
-let startedServerUrl = null;
 
 function isLanUrl(u) {
   try { return /^(192\.168\.|127\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(new URL(u).hostname); }
@@ -1397,9 +1396,10 @@ function startSocket(base) {
   });
 }
 
-// ── APK network glue: poll the embedded launcher until it elects/discovers a server.
-// Status contract (mobile launcher): GET 127.0.0.1:3001/status →
-// { status: 'electing'|'host'|'client'|'lost', serverUrl, ips }
+// ── APK network glue: every phone runs its own game server, so we connect to
+// ourselves by default and keep a tap-to-join list of nearby phones (from the
+// launcher's discovery). Status contract (mobile launcher): GET 127.0.0.1:3001/status →
+// { status: 'ready', serverUrl, ips, peers: [{ ip, port }] }
 function netPill(html, cls = '') {
   const el = $('netStatus');
   if (!el) return;
@@ -1407,45 +1407,93 @@ function netPill(html, cls = '') {
   el.innerHTML = html;
 }
 
+const LOCAL_BASE = 'http://127.0.0.1:3000';
+let activeBase = null;
+
+function connectToBase(base, label) {
+  if (activeBase === base) return;
+  activeBase = base;
+  if (socket) { socket.disconnect(); socket = null; }
+  startSocket(base);
+  netPill(label, 'ok');
+}
+
 function startAppNet() {
   const manual = (localStorage.getItem('domino_manual_server') || '').trim();
   if (manual) {
-    netPill('🔌 خادم مخصص: ' + manual);
-    startSocket(/^https?:\/\//.test(manual) ? manual : 'http://' + manual);
-    return;
+    const base = /^https?:\/\//.test(manual) ? manual : 'http://' + manual;
+    connectToBase(base, '🔌 خادم مخصص: ' + manual);
+  } else {
+    connectToBase(LOCAL_BASE, '📡 أنت مضيف الشبكة — اعمل غرفة وشارك الكود');
   }
-  const t0 = Date.now();
-  const tick = async () => {
-    let s = null;
-    try { s = await (await fetch(STATUS_URL + '/status')).json(); } catch { /* launcher not up yet */ }
-    if (s && (s.status === 'host' || s.status === 'client')) {
-      if (startedServerUrl && s.serverUrl !== startedServerUrl) {
-        // the election changed under us (host died, a new one won) — restart clean
-        location.reload();
-        return;
-      }
-      if (!startedServerUrl) {
-        startedServerUrl = s.serverUrl;
-        startSocket(s.serverUrl);
-        netPill(s.status === 'host'
-          ? '📡 أنت مضيف الشبكة' + (s.ips && s.ips[0] ? ' — ' + s.ips[0] : '') + ' — اعمل غرفة وشارك الكود'
-          : '🔌 اتصلت بخادم الشبكة تلقائياً', 'ok');
-      }
-    } else if (s && s.status === 'lost' && startedServerUrl) {
-      startedServerUrl = null;
-      netPill('⚠ فقدنا المضيف — بنعمل لعبة جديدة…', 'warn');
-      if (socket) { socket.disconnect(); socket = null; }
-    } else if (!startedServerUrl) {
-      const wait = Math.round((Date.now() - t0) / 1000);
-      netPill('🔍 جاري البحث عن لعبة على الشبكة…' + (wait > 3 ? ' (' + wait + ' ث)' : ''));
-      if (Date.now() - t0 > 10000) $('advToggle')?.classList.remove('hidden');
-    }
-    setTimeout(tick, 300);
-  };
-  tick();
+  tickLan();
 }
 
-// ── advanced settings (APK only): manual server address / re-run discovery
+// discovery loop: refresh the nearby-phones panel + your own LAN IP line
+async function tickLan() {
+  if (!activeBase) return;
+  let s = null;
+  try { s = await (await fetch(STATUS_URL + '/status')).json(); } catch { /* launcher not up yet */ }
+  const ul = $('lanPeers');
+  if (s && ul) {
+    // own LAN IP(s): what remote players must type to join YOUR room
+    const self = $('lanSelf');
+    if (self) {
+      self.textContent = s.ips && s.ips[0]
+        ? 'شارك عنوانك: ' + s.ips[0] + ':3000 — أو اعمل غرفة وشارك الكود'
+        : 'اعمل غرفة وشارك الكود';
+    }
+    // nearby phones: other players found on this subnet
+    const peers = (s.peers || []).filter((p) => 'ip' in p);
+    ul.innerHTML = '';
+    // "back to my phone" entry whenever we're connected somewhere else
+    if (activeBase !== LOCAL_BASE) {
+      const li = document.createElement('li');
+      li.className = 'lan-peer self';
+      li.textContent = '🏠 جهازك (مضيفك أنت)';
+      li.onclick = () => { sfx.click(); connectToBase(LOCAL_BASE, '📡 رجعت لجهازك — أنت المضيف'); };
+      ul.appendChild(li);
+    }
+    for (const p of p_list(peers)) {
+      const li = document.createElement('li');
+      li.className = 'lan-peer' + (activeBase === `http://${p.ip}:${p.port}` ? ' active' : '');
+      li.textContent = '📱 ' + p.label;
+      li.onclick = () => {
+        sfx.click();
+        connectToBase(`http://${p.ip}:${p.port}`, '🔌 اتصلت بـ ' + p.label);
+      };
+      ul.appendChild(li);
+    }
+    if (!peers.length && activeBase === LOCAL_BASE) {
+      const li = document.createElement('li');
+      li.className = 'lan-peer none';
+      li.textContent = '🔍 مفيش أجهزة ظاهرة — اتأكد إن اللاعبين على نفس الواي فاي/هوت سبوت';
+      ul.appendChild(li);
+    }
+  }
+  setTimeout(tickLan, 2000);
+}
+
+// fetch each peer's live room/player counts once (launcher proxies to avoid CORS)
+const peerLabels = new Map();   // ip -> { label, at }
+function p_list(peers) {
+  return peers.map((p) => {
+    const cached = peerLabels.get(p.ip);
+    if (cached && Date.now() - cached.at < 30000) return { ...p, label: cached.label };
+    fetch(STATUS_URL + '/peer/' + encodeURIComponent(p.ip))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        const rooms = j && typeof j.rooms === 'number' ? j.rooms : 0;
+        const players = j && typeof j.players === 'number' ? j.players : 0;
+        const label = `${p.ip} — ${players} لاعبين، ${rooms} غرف`;
+        peerLabels.set(p.ip, { label, at: Date.now() });
+      })
+      .catch(() => { peerLabels.set(p.ip, { label: p.ip, at: Date.now() }); });
+    return { ...p, label: cached ? cached.label : p.ip };
+  });
+}
+
+// ── advanced settings (APK only): manual server address
 function initAppNetUI() {
   const toggle = $('advToggle');
   if (!toggle || !IN_APP) return;
@@ -1466,12 +1514,6 @@ function initAppNetUI() {
   $('btnClearServer').onclick = () => {
     sfx.click();
     localStorage.removeItem('domino_manual_server');
-    location.reload();
-  };
-  $('btnReelect').onclick = async () => {
-    sfx.click();
-    netPill('🔍 بنبحث من جديد…');
-    try { await fetch(STATUS_URL + '/reelect', { method: 'POST' }); } catch { /* ignore */ }
     location.reload();
   };
 }

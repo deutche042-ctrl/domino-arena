@@ -6,7 +6,7 @@
 <title>دومينو أرينا | Domino Arena</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=31">
+<link rel="stylesheet" href="css/style.css?v=32">
 <script type="importmap">
 {
   "imports": {
@@ -71,14 +71,15 @@
     </div>
     <p id="homeError" class="error"></p>
     <div id="netStatus" class="net-status hidden"></div>
-    <button id="advToggle" class="adv-toggle hidden">إعدادات متقدمة ⚙</button>
+    <button id="advToggle" class="adv-toggle hidden">الأجهزة القريبة ⚙</button>
     <div id="advPanel" class="adv-panel hidden">
+      <ul id="lanPeers" class="lan-peers"></ul>
       <input id="inpManualServer" placeholder="خادم يدوي — 192.168.1.5:3000 أو رابط النفق" autocomplete="off" inputmode="url">
       <div class="adv-row">
         <button id="btnSaveServer" class="btn small">حفظ</button>
         <button id="btnClearServer" class="btn small">إلغاء</button>
-        <button id="btnReelect" class="btn small">بحث مجدداً</button>
       </div>
+      <p id="lanSelf" class="lan-self"></p>
     </div>
   </div>
   <footer class="home-foot">عادي (Block) · سحب (Draw) · خمسات (All Fives) — من 2 إلى 4 لاعبين</footer>
@@ -324,6 +325,6 @@
   </div>
 </section>
 
-<script type="module" src="js/app.js?v=33"></script>
+<script type="module" src="js/app.js?v=34"></script>
 </body>
 </html>
