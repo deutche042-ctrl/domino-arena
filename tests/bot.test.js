@@ -200,3 +200,54 @@ test('F4.2: an unknown level/profile falls back safely', () => {
   const a = chooseAction(game, game.turn, { level: 'bogus', profile: 'nope', rng: mulberry32(1) });
   assert.ok(a && a.type, 'bogus level/profile must still return a legal action');
 });
+
+// ── K1.B2: the anti-cheat boundary, pinned mechanically ──
+
+test('anti-cheat invariance: permuting hidden info never changes any decision', () => {
+  // For every level × profile the chosen action may depend only on public info
+  // plus the bot's own hand. Rotating the opponents' tiles among them and
+  // reversing the boneyard changes ALL hidden information while preserving hand
+  // sizes, the board, and the public passLog — so the same rng stream must
+  // produce the identical action. (Would have caught the expert hand-reading leak.)
+  for (const level of ['easy', 'medium', 'hard', 'expert']) {
+    for (const profile of Object.keys(PROFILES)) {
+      const game = new DominoGame({ variant: 'allfives', playerIds: ['a', 'b', 'c', 'd'], seed: 34, targetScore: 300 });
+      // Advance a few moves, then wait for a real multi-move decision for 'a'.
+      for (let i = 0; i < 6 && game.status === 'playing'; i++) {
+        const t = game.turn;
+        const mv = game.legalMoves(t);
+        if (mv.length) game.play(t, mv[0].tileId, mv[0].end);
+        else if (game.canDraw(t)) game.draw(t);
+        else game.pass(t);
+      }
+      let guard = 0;
+      while (game.status === 'playing' &&
+             (game.turn !== 'a' || game.legalMoves('a').length < 2) && guard++ < 100) {
+        const t = game.turn;
+        const mv = game.legalMoves(t);
+        if (mv.length) game.play(t, mv[0].tileId, mv[0].end);
+        else if (game.canDraw(t)) game.draw(t);
+        else game.pass(t);
+      }
+      assert.equal(game.status, 'playing', `${level}/${profile}: reached a live hand`);
+      assert.ok(game.legalMoves('a').length >= 1, `${level}/${profile}: 'a' has a decision`);
+      const baseline = chooseAction(game, 'a', { level, profile, rng: mulberry32(77) });
+      assert.ok(baseline, `${level}/${profile}: baseline action exists`);
+
+      // Permute hidden info: rotate opponents' tiles by one seat, reverse boneyard.
+      const others = game.playerIds.filter(id => id !== 'a');
+      const sizes = others.map(id => game.hands[id].length);
+      const pool = others.flatMap(id => game.hands[id].splice(0));
+      pool.push(pool.shift());
+      let i = 0;
+      others.forEach((id, k) => { game.hands[id] = pool.slice(i, i + sizes[k]); i += sizes[k]; });
+      game.boneyard.reverse();
+
+      const after = chooseAction(game, 'a', { level, profile, rng: mulberry32(77) });
+      assert.deepEqual(
+        after, baseline,
+        `${level}/${profile} changed its decision when hidden info was permuted`,
+      );
+    }
+  }
+});

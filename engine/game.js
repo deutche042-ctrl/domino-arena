@@ -54,6 +54,9 @@ export class DominoGame {
     this.playerIds = playerIds.slice();
     this.targetScore = opt.targetScore || targetFor(DEFAULT_TARGET[variant], playerIds.length);
     this.handSize = opt.handSize || DEFAULT_HAND[variant][playerIds.length];
+    // K2.S1 backstop: the deck has 28 tiles — a lobby hand-size override that
+    // doesn't fit every player would silently starve the last deal.
+    if (playerIds.length * this.handSize > 28) throw new Error('hand size too large for this many players');
     // F2.1 house rules — persisted in room.config and re-applied on every hand
     // via _deal's `opt`, so they survive nextHand()/rematch().
     this.allowPass = opt.allowPass !== false;
@@ -75,6 +78,10 @@ export class DominoGame {
     this.ends = { L: null, R: null, U: null, D: null }; // {match, score, tileId}
     this.spinner = null;                // { id, sidesFilled, value }
     this.passCount = 0;
+    // K1.B7: public inference log — a player who passes (or is forced to draw)
+    // provably holds no tile matching any open end value at that moment.
+    // Recorded per hand; exposed through viewFor and used by the bot's trap term.
+    this.passLog = [];
     this.handResult = null;
     this.forcedDrawTileId = null;       // Draw rules: a playable drawn tile must be played
     this.hands = {};
@@ -294,13 +301,24 @@ export class DominoGame {
       ? true
       : this.attachableEnds().some(e => e.match !== null && (tile.a === e.match || tile.b === e.match));
     this.forcedDrawTileId = playable ? tile.id : null;
+    // Drawing was only legal because they had nothing playable — same public
+    // inference as a pass (canDraw requires zero legal moves).
+    this.passLog.push({ pid, ends: this._openEndValues(), kind: 'draw' });
     return tile;
+  }
+
+  /** Match values of every currently-open end (public info at this instant). */
+  _openEndValues() {
+    return this.attachableEnds().filter(e => e.match !== null).map(e => e.match);
   }
 
   pass(pid) {
     this._assertTurn(pid);
     if (!this.canPass(pid)) throw new IllegalMove('cannot pass now');
     this.passCount++;
+    // forceSkip deliberately does NOT record: a skipped player may have had
+    // legal moves (that is the timeout penalty), so nothing can be inferred.
+    this.passLog.push({ pid, ends: this._openEndValues(), kind: 'pass' });
     this.forcedDrawTileId = null;
     this._invalidateEnds();
     this.lastAction = { type: 'pass', pid };
@@ -346,6 +364,8 @@ export class DominoGame {
       drawableCount: this.drawableCount(),
       rules: { allowPass: this.allowPass, keepLastTwo: this.keepLastTwo, handSize: this.handSize },
       moves: this.moves,
+      // K1.B7: who is demonstrably out of which end values (pass/draw inference).
+      passLog: (this.passLog || []).map(e => ({ pid: e.pid, ends: e.ends.slice(), kind: e.kind })),
       ends: this.moves.length ? this.attachableEnds() : [],
       endsTotal: this.endsTotal(),
       leadForcedTile: this.turn === pid ? this.leadForcedTile : null,
@@ -406,10 +426,8 @@ export class DominoGame {
 
   _endMatch(winnerId) {
     this.matchWinnerId = winnerId;
-    // keep handResult if the match ended at hand end
-    if (!this.handResult || this.handResult.winnerId !== winnerId) {
-      this.handResult = this.handResult || null;
-    }
+    // handResult is kept as-is: when the match ended at hand end it carries the
+    // final breakdown; a mid-hand score-out leaves it null (nothing to show).
     this.status = 'matchEnd';
     this.lastAction = { type: 'matchEnd', winnerId };
   }
