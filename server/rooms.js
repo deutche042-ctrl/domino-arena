@@ -38,11 +38,13 @@ export class RoomManager {
       // F2.1 house rules. Every field is mirrored into the engine on startGame,
       // so changing one in the lobby affects real rules, not just the UI.
       //  - handSize:   null → variant/player-count default (DEFAULT_HAND)
+      //  - targetScore: null → variant/player-count engine default (K2.S2 —
+      //    All Fives plays 250 heads-up / 200 for 3-4P unless the host picks)
       //  - allowPass:  false → a stuck player can only be rescued by the timer
       //  - keepLastTwo: true → the final 2 boneyard tiles are never drawable
       //  - turnMs:     null → TURN_MS; 0 → no turn timer at all
       config: {
-        variant: 'draw', targetScore: 100, maxPlayers: 4,
+        variant: 'draw', targetScore: null, maxPlayers: 4,
         handSize: null, allowPass: true, keepLastTwo: false, turnMs: null,
       },
       players: [player],
@@ -161,17 +163,22 @@ export class RoomManager {
   }
 
   startGame(room) {
+    // K2.S1: the deck has 28 tiles — a hand-size override must fit every player
+    // (9 is fine up to 3 players; 4 players cap at 7). The engine also validates.
+    const fit = Math.floor(28 / Math.max(2, room.players.length));
+    const handSize = room.config.handSize ? Math.min(room.config.handSize, fit) : undefined;
     room.game = new DominoGame({
       variant: room.config.variant,
       playerIds: room.players.map(p => p.id),
       targetScore: room.config.targetScore,
       // F2.1 house rules (undefined falls back to the engine default).
-      handSize: room.config.handSize || undefined,
+      handSize,
       allowPass: room.config.allowPass,
       keepLastTwo: room.config.keepLastTwo,
     });
     room.state = 'playing';
     room.continueVotes = null;
+    room.nextHandVotes = null;                // K2.S5: binding next-hand votes
     room.rematchVotes = null;                 // F2.2: votes are per-match
     room.players.forEach(p => { p.ready = false; });
   }
@@ -188,7 +195,12 @@ export class RoomManager {
   sanitizeConfig(cfg = {}) {
     const out = {};
     if (cfg.variant) out.variant = String(cfg.variant);
-    if (cfg.targetScore != null) out.targetScore = Math.max(10, Math.min(500, Number(cfg.targetScore) || 100));
+    // K2.S2: explicit null clears the override back to the engine default.
+    if (cfg.targetScore !== undefined) {
+      out.targetScore = cfg.targetScore == null
+        ? null
+        : Math.max(10, Math.min(500, Number(cfg.targetScore) || 100));
+    }
     if (cfg.maxPlayers != null) out.maxPlayers = Math.max(2, Math.min(4, Number(cfg.maxPlayers) || 4));
     if (cfg.turnMs != null) {
       const want = Number(cfg.turnMs);
@@ -225,6 +237,8 @@ export class RoomManager {
       hostId: room.hostId,
       state: room.state,
       config: room.config,
+      // K2.S11: make spectators visible in the lobby (client shows a chip).
+      spectators: (room.spectators || []).map(s => ({ id: s.id, name: s.name })),
       players: room.players.map(p => ({
         id: p.id, name: p.name, ready: p.ready, connected: p.connected, isBot: !!p.isBot,
         chatMuted: !!p.chatMuted,
@@ -239,6 +253,7 @@ export class RoomManager {
   gameView(room, playerId) {
     if (!room.game) return null;
     const view = room.game.viewFor(playerId);
+    view.playerId = playerId;   // K2.S12: which seat this view belongs to
     view.names = Object.fromEntries(room.players.map(p => [p.id, p.name]));
     view.connected = Object.fromEntries(room.players.map(p => [p.id, p.connected]));
     view.isBot = Object.fromEntries(room.players.map(p => [p.id, !!p.isBot]));
@@ -251,6 +266,14 @@ export class RoomManager {
         const set = room.continueVotes[kind];
         if (set?.size) view[`${kind}Votes`] = { count: set.size, humans };
       }
+    }
+    // K2.S5: binding next-hand votes (unanimous minus host) reuse the same view
+    // surface as the old advisory counter, so the client needs no changes.
+    if (room.nextHandVotes?.size) {
+      view.nextHandVotes = {
+        count: room.nextHandVotes.size,
+        humans: room.players.filter(p => !p.isBot).length,
+      };
     }
     // F2.2: who (by name) has voted for a rematch, so the end-of-match modal can
     // show real names instead of a bare counter.
