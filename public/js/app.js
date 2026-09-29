@@ -1387,12 +1387,15 @@ function startTileDrag(e, tile, el) {
   if (e.button !== undefined && e.button !== 0) return;
   if (!view || view.status !== 'playing' || view.turn !== myId) return;
   const moves = (view.legalMoves || []).filter(m => m.tileId === tile.id);
-  if (!moves.length || moves[0].end === null) return; // lead move has no drop target
-  tileDrag = { tile, el, startX: e.clientX, startY: e.clientY, moved: false, ghost: null, over: null };
+  if (!moves.length) return;
+  // The lead move has no drop target, but the drag must still be tracked: a
+  // plain tap reaches endTileDrag → onTileClick, which plays the lead at once.
+  // Bailing out here left the first tile of a hand unplayable (tap AND drag dead).
+  tileDrag = { tile, el, startX: e.clientX, startY: e.clientY, moved: false, ghost: null, over: null, noDrop: moves[0].end === null };
   try { el.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
 }
 function moveTileDrag(e) {
-  if (!tileDrag) return;
+  if (!tileDrag || tileDrag.noDrop) return;
   if (!tileDrag.moved && Math.hypot(e.clientX - tileDrag.startX, e.clientY - tileDrag.startY) < 8) return;
   if (!tileDrag.moved) {
     tileDrag.moved = true;

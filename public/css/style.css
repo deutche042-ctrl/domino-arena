@@ -2001,6 +2001,9 @@ input:focus, select:focus { border-color: var(--accent); }
 .b2-tile.dbl { width: 60px; height: 30px; align-self: center; }
 .b2-tile.flip { transform: rotate(180deg); }
 .b2-tile.new { animation: b2-drop .5s cubic-bezier(.22, 1.2, .36, 1); }
+/* K3.C1 parity with the 3D board's glow pad: the most recently placed tile
+   keeps a persistent marker until the next move replaces it */
+.b2-tile.last { outline: 2px solid rgba(46, 230, 168, .85); outline-offset: -2px; }
 @keyframes b2-drop {
   from { transform: translateY(-60px) scale(1.25); opacity: 0; }
   to   { transform: translateY(0) scale(1); opacity: 1; }
