@@ -12,6 +12,9 @@ export const TURN_MS = Math.max(1000, Number(process.env.TURN_TIME_MS) || 30000)
 const TURN_MS_OPTIONS = [0, 10000, 20000, 30000, 60000];
 // Lobby-selectable hand sizes (F2.1); null = let the variant/player-count decide.
 const HAND_SIZE_OPTIONS = [5, 7, 9];
+// F4.2 bot difficulty + personality allowlists (single source of truth).
+export const BOT_LEVELS = ['easy', 'medium', 'hard', 'expert'];
+export const BOT_PROFILES = ['balanced', 'aggressive', 'defensive'];
 
 function makeCode() {
   let c = '';
@@ -127,8 +130,9 @@ export class RoomManager {
   getRoom(code) { return this.rooms.get((code || '').toUpperCase().trim()); }
 
   /** Seat a bot player (lobby only). Bots are always ready and never own a
-   *  token, so the token-reconnect path can never attach a socket to them. */
-  addBot(room, name, level = 'medium') {
+   *  token, so the token-reconnect path can never attach a socket to them.
+   *  F4.2: `level` ∈ easy|medium|hard|expert, `profile` ∈ PROFILES (balanced default). */
+  addBot(room, name, level = 'medium', profile = 'balanced') {
     if (room.state !== 'lobby') return { error: 'بدأت اللعبة بالفعل في هذه الغرفة.' };
     if (room.players.length >= room.config.maxPlayers) return { error: 'الغرفة ممتلئة بالكامل.' };
     const bot = {
@@ -139,7 +143,8 @@ export class RoomManager {
       connected: true,
       socketId: null,
       isBot: true,
-      botLevel: ['easy', 'medium', 'hard'].includes(level) ? level : 'medium',
+      botLevel: BOT_LEVELS.includes(level) ? level : 'medium',
+      botProfile: BOT_PROFILES.includes(profile) ? profile : 'balanced',
     };
     room.players.push(bot);
     return { bot };
@@ -223,6 +228,9 @@ export class RoomManager {
       players: room.players.map(p => ({
         id: p.id, name: p.name, ready: p.ready, connected: p.connected, isBot: !!p.isBot,
         chatMuted: !!p.chatMuted,
+        // F4.2: surfaced so the lobby can label a seated bot ("hard · aggressive").
+        botLevel: p.isBot ? (p.botLevel || 'medium') : undefined,
+        botProfile: p.isBot ? (p.botProfile || 'balanced') : undefined,
       })),
     };
   }

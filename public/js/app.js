@@ -1,7 +1,7 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=20';
+import { Board3D } from './board3d.js?v=21';
 import { Home3D } from './home3d.js?v=2';
-import { tileImage } from './tiles.js?v=11';
+import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=12';
 import { sfx } from './sfx.js?v=15';
 import { VoiceChat, setIceConfig } from './voice.js?v=4';
 
@@ -58,6 +58,33 @@ let perfOn = false, perfRaf = 0, perfTimer = null;
 let perfFrames = 0, perfFrameStart = 0, perfMsgs = 0;
 let perfLastSyncMs = 0, perfSyncCount = 0;
 let perfPeakGeos = 0, perfPeakTexs = 0, perfMinFps = Infinity, perfMaxSyncMs = 0;
+// F4.2: the chosen bot difficulty + personality for quick-play and lobby-add.
+let botLevel = 'medium';
+let botProfile = (() => {
+  try { return localStorage.getItem('domino_bot_profile') || 'balanced'; } catch { return 'balanced'; }
+})();
+const BOT_LEVEL_LABEL = { easy: 'سهل', medium: 'متوسط', hard: 'صعب', expert: 'خبير' };
+const BOT_PROFILE_LABEL = { balanced: 'متوازن', aggressive: 'هجومي', defensive: 'دفاعي' };
+// F4.3: the active tile skin. Applied to the 2D hand immediately and to the 3D
+// board (which repaints its pooled materials) whenever a board exists.
+let tileTheme = (() => {
+  try {
+    const t = localStorage.getItem('domino_theme');
+    return t && THEME_NAMES.includes(t) ? t : 'classic';
+  } catch { return 'classic'; }
+})();
+setTileTheme(tileTheme);
+
+function applyTheme(name) {
+  if (!THEME_NAMES.includes(name)) return;
+  tileTheme = name;
+  try { localStorage.setItem('domino_theme', name); } catch { /* no storage */ }
+  setTileTheme(name);          // 2D painters + dataURL cache
+  board?.setTheme?.(name);     // 3D board repaints (no-op when no board yet)
+  renderHand?.();              // hand tiles are themed images
+  document.querySelectorAll('#themeRow .diff-chip')
+    .forEach(c => c.classList.toggle('active', c.dataset.theme === name));
+}
 
 // ══════════ screens ══════════
 function showScreen(name) {
@@ -146,7 +173,6 @@ function initHome() {
       showScreen('lobby');
     });
   };
-  let botLevel = 'medium';
   document.querySelectorAll('#diffRow .diff-chip').forEach(ch => {
     ch.onclick = () => {
       botLevel = ch.dataset.level;
@@ -154,9 +180,26 @@ function initHome() {
       sfx.click();
     };
   });
+  // F4.2: bot personality (same evaluator, different weights)
+  const syncProfileChips = () => document.querySelectorAll('#profileRow .diff-chip')
+    .forEach(c => c.classList.toggle('active', c.dataset.profile === botProfile));
+  document.querySelectorAll('#profileRow .diff-chip').forEach(ch => {
+    ch.onclick = () => {
+      botProfile = ch.dataset.profile;
+      try { localStorage.setItem('domino_bot_profile', botProfile); } catch { /* no storage */ }
+      syncProfileChips();
+      sfx.click();
+    };
+  });
+  syncProfileChips();
+  // F4.3: tile theme picker
+  document.querySelectorAll('#themeRow .diff-chip').forEach(ch => {
+    ch.onclick = () => { applyTheme(ch.dataset.theme); sfx.click(); };
+  });
+  applyTheme(tileTheme);   // reflect the persisted choice on first paint
   $('btnBots').onclick = () => {
     const name = getName(); if (!name) return;
-    emit('room:create', { name, vsBots: true, botLevel }).then(res => {
+    emit('room:create', { name, vsBots: true, botLevel, botProfile }).then(res => {
       if (!res.ok) return homeError(res.error);
       afterJoin(res, name);
       showScreen('game');
@@ -222,7 +265,9 @@ function renderLobby(st) {
     if (p.id === myId) li.className = 'me';
     const nameSpan = document.createElement('span');
     nameSpan.className = 'name';
-    nameSpan.textContent = p.name + (p.isBot ? ' 🤖' : '') + (p.id === st.hostId ? ' 👑' : '');
+    // F4.2: label a seated bot with its difficulty + personality.
+    const botTag = p.isBot ? ` 🤖 ${BOT_LEVEL_LABEL[p.botLevel] || ''}${p.botProfile && p.botProfile !== 'balanced' ? ' · ' + (BOT_PROFILE_LABEL[p.botProfile] || '') : ''}` : '';
+    nameSpan.textContent = p.name + botTag + (p.id === st.hostId ? ' 👑' : '');
     const tag = document.createElement('span');
     tag.className = 'status' + (p.ready ? ' ready' : '');
     tag.textContent = p.id === st.hostId ? 'المضيف' : (p.ready ? 'جاهز' : 'في الانتظار');
@@ -346,7 +391,7 @@ function renderRulesSummary(cfg) {
 function initLobby() {
   const btnAddBot = $('btnAddBot');
   if (btnAddBot) {
-    btnAddBot.onclick = () => { socket.emit('lobby:addBot', {}); sfx.click(); };
+    btnAddBot.onclick = () => { socket.emit('lobby:addBot', { level: botLevel, profile: botProfile }); sfx.click(); };
   }
   spawnFallingTiles('lobbyHeroTiles');
   $('btnCopyCode').onclick = () => copyText(roomCode, 'تم نسخ الكود!');
@@ -447,7 +492,9 @@ function renderGame() {
   const t0 = perfOn ? performance.now() : 0;
   $('screen-game').classList.toggle('spectating', spectating);
   board?.sync(view);
-  board?.setCanDraw(!spectating && view.turn === myId && view.status === 'playing' && view.canDraw);
+  const myTurn = !spectating && view.turn === myId && view.status === 'playing';
+  board?.setCanDraw(myTurn && view.canDraw);
+  board?.setMyTurn?.(myTurn);
   renderOpponents();
   if (spectating) {
     $('hand').innerHTML = '';
@@ -615,6 +662,28 @@ function renderActions() {
   } else pill.classList.add('hidden');
 }
 
+// F4.4: previous score per player, so renderScoreCard can roll the number up
+// instead of snapping. Only ever holds at most 4 (a table's worth of) entries.
+const _scorePrev = new Map();
+function prefersReducedMotion() {
+  return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+/** Animate `el`'s text from `from` to `to` over ~420ms (or snap, if reduced-motion). */
+function rollNumber(el, from, to) {
+  if (!el) return;
+  if (from === to || prefersReducedMotion()) { el.textContent = String(to); return; }
+  const t0 = performance.now();
+  const dur = 420;
+  const step = (now) => {
+    const k = Math.min((now - t0) / dur, 1);
+    const e = 1 - (1 - k) ** 3;                  // cubic ease-out
+    el.textContent = String(Math.round(from + (to - from) * e));
+    if (k < 1) requestAnimationFrame(step);
+    else el.textContent = String(to);
+  };
+  requestAnimationFrame(step);
+}
+
 function renderScoreCard() {
   const card = $('scoreCard');
   if (!card || !view) return;
@@ -630,6 +699,19 @@ function renderScoreCard() {
     `;
     card.appendChild(row);
   });
+  // F4.4: roll each score up from its previous value. Runs AFTER the rows are in
+  // the DOM so the rAF writes land on the live elements.
+  if (!prefersReducedMotion()) {
+    card.querySelectorAll('.sc-row').forEach((row, i) => {
+      const pid = ranked[i];
+      const to = view.scores[pid] || 0;
+      const from = _scorePrev.get(pid);
+      if (from !== undefined && from !== to) rollNumber(row.querySelector('.sc-pts'), from, to);
+    });
+  }
+  for (const pid of ranked) _scorePrev.set(pid, view.scores[pid] || 0);
+  // Drop stale keys so the map cannot grow across many rooms.
+  for (const pid of [..._scorePrev.keys()]) if (!ranked.includes(pid)) _scorePrev.delete(pid);
 }
 
 function setBanner(text, cls) {
@@ -861,36 +943,94 @@ function updateTurnTimer() {
 }
 
 // ── local career stats (no accounts — lives in localStorage on this device) ──
+// F4.1: matches / wins / streak / bestStreak / avgScore / bestScore / recent form.
+// The shape is versioned implicitly: unknown/older fields simply default, so a
+// profile written by an earlier build keeps working without a migration step.
 let recordedMatchKey = null;
 function loadStats() {
   try {
     const s = JSON.parse(localStorage.getItem('domino_stats'));
-    if (s && typeof s === 'object') return { matches: s.matches || 0, wins: s.wins || 0, bestScore: s.bestScore || 0, botWins: s.botWins || 0 };
+    if (s && typeof s === 'object') {
+      return {
+        matches: s.matches || 0,
+        wins: s.wins || 0,
+        bestScore: s.bestScore || 0,
+        botWins: s.botWins || 0,
+        streak: s.streak || 0,          // current consecutive wins
+        bestStreak: s.bestStreak || 0,  // longest run of wins ever
+        avgScore: s.avgScore || 0,      // running mean of my end-of-match score
+        history: Array.isArray(s.history) ? s.history.slice(0, 12) : [],  // newest first
+      };
+    }
   } catch { /* corrupt or absent */ }
-  return { matches: 0, wins: 0, bestScore: 0, botWins: 0 };
+  return {
+    matches: 0, wins: 0, bestScore: 0, botWins: 0,
+    streak: 0, bestStreak: 0, avgScore: 0, history: [],
+  };
 }
 function recordMatchResult(v) {
   const key = v.matchWinnerId + ':' + Object.entries(v.scores).sort().join(',');
   if (recordedMatchKey === key) return; // renderModals re-runs — record once
   recordedMatchKey = key;
   const s = loadStats();
+  const iWon = v.matchWinnerId === myId;
   s.matches += 1;
-  if (v.matchWinnerId === myId) {
+  if (iWon) {
     s.wins += 1;
     if (Object.values(v.isBot || {}).some(Boolean)) s.botWins += 1;
   }
+  // streak bookkeeping
+  s.streak = iWon ? s.streak + 1 : 0;
+  if (s.streak > s.bestStreak) s.bestStreak = s.streak;
+  // running average of my own score at match end
   const myScore = v.scores[myId] || 0;
+  s.avgScore = Math.round(((s.avgScore * (s.matches - 1)) + myScore) / s.matches);
   if (myScore > s.bestScore) s.bestScore = myScore;
+  // recent form — newest first, capped
+  s.history.unshift({ won: iWon, score: myScore, bots: Object.values(v.isBot || {}).some(Boolean) ? 1 : 0 });
+  if (s.history.length > 12) s.history.length = 12;
   try { localStorage.setItem('domino_stats', JSON.stringify(s)); } catch { /* no storage */ }
   renderHomeStats();
+  announceStreak(s);
 }
+
+// A one-line celebratory chat note when a win streak reaches a milestone. Purely
+// cosmetic, sent once per match, only while actually connected to a room.
+function announceStreak(s) {
+  if (!socket?.connected || !roomCode) return;
+  if (s.streak >= 3 && s.streak % 3 === 0) {
+    socket.emit('chat:send', { text: `🔥 ${s.streak} انتصارات على التوالي!` });
+  }
+}
+
+function streakLabel(streak) {
+  if (streak >= 5) return `🔥🔥 ${streak}`;
+  if (streak >= 3) return `🔥 ${streak}`;
+  if (streak >= 1) return `↗ ${streak}`;
+  return '—';
+}
+
+// compact W/L sparkline of the most recent matches (newest on the left)
+function formStrip(history) {
+  return history.slice(0, 10).map(h => h.won ? '🟩' : '🟥').join('');
+}
+
 function renderHomeStats() {
   const el = $('homeStats');
   if (!el) return;
   const s = loadStats();
-  el.textContent = s.matches
-    ? `🏆 ${s.wins} فوز من ${s.matches} مباراة · أعلى سكور ${s.bestScore}${s.botWins ? ` · ${s.botWins} ضد البوت` : ''}`
-    : '';
+  if (!s.matches) {
+    el.textContent = '';
+    el.classList.add('hidden');
+  } else {
+    const winPct = Math.round((s.wins / s.matches) * 100);
+    el.classList.remove('hidden');
+    el.innerHTML =
+      `<span class="hs-row"><b>🏆 ${s.wins}</b> فوز من <b>${s.matches}</b> · ${winPct}%</span>` +
+      `<span class="hs-row">سلسلة <b>${streakLabel(s.streak)}</b> · أطول <b>${s.bestStreak}</b></span>` +
+      `<span class="hs-row">متوسط <b>${s.avgScore}</b> · أعلى <b>${s.bestScore}</b>${s.botWins ? ` · ${s.botWins} ضد البوت` : ''}</span>` +
+      (s.history.length ? `<span class="hs-form" title="آخر ${s.history.length} مباريات (الأحدث أولاً)">${formStrip(s.history)}</span>` : '');
+  }
   const reset = $('btnResetStats');
   if (reset) reset.classList.toggle('hidden', !s.matches);
 }

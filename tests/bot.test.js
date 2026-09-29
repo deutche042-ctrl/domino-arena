@@ -3,14 +3,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mulberry32 } from '../engine/deck.js';
 import { DominoGame } from '../engine/game.js';
-import { chooseAction, cloneGame } from '../engine/bot.js';
+import { chooseAction, cloneGame, PROFILES } from '../engine/bot.js';
 
 const LEVELS = ['easy', 'medium', 'hard'];
 const VARIANTS = ['block', 'draw', 'allfives'];
 
 /** Drive a full bot-vs-bot match; every action goes through the engine, so any
  *  illegal choice throws and fails the test. Returns the action log. */
-function runBotMatch({ variant, playerIds, seed, level, targetScore }) {
+function runBotMatch({ variant, playerIds, seed, level, profile = 'balanced', targetScore }) {
   const game = new DominoGame({ variant, playerIds, seed, targetScore });
   const rng = mulberry32(seed ^ 0x9e3779b9);
   const log = [];
@@ -21,7 +21,7 @@ function runBotMatch({ variant, playerIds, seed, level, targetScore }) {
       continue;
     }
     const pid = game.turn;
-    const action = chooseAction(game, pid, { level, rng });
+    const action = chooseAction(game, pid, { level, profile, rng });
     assert.ok(action, `bot produced an action (hand ${game.handNumber})`);
     log.push(`${action.type}:${action.tileId || ''}:${action.end ?? ''}`);
     if (action.type === 'play') game.play(pid, action.tileId, action.end);
@@ -131,4 +131,72 @@ test('greedy levels take an available scoring play in All Fives', () => {
   }
   assert.ok(checked > 20, 'sampled a meaningful number of positions');
   assert.ok(guarded > 0, 'encountered positions with scoring plays');
+});
+
+// ── F4.2: personalities share one evaluator and stay within the anti-cheat contract ──
+
+test('F4.2: PROFILES exports balanced/aggressive/defensive', () => {
+  assert.deepEqual(Object.keys(PROFILES).sort(), ['aggressive', 'balanced', 'defensive']);
+  assert.deepEqual(PROFILES.balanced, { aggression: 1, defense: 1, risk: 1, patience: 1 },
+    'balanced must be the identity weights (back-compat with pre-F4.2 behaviour)');
+});
+
+test('F4.2: every level×profile combination plays a legal full match', () => {
+  for (const level of [...LEVELS, 'expert']) {
+    for (const profile of Object.keys(PROFILES)) {
+      const log = runBotMatch({ variant: 'allfives', playerIds: ['a', 'b'], seed: 31, level, profile, targetScore: 40 });
+      assert.ok(log.length > 5, `${level}/${profile} should play a real match (${log.length} actions)`);
+      for (const entry of log) {
+        const type = String(entry).split(':')[0];
+        assert.ok(['play', 'draw', 'pass'].includes(type), `illegal action type ${type}`);
+      }
+    }
+  }
+});
+
+test('F4.2: personalities make observably different choices (aggressive vs defensive)', () => {
+  // Across many positions at least one decision must differ, otherwise the
+  // profile weights are not reaching the evaluator.
+  const game = new DominoGame({ variant: 'allfives', playerIds: ['a', 'b', 'c'], seed: 777, targetScore: 500 });
+  const rng = mulberry32(2024);
+  let differences = 0, samples = 0;
+  while (game.status !== 'matchEnd' && samples < 300) {
+    if (game.status === 'handEnd') { game.nextHand(777 + game.handNumber * 3571); continue; }
+    const pid = game.turn;
+    if (game.legalMoves(pid).length > 1) {
+      const ag = chooseAction(game, pid, { level: 'hard', profile: 'aggressive', rng: mulberry32(samples) });
+      const df = chooseAction(game, pid, { level: 'hard', profile: 'defensive', rng: mulberry32(samples) });
+      samples++;
+      if (ag.tileId !== df.tileId || ag.end !== df.end) differences++;
+    }
+    const act = chooseAction(game, pid, { level: 'hard', profile: 'balanced', rng });
+    if (act.type === 'play') game.play(pid, act.tileId, act.end);
+    else if (act.type === 'draw') game.draw(pid);
+    else game.pass(pid);
+  }
+  assert.ok(samples > 30, `sampled enough multi-move positions (${samples})`);
+  assert.ok(differences > 0, `aggressive and defensive never disagreed across ${samples} positions`);
+});
+
+test('F4.2: expert level also decides only from public info (no game mutation)', () => {
+  const game = new DominoGame({ variant: 'allfives', playerIds: ['a', 'b', 'c', 'd'], seed: 12, targetScore: 200 });
+  // advance to a non-trivial mid-game position
+  for (let i = 0; i < 12 && game.status === 'playing'; i++) {
+    const pid = game.turn;
+    const mv = game.legalMoves(pid);
+    if (mv.length) game.play(pid, mv[0].tileId, mv[0].end);
+    else if (game.canDraw(pid)) game.draw(pid);
+    else game.pass(pid);
+  }
+  const before = JSON.stringify(game);
+  for (const profile of Object.keys(PROFILES)) {
+    chooseAction(game, game.turn, { level: 'expert', profile, rng: mulberry32(9) });
+    assert.equal(JSON.stringify(game), before, `expert/${profile} mutated the game it inspected`);
+  }
+});
+
+test('F4.2: an unknown level/profile falls back safely', () => {
+  const game = new DominoGame({ variant: 'block', playerIds: ['a', 'b'], seed: 5 });
+  const a = chooseAction(game, game.turn, { level: 'bogus', profile: 'nope', rng: mulberry32(1) });
+  assert.ok(a && a.type, 'bogus level/profile must still return a legal action');
 });

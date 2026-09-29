@@ -584,17 +584,35 @@ input:focus, select:focus { border-color: var(--accent); }
 }
 .btn.danger:hover { filter: brightness(1.08); }
 
-/* local career stats (home footer) */
+/* local career stats (home footer) — F4.1 */
 .home-stats-row {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 6px;
   margin: 10px 16px 4px;
   font-size: 13px;
   font-weight: 700;
   color: var(--muted);
 }
+#homeStats {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  text-align: center;
+  line-height: 1.5;
+}
+#homeStats.hidden { display: none; }
+#homeStats b { color: var(--fg, #e8edf7); font-weight: 800; font-variant-numeric: tabular-nums; }
+#homeStats .hs-form {
+  letter-spacing: 2px;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.9;
+}
+.home-stats-row #btnResetStats { margin-top: 2px; }
 
 /* drag & drop tile ghost following the pointer */
 .drag-ghost {

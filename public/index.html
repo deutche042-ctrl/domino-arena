@@ -8,7 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=41">
+<link rel="stylesheet" href="css/style.css?v=42">
 <script type="importmap">
 {
   "imports": {
@@ -66,6 +66,18 @@
         <button type="button" class="diff-chip" data-level="easy">سهل</button>
         <button type="button" class="diff-chip active" data-level="medium">متوسط</button>
         <button type="button" class="diff-chip" data-level="hard">صعب</button>
+        <button type="button" class="diff-chip" data-level="expert">خبير</button>
+      </div>
+      <div class="diff-row" id="profileRow">
+        <button type="button" class="diff-chip active" data-profile="balanced">⚖ متوازن</button>
+        <button type="button" class="diff-chip" data-profile="aggressive">🔥 هجومي</button>
+        <button type="button" class="diff-chip" data-profile="defensive">🛡 دفاعي</button>
+      </div>
+      <div class="diff-row" id="themeRow">
+        <button type="button" class="diff-chip active" data-theme="classic">🎨 كلاسيك</button>
+        <button type="button" class="diff-chip" data-theme="neon">💠 نيون</button>
+        <button type="button" class="diff-chip" data-theme="wood">🪵 خشب</button>
+        <button type="button" class="diff-chip" data-theme="piano">🎹 بيانو</button>
       </div>
       <div class="join-row">
         <input id="inpCode" maxlength="4" placeholder="الكود" autocomplete="off">
@@ -389,6 +401,6 @@
   </div>
 </section>
 
-<script type="module" src="js/app.js?v=44"></script>
+<script type="module" src="js/app.js?v=45"></script>
 </body>
 </html>

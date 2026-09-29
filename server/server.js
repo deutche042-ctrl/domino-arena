@@ -208,7 +208,10 @@ function botAct(room, pid) {
   const game = room.game;
   const bot = room.players.find(p => p.id === pid);
   if (!game || !bot) return;
-  const action = chooseAction(game, pid, { level: bot.botLevel || 'medium' });
+  const action = chooseAction(game, pid, {
+    level: bot.botLevel || 'medium',
+    profile: bot.botProfile || 'balanced',
+  });
   if (!action) return;
   try {
     if (action.type === 'play') game.play(pid, action.tileId, action.end);
@@ -267,7 +270,7 @@ io.on('connection', (socket) => {
 
   // ---- lobby ----
 
-  socket.on('room:create', ({ name, vsBots, botLevel, botDelayMs } = {}, cb) => {
+  socket.on('room:create', ({ name, vsBots, botLevel, botProfile, botDelayMs } = {}, cb) => {
     // Unbounded room creation would let any LAN peer memory-DoS the host phone.
     if (manager.rooms.size >= (Number(process.env.MAX_ROOMS) || 50)) {
       cb?.({ ok: false, error: 'الغرف كتير أوي على الخادم — جرب كمان شوية' });
@@ -283,7 +286,7 @@ io.on('connection', (socket) => {
       room.botDelayMs = Number.isFinite(d) && d >= 25 ? d : null;
       const names = [...BOT_NAMES];
       for (let i = 0; i < 3 && room.players.length < room.config.maxPlayers; i++) {
-        manager.addBot(room, names.splice(Math.floor(Math.random() * names.length), 1)[0], botLevel);
+        manager.addBot(room, names.splice(Math.floor(Math.random() * names.length), 1)[0], botLevel, botProfile);
       }
       manager.startGame(room);
     }
@@ -430,11 +433,11 @@ io.on('connection', (socket) => {
     broadcastLobby(room);
   });
 
-  socket.on('lobby:addBot', ({ level } = {}, cb) => {
+  socket.on('lobby:addBot', ({ level, profile } = {}, cb) => {
     const { room, playerId } = currentCtx(socket);
     if (!room) return;
     if (playerId !== room.hostId) return cb?.({ ok: false, error: 'فقط المضيف يمكنه إضافة بوت.' });
-    const res = manager.addBot(room, BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)], level);
+    const res = manager.addBot(room, BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)], level, profile);
     if (res.error) return cb?.({ ok: false, error: res.error });
     cb?.({ ok: true, lobby: manager.lobbyState(room) });
     broadcastLobby(room);

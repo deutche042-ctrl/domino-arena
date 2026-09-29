@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { tileFaceCanvas, tileBackCanvas, feltCanvas } from './tiles.js?v=11';
+import { tileFaceCanvas, tileBackCanvas, feltCanvas, setTheme as setTileTheme, getTheme } from './tiles.js?v=12';
 
 const TILE_W = 1, TILE_L = 2, TILE_H = 0.42, GAP = 0.07;
 const MAX_X = 9.5;              // table boundary along X before turning
@@ -59,7 +59,17 @@ export class Board3D {
     this.boneLight.visible = false;
     this.scene.add(this.boneLight);
 
+    // F4.4: respect the OS reduced-motion preference — flattens the arc/drop
+    // flourishes to instant placement (accessibility, and kinder on weak GPUs).
+    // Must be set BEFORE _buildTurnRing(), which reads it.
+    this._reducedMotion = typeof matchMedia === 'function'
+      ? matchMedia('(prefers-reduced-motion: reduce)').matches : false;
+    this._myTurn = false;
+    this._turnRing = null;
+    this._turnRingMat = null;
+
     this._buildTable();
+    this._buildTurnRing();
 
     // groups
     this.chainGroup = new THREE.Group();
@@ -70,6 +80,7 @@ export class Board3D {
     this._texCache = new Map();
     this._matCache = new Map();    // F3.1: pooled face materials, keyed `f:a-b`
     this._scoreMats = new Map();   // "+N" All-Fives preview badge sprites
+    this._theme = getTheme();      // F4.3: active tile skin (keys the texture cache)
     // SHARED geometry for every tile mesh in the scene. NEVER dispose it
     // per-mesh — disposing it once would blank out every tile that uses it.
     // If the renderer is ever torn down, dispose this exactly once there.
@@ -159,9 +170,45 @@ export class Board3D {
     this.scene.add(floor);
   }
 
+  // ── F4.4: centre turn pulse ──
+  // A thin ring sitting just above the felt at the table centre. It is invisible
+  // unless it is MY turn, and then it breathes (scale + opacity) at ~1 Hz so the
+  // player's eye is drawn back to the board. Built once, like the table itself,
+  // and animated in _loop() — never re-created per turn, so it cannot leak.
+  _buildTurnRing() {
+    const geo = new THREE.RingGeometry(1.55, 1.95, 64);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x63e6ff, transparent: true, opacity: 0,
+      side: THREE.DoubleSide, depthWrite: false,
+    });
+    const ring = new THREE.Mesh(geo, mat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = -TILE_H / 2 + 0.04;   // just clear of the felt
+    ring.renderOrder = 1;
+    ring.visible = false;
+    ring.userData.isTurnRing = true;
+    this._turnRing = ring;
+    this._turnRingMat = mat;
+    this.scene.add(ring);
+  }
+
+  /** F4.4: show/hide the centre pulse ring (it is this player's turn to act). */
+  setMyTurn(on) {
+    const on2 = !!on;
+    if (on2 === this._myTurn) return;
+    this._myTurn = on2;
+    if (this._turnRing) {
+      this._turnRing.visible = on2 && !this._reducedMotion;
+      if (!this._turnRing.visible && this._turnRingMat) this._turnRingMat.opacity = 0;
+    }
+  }
+
   // ── tile meshes ──
+  // F4.3: the texture cache is keyed by the ACTIVE theme, so switching themes
+  // simply repaints into fresh keys. setTheme() drops the stale entries so the
+  // finite pool (28 faces + 1 back) never grows across theme switches.
   _faceTex(a, b) {
-    const k = `${a}-${b}`;
+    const k = `${this._theme}:${a}-${b}`;
     if (!this._texCache.has(k)) {
       const t = new THREE.CanvasTexture(tileFaceCanvas(a, b));
       t.anisotropy = 8;
@@ -171,12 +218,30 @@ export class Board3D {
   }
 
   _backTex() {
-    if (!this._texCache.has('back')) {
+    const k = `${this._theme}:back`;
+    if (!this._texCache.has(k)) {
       const t = new THREE.CanvasTexture(tileBackCanvas());
       t.anisotropy = 8;
-      this._texCache.set('back', t);
+      this._texCache.set(k, t);
     }
-    return this._texCache.get('back');
+    return this._texCache.get(k);
+  }
+
+  /** F4.3: repaint every tile in a new theme. Returns true if anything changed. */
+  setTheme(name) {
+    if (!setTileTheme(name) || name === this._theme) return false;
+    this._theme = name;
+    // Drop the previous theme's textures + the pooled materials bound to them, so
+    // the next sync regenerates both from the new painters. Bounded by the deck.
+    for (const tex of this._texCache.values()) tex.dispose?.();
+    this._texCache.clear();
+    for (const mat of this._matCache.values()) mat.dispose?.();
+    this._matCache.clear();
+    this._backMatC?.dispose?.();
+    this._backMatC = null;
+    // Rebuild the chain with the new materials.
+    this.invalidate();
+    return true;
   }
 
   _sideMat() {
@@ -193,7 +258,7 @@ export class Board3D {
   // them for the lifetime of the board exactly like _texCache does for textures.
   // A 28-tile deck can only ever produce 28 faces + 1 back → a hard upper bound.
   _faceMat(a, b) {
-    const k = `f:${a}-${b}`;
+    const k = `f:${this._theme}:${a}-${b}`;
     if (!this._matCache.has(k)) {
       this._matCache.set(k, new THREE.MeshStandardMaterial({ map: this._faceTex(a, b), roughness: 0.3 }));
     }
@@ -514,6 +579,8 @@ export class Board3D {
       matPool: this._matCache?.size ?? 0,
       texPool: this._texCache?.size ?? 0,
       anims: this._anims?.length ?? 0,
+      myTurn: !!this._myTurn,
+      reducedMotion: !!this._reducedMotion,
     };
   }
 
@@ -594,6 +661,7 @@ export class Board3D {
       const s = this._layoutStep(st, mv);
       if (!s) continue;
       addedSpots.push(s);
+      st.spots.push(s);          // keep st.spots in step with the chain (see _rebuildMoves)
       const mesh = this._tileMesh(mv.t.a, mv.t.b);
       mesh.position.set(s.x, 0, s.z);
       mesh.rotation.y = s.rotY;
@@ -601,9 +669,19 @@ export class Board3D {
       this._chainViews.push(mesh);
       // Only the very last tile gets the drop-in flourish.
       if (i === moves.length - 1) {
-        mesh.position.y = 7;
-        mesh.rotation.x = 0.6;
-        this._anims.push({ mesh, t: 0, dur: 0.45, kind: 'drop', baseRotY: s.rotY });
+        // F4.4: arc the tile in from above-and-behind rather than dropping it
+        // straight down — a short parabola reads as "placed" instead of "fell".
+        const arc = this._reducedMotion ? null : {
+          fromX: s.x + (mv.end === 'R' ? 2.2 : -2.2),
+          fromZ: s.z + 3.0,
+        };
+        mesh.position.y = this._reducedMotion ? 0 : 7;
+        mesh.rotation.x = this._reducedMotion ? 0 : 0.6;
+        if (arc) { mesh.position.x = arc.fromX; mesh.position.z = arc.fromZ; }
+        this._anims.push({
+          mesh, t: 0, dur: this._reducedMotion ? 0.01 : 0.45, kind: 'drop',
+          baseRotY: s.rotY, toX: s.x, toZ: s.z, arc,
+        });
       }
     }
 
@@ -985,6 +1063,15 @@ export class Board3D {
       this.boneLight.intensity = 3.5 + Math.sin(t * 6) * 1.8;
     }
 
+    // F4.4: breathe the centre turn ring while it is my move (skipped entirely
+    // for reduced-motion users — the ring is hidden in setMyTurn() for them).
+    if (this._turnRing && this._turnRing.visible && this._turnRingMat) {
+      const s = 0.5 + 0.5 * Math.sin(t * 3.4);          // 0..1
+      const k = 1 + s * 0.16;                            // gentle outward puff
+      this._turnRing.scale.set(k, k, 1);
+      this._turnRingMat.opacity = 0.10 + s * 0.26;
+    }
+
     // process active animations
     this._anims = this._anims.filter(a => {
       a.t += dt;
@@ -992,9 +1079,19 @@ export class Board3D {
       if (a.kind === 'drop') {
         const k = Math.min(a.t / a.dur, 1);
         const e2 = 1 - (1 - k) ** 3;
+        // F4.4: parabola — height eases out while the tile also travels in X/Z
+        // from its arc origin to the resting spot (settles at k = 1).
+        if (a.arc) {
+          a.mesh.position.x = a.arc.fromX + (a.toX - a.arc.fromX) * e2;
+          a.mesh.position.z = a.arc.fromZ + (a.toZ - a.arc.fromZ) * e2;
+        }
         a.mesh.position.y = 7 * (1 - e2);
         a.mesh.rotation.x = 0.6 * (1 - e2);
-        if (k >= 1) { a.mesh.position.y = 0; a.mesh.rotation.x = 0; return false; }
+        if (k >= 1) {
+          a.mesh.position.y = 0; a.mesh.rotation.x = 0;
+          if (a.arc) { a.mesh.position.x = a.toX; a.mesh.position.z = a.toZ; }
+          return false;
+        }
         return true;
       }
 
@@ -1102,6 +1199,10 @@ export class Board3D {
     this._hitBoxGeo = null;
     this._hitMatC?.dispose?.();
     this._hitMatC = null;
+    this._turnRing?.geometry?.dispose?.();
+    this._turnRingMat?.dispose?.();
+    this._turnRing = null;
+    this._turnRingMat = null;
     this.renderer?.dispose?.();
   }
 }
