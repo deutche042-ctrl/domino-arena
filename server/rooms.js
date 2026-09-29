@@ -38,7 +38,7 @@ export class RoomManager {
     return { room, player };
   }
 
-  joinRoom(code, name, token) {
+  joinRoom(code, name, token, opts = {}) {
     const room = this.rooms.get((code || '').toUpperCase().trim());
     if (!room) return { error: 'الغرفة غير موجودة. تأكد من صحة الكود.' };
     // Reconnect by token?
@@ -50,8 +50,22 @@ export class RoomManager {
         return { room, player: existing, reconnected: true };
       }
     }
-    if (room.state !== 'lobby') return { error: 'بدأت اللعبة بالفعل في هذه الغرفة.' };
-    if (room.players.length >= room.config.maxPlayers) return { error: 'الغرفة ممتلئة بالكامل.' };
+    if (room.state !== 'lobby') {
+      if (opts.allowSpectate) {
+        const res = this.addSpectator(room, name);
+        if (res.error) return { error: res.error };
+        return { room, spectator: res.spectator, spectating: true };
+      }
+      return { error: 'بدأت اللعبة بالفعل في هذه الغرفة.' };
+    }
+    if (room.players.length >= room.config.maxPlayers) {
+      if (opts.allowSpectate) {
+        const res = this.addSpectator(room, name);
+        if (res.error) return { error: res.error };
+        return { room, spectator: res.spectator, spectating: true };
+      }
+      return { error: 'الغرفة ممتلئة بالكامل.' };
+    }
     const player = this._newPlayer(name);
     if (this.isKicked(room, player.id)) return { error: 'تم طردك من هذه الغرفة.' };
     room.players.push(player);
@@ -78,6 +92,24 @@ export class RoomManager {
 
   isKicked(room, idOrToken) {
     return !!room.kicked && room.kicked.has(idOrToken);
+  }
+
+  /** Spectators ride along: they see every game state but hold no seat. */
+  addSpectator(room, name) {
+    room.spectators = room.spectators || [];
+    if (room.spectators.length >= 8) return { error: 'الغرفة وصلت لأقصى عدد متفرجين.' };
+    const spectator = {
+      id: randomUUID(),
+      name: (name || 'متفرج').slice(0, 16),
+      socketId: null,
+    };
+    room.spectators.push(spectator);
+    return { spectator };
+  }
+
+  removeSpectator(room, spectatorId) {
+    if (!room.spectators) return;
+    room.spectators = room.spectators.filter(s => s.id !== spectatorId);
   }
 
   getRoom(code) { return this.rooms.get((code || '').toUpperCase().trim()); }

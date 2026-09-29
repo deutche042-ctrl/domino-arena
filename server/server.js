@@ -65,6 +65,10 @@ function broadcastLobby(room) {
 function broadcastGame(room) {
   armTurnTimer(room);
   scheduleBotTurn(room);
+  // Spectators get one shared neutral view (no hand, no legal moves).
+  for (const s of room.spectators || []) {
+    if (s.socketId) io.to(s.socketId).emit('game:state', manager.gameView(room, '__spectator__'));
+  }
   for (const p of room.players) {
     if (p.socketId && p.connected) {
       io.to(p.socketId).emit('game:state', manager.gameView(room, p.id));
@@ -154,7 +158,7 @@ function currentCtx(socket) {
   const s = sessions.get(socket.id);
   if (!s) return {};
   const room = manager.getRoom(s.roomCode);
-  return { room, playerId: s.playerId };
+  return { room, playerId: s.playerId, spectating: !!s.spectating, spectatorId: s.spectatorId };
 }
 
 // ---- bots ----
@@ -297,12 +301,29 @@ io.on('connection', (socket) => {
     if (joinFails.length >= 5) {
       return cb?.({ ok: false, error: 'محاولات كتير أوي — استنى شوية وجرب تاني.' });
     }
-    const res = manager.joinRoom(code, name, token);
+    const res = manager.joinRoom(code, name, token, { allowSpectate: true });
     if (res.error) {
       joinFails.push(now);
       return cb?.({ ok: false, error: res.error });
     }
     joinFails = [];
+    if (res.spectating) {
+      // Room full or mid-match: ride along as a spectator (no seat, no voice,
+      // gameplay handlers no-op because this id is not in room.players).
+      const { room, spectator } = res;
+      spectator.socketId = socket.id;
+      socket.join(room.code);
+      sessions.set(socket.id, {
+        roomCode: room.code, playerId: 'spectator:' + spectator.id,
+        spectating: true, spectatorId: spectator.id,
+      });
+      cb?.({ ok: true, spectating: true, code: room.code, spectatorId: spectator.id, state: room.state });
+      if (room.game) {
+        socket.emit('game:state', manager.gameView(room, '__spectator__'));
+      }
+      broadcastLobby(room);
+      return;
+    }
     const { room, player } = res;
     // If this player was attached to another socket (refresh), detach the old one
     if (player.socketId && player.socketId !== socket.id) {
@@ -316,6 +337,9 @@ io.on('connection', (socket) => {
     cb?.({
       ok: true, code: room.code, playerId: player.id, token: player.token,
       reconnected: !!res.reconnected, state: room.state,
+      // F1.4: lets the client set the "you're up" banner on a resume without
+      // having to wait for the first game:state — a cheap boolean, no hand data.
+      youAreUp: room.state === 'playing' && room.game?.status === 'playing' && room.game.turn === player.id,
       lobby: manager.lobbyState(room),
     });
     // Freshly loaded / reconnected page: unicast who is already in voice.
@@ -332,6 +356,10 @@ io.on('connection', (socket) => {
     const room = manager.getRoom(s.roomCode);
     socket.leave(s.roomCode);
     if (!room) return cb?.({ ok: true });
+    if (s.spectating) {
+      manager.removeSpectator(room, s.spectatorId);
+      return cb?.({ ok: true });
+    }
     const p = room.players.find(p => p.id === s.playerId);
     if (p) {
       const hadVoice = !!p.voice;
@@ -449,6 +477,7 @@ io.on('connection', (socket) => {
   const doAction = (fn) => {
     const { room, playerId } = currentCtx(socket);
     if (!room?.game) return;
+    if (currentCtx(socket).spectating) return; // spectators hold no seat — silent no-op
     try {
       fn(room.game, playerId);
     } catch (e) {
@@ -530,6 +559,30 @@ io.on('connection', (socket) => {
     broadcastGame(room);
   });
 
+  // ── hint (F1.5) ──
+  // The bot brain needs cloneGame()/real engine methods, so this runs server-side
+  // (decision AD-2). We reply with ONLY the chosen action — tileId + end, both of
+  // which the asking player can already derive from their own view.legalMoves.
+  // No opponent hand, no boneyard order, ever leaves the server.
+  socket.on('game:hint', (_, cb) => {
+    const { room, playerId } = currentCtx(socket);
+    if (!room?.game || room.game.status !== 'playing' || room.game.turn !== playerId) {
+      return cb?.({ ok: false });
+    }
+    try {
+      const action = chooseAction(room.game, playerId, { level: 'medium' });
+      // Sanity gate: never hand back an illegal suggestion.
+      if (action?.type === 'play') {
+        const legal = room.game.legalMoves().some(m => m.tileId === action.tileId && m.end === action.end);
+        if (!legal) return cb?.({ ok: false });
+        return cb?.({ ok: true, type: 'play', tileId: action.tileId, end: action.end });
+      }
+      return cb?.({ ok: true, type: action?.type || 'pass' });
+    } catch {
+      return cb?.({ ok: false });
+    }
+  });
+
   socket.on('game:rematch', () => {
     const { room, playerId } = currentCtx(socket);
     if (!room?.game || room.game.status !== 'matchEnd') return;
@@ -551,9 +604,19 @@ io.on('connection', (socket) => {
     const now = Date.now();
     if (now - chatWindowStart > 3000) { chatWindowStart = now; chatCount = 0; }
     if (++chatCount > 5) return;
+    room.lastActivityAt = now; // chat keeps an idle lobby alive
+    // Spectators may chat, visibly tagged so nobody mistakes them for players.
+    if (currentCtx(socket).spectating) {
+      const spec = (room.spectators || []).find(s => s.id === currentCtx(socket).spectatorId);
+      if (!spec) return;
+      const msg = { from: '👁 ' + spec.name, pid: playerId, at: now, spectator: true };
+      if (typeof text === 'string' && text.trim()) msg.text = text.trim().slice(0, 200);
+      else if (typeof emoji === 'string' && emoji.length <= 8) msg.emoji = emoji;
+      else return;
+      return io.to(room.code).emit('chat:msg', msg);
+    }
     const p = room.players.find(p => p.id === playerId);
     if (!p) return;
-    room.lastActivityAt = now; // chat keeps an idle lobby alive
     if (p.chatMuted) return; // host-muted chat — silently dropped
     const msg = { from: p.name, pid: p.id, at: now };
     if (typeof text === 'string' && text.trim()) msg.text = text.trim().slice(0, 200);
@@ -654,6 +717,7 @@ io.on('connection', (socket) => {
     if (!s) return;
     const room = manager.getRoom(s.roomCode);
     if (!room) return;
+    if (s.spectating) return manager.removeSpectator(room, s.spectatorId);
     const p = room.players.find(p => p.id === s.playerId);
     if (!p) return;
     p.connected = false;

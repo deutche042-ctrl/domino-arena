@@ -281,7 +281,45 @@ ok(typeof cState.turnEndsAt === 'number' && cState.turnEndsAt - cState.serverNow
 
 a.close(); b2.close(); c.close(); d.close();
 
-// ── idle lobby sweeper (runs only when the server has a short LOBBY_TTL_MS) ──
+// ── spectator mode: full lobby → auto-spectate; claim seat; neutral mid-game view ──
+{
+  const h = await client();
+  const g1 = await client();
+  const scr = await emit(h, 'room:create', { name: 'Host' });
+  ok((await emit(h, 'lobby:config', { maxPlayers: 2 })).ok, 'spec: host capped room at 2 players');
+  ok((await emit(g1, 'room:join', { code: scr.code, name: 'P2' })).ok, 'spec: p2 seated');
+  const sp = await client();
+  const spj = await emit(sp, 'room:join', { code: scr.code, name: 'Watcher' });
+  ok(spj.ok === true && spj.spectating === true, 'spec: full lobby auto-spectates');
+  // a seat frees up in the lobby → spectator claims it with a plain re-join
+  ok((await emit(g1, 'room:leave')).ok, 'spec: p2 left the lobby');
+  await sleep(100);
+  const claim = await emit(sp, 'room:join', { code: scr.code, name: 'Watcher' });
+  ok(claim.ok === true && !claim.spectating && claim.playerId, 'spec: spectator claimed the free seat');
+  // room full again → a fresh watcher rides along; then the game starts
+  const sp2 = await client();
+  const sp2j = await emit(sp2, 'room:join', { code: scr.code, name: 'Watcher2' });
+  ok(sp2j.ok === true && sp2j.spectating === true, 'spec: second watcher auto-spectates a full lobby');
+  sp.emit('lobby:ready', { ready: true });
+  await sleep(60);
+  ok((await emit(h, 'game:start')).ok, 'spec: game started');
+  const spStateP = once(sp2, 'game:state', 3000);
+  const spState = await spStateP;
+  ok(spState && spState.hand === undefined && Array.isArray(spState.legalMoves) && spState.legalMoves.length === 0,
+    'spec: spectator view has no hand and no legal moves');
+  ok(spState.names && spState.roomCode === scr.code, 'spec: spectator view carries names/code');
+  // spectator chat is tagged
+  const hostChatP = once(h, 'chat:msg', 2000);
+  sp2.emit('chat:send', { text: 'أنا بتصور بس' });
+  const spChat = await hostChatP;
+  ok(spChat && spChat.spectator === true && spChat.from.startsWith('👁'), 'spec: spectator chat tagged with 👁');
+  // spectator cannot play (silent no-op — no error event, no state change)
+  const spErrP = once(sp2, 'error', 700);
+  sp2.emit('game:play', { tileId: spState.moves?.[0]?.t?.id || '0-0', end: 'L' });
+  ok(await spErrP === null, 'spec: spectator game:play is a silent no-op');
+  sp.close(); sp2.close(); h.close();
+}
+
 if (process.env.E2E_TTL) {
   const t = await client();
   const tcr = await emit(t, 'room:create', { name: 'IdleHost' });

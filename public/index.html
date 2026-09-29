@@ -6,7 +6,7 @@
 <title>دومينو أرينا | Domino Arena</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=37">
+<link rel="stylesheet" href="css/style.css?v=40">
 <script type="importmap">
 {
   "imports": {
@@ -202,6 +202,8 @@
   <div id="actionBar">
     <button id="btnDraw" class="btn hidden">سحب <span id="boneyardCount"></span></button>
     <button id="btnPass" class="btn hidden">تمرير (باص)</button>
+    <button id="btnHint" class="btn hint-btn hidden" title="اقترح عليّ أفضل حركة">💡 تلميح</button>
+    <button id="btnSort" class="btn sort-btn" title="ترتيب اليد">🂠 ترتيب السحب</button>
   </div>
 
   <div id="opponents"></div>
@@ -342,6 +344,7 @@
     <div class="modal-card">
       <h2>🏆 <span id="matchWinner"></span> فاز بالمباراة!</h2>
       <div id="matchStandings"></div>
+      <p id="matchStallNote" class="muted small hidden"></p>
       <canvas id="confetti"></canvas>
       <button id="btnRematch" class="btn primary hidden">مباراة جديدة</button>
       <button id="btnRematchVote" class="btn hidden">أطلب مباراة جديدة</button>
@@ -362,6 +365,6 @@
   </div>
 </section>
 
-<script type="module" src="js/app.js?v=39"></script>
+<script type="module" src="js/app.js?v=42"></script>
 </body>
 </html>

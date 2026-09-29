@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=18';
+import { Board3D } from './board3d.js?v=19';
 import { Home3D } from './home3d.js?v=2';
 import { tileImage } from './tiles.js?v=11';
 import { sfx } from './sfx.js?v=15';
@@ -48,6 +48,7 @@ const CHAT_COLORS = ['247,179,43', '46,230,168', '122,165,255', '255,122,149'];
 let lastTimerKey = null, lastTickSec = null;
 let clockOffset = 0; // server clock minus client clock, captured per state
 let autoPlayTimer = null;
+let spectating = false; // true when riding along without a seat
 
 // ══════════ screens ══════════
 function showScreen(name) {
@@ -161,7 +162,13 @@ function initHome() {
       .then(res => {
         if (!res.ok) return homeError(res.error);
         afterJoin(res, name);
-        showScreen(res.state === 'playing' ? 'game' : 'lobby');
+        if (res.spectating) {
+          spectating = true;
+          showScreen(res.state === 'playing' ? 'game' : 'lobby');
+          if (res.state !== 'playing') lobbyError('الغرفة ممتلئة — دخلت متفرج. لما يفضى مكان اضغط "اقعد والعب".');
+        } else {
+          showScreen(res.state === 'playing' ? 'game' : 'lobby');
+        }
       });
   };
 }
@@ -262,12 +269,31 @@ function renderLobby(st) {
     btnAddBot.disabled = full;
   }
 
-  $('hostConfig').classList.toggle('hidden', !isHost);
-  $('btnStart').classList.toggle('hidden', !isHost);
-  $('btnReady').classList.toggle('hidden', isHost);
-
-  const me = (st.players || []).find(p => p.id === myId);
-  $('btnReady').textContent = me?.ready ? 'لست جاهزاً' : 'أنا جاهز';
+  $('hostConfig').classList.toggle('hidden', !isHost || spectating);
+  $('btnStart').classList.toggle('hidden', !isHost || spectating);
+  const btnReady = $('btnReady');
+  btnReady.classList.toggle('hidden', isHost || spectating && st.state !== 'lobby');
+  if (spectating) {
+    // ride-along: the ready button becomes "take a free seat"
+    btnReady.textContent = 'اقعد والعب 🪑';
+    btnReady.disabled = (st.players || []).length >= (st.config?.maxPlayers ?? 4);
+    btnReady.onclick = () => {
+      const name = myName || 'لاعب';
+      const code = roomCode;
+      emit('room:leave').catch(() => {});
+      emit('room:join', { code, name }).then(res => {
+        if (!res.ok) return lobbyError(res.error || 'مفيش مكان فاضي.');
+        spectating = false;
+        afterJoin(res, name);
+        showScreen(res.state === 'playing' ? 'game' : 'lobby');
+        sfx.click();
+      });
+    };
+  } else {
+    btnReady.disabled = false;
+    const me = (st.players || []).find(p => p.id === myId);
+    btnReady.textContent = me?.ready ? 'لست جاهزاً' : 'أنا جاهز';
+  }
 
   // host can only start if >=2 players and non-hosts are ready
   const others = (st.players || []).filter(p => p.id !== st.hostId);
@@ -352,6 +378,7 @@ function leaveRoom() {
   lastLobbyState = null;
   view = null;
   selectedTile = null;
+  spectating = false;
   clearTimeout(autoPlayTimer);
   stopTurnAlert();
   board?.clearMarkers();
@@ -376,17 +403,23 @@ function closeLeaveConfirm() { $('modalLeave').classList.add('hidden'); }
 // ══════════ game rendering ══════════
 function renderGame() {
   if (!view) return;
+  $('screen-game').classList.toggle('spectating', spectating);
   board?.sync(view);
-  board?.setCanDraw(view.turn === myId && view.status === 'playing' && view.canDraw);
+  board?.setCanDraw(!spectating && view.turn === myId && view.status === 'playing' && view.canDraw);
   renderOpponents();
-  renderHand();
+  if (spectating) {
+    $('hand').innerHTML = '';
+    $('hand').classList.remove('my-turn');
+  } else {
+    renderHand();
+  }
   renderActions();
   renderTurnBanner();
   updateTurnTimer();
   renderScoreCard();
   renderModals();
   playActionSounds();
-  maybeAutoPlay();
+  if (!spectating) maybeAutoPlay();
   prevHand = [...(view.hand || [])];
 }
 
@@ -451,13 +484,52 @@ function renderOpponents() {
   }
 }
 
+// ── hand sorting: 7 tiles in draw order cost 5-10s of scanning per turn, which
+// eats the 30s clock. Four modes, persisted per device. ──
+const SORT_MODES = ['deal', 'pips', 'playable', 'doubles'];
+const SORT_LABELS = { deal: '🂠 ترتيب السحب', pips: '⚖ ثقيل أولاً', playable: '✅ المتاح أولاً', doubles: '🎲 الدبل أولاً' };
+let sortMode = (() => {
+  try {
+    const v = localStorage.getItem('domino_sort');
+    return SORT_MODES.includes(v) ? v : 'deal';
+  } catch { return 'deal'; }
+})();
+
+function sortedHand() {
+  const h = [...(view.hand || [])];
+  if (sortMode === 'deal') return h;
+  const pipsOf = t => t.a + t.b;
+  // One shared tie-break for every pip-based mode: heaviest first, then the
+  // largest tile (same total) first. Keeps 'pips' and 'playable' visually
+  // consistent and makes the order fully deterministic.
+  const byPips = (x, y) => pipsOf(y) - pipsOf(x) || (y.b - x.b) || (y.a - x.a);
+  if (sortMode === 'pips') return h.sort(byPips);
+  if (sortMode === 'doubles') {
+    return h.sort((x, y) => ((y.a === y.b) - (x.a === x.b)) || byPips(x, y));
+  }
+  // 'playable' — a legal move first. Only meaningful on my turn; other players
+  // get legalMoves = [] so this degrades to pips order, which is fine.
+  const playable = new Set((view.legalMoves || []).map(m => m.tileId));
+  return h.sort((x, y) => (playable.has(y.id) - playable.has(x.id)) || byPips(x, y));
+}
+
+function cycleSort() {
+  const i = SORT_MODES.indexOf(sortMode);
+  sortMode = SORT_MODES[(i + 1) % SORT_MODES.length];
+  try { localStorage.setItem('domino_sort', sortMode); } catch { /* no storage */ }
+  const btn = $('btnSort');
+  if (btn) { btn.textContent = SORT_LABELS[sortMode]; btn.title = 'ترتيب اليد: ' + SORT_LABELS[sortMode]; }
+  sfx.click();
+  renderHand();
+}
+
 function renderHand() {
   const hand = $('hand');
-  const myTurn = view.turn === myId && view.status === 'playing';
+  const myTurn = !spectating && view.turn === myId && view.status === 'playing';
   hand.classList.toggle('my-turn', myTurn);
   hand.innerHTML = '';
-  const playableIds = new Set(myTurn ? view.legalMoves.map(m => m.tileId) : []);
-  for (const t of view.hand) {
+  const playableIds = new Set(myTurn ? (view.legalMoves || []).map(m => m.tileId) : []);
+  for (const t of sortedHand()) {
     const el = document.createElement('div');
     el.className = 'tile-h';
     if (newlyDrawnTileId && t.id === newlyDrawnTileId) {
@@ -468,6 +540,8 @@ function renderHand() {
       if (playableIds.has(t.id)) el.classList.add('playable');
       else el.classList.add('dim');
       if (view.leadForcedTile === t.id) el.classList.add('forced');
+      // Draw rules: the tile just drawn must be played — reuse the forced-look
+      if (view.forcedDrawTile === t.id) el.classList.add('forced', 'just-drawn');
     }
     if (selectedTile === t.id) el.classList.add('selected');
     if (myTurn && playableIds.has(t.id)) {
@@ -484,10 +558,12 @@ function renderHand() {
 }
 
 function renderActions() {
-  const myTurn = view.turn === myId && view.status === 'playing';
-  $('btnDraw').classList.toggle('hidden', !(myTurn && view.canDraw));
+  const myTurn = !spectating && view.turn === myId && view.status === 'playing';
+  $('btnDraw').classList.toggle('hidden', spectating || !(myTurn && view.canDraw));
   $('boneyardCount').textContent = `(${view.boneyardCount})`;
-  $('btnPass').classList.toggle('hidden', !(myTurn && view.canPass));
+  $('btnPass').classList.toggle('hidden', spectating || !(myTurn && view.canPass));
+  // Hint only makes sense when it's my turn AND there is something to suggest.
+  $('btnHint').classList.toggle('hidden', !myTurn || (view.legalMoves || []).length === 0);
   const pill = $('endsPill');
   if (view.variant === 'allfives' && view.moves.length) {
     pill.classList.remove('hidden');
@@ -554,7 +630,7 @@ function maybeAutoPlay() {
   autoPlayTimer = null;
   try { if (localStorage.getItem('domino_autoplay') !== '1') return; } catch (e) { return; }
   if (!view || view.status !== 'playing' || view.turn !== myId) return;
-  if (view.leadForcedTile || view.moves.length === 0) return;   // opening stays manual
+  if (view.leadForcedTile || view.forcedDrawTile || view.moves.length === 0) return;   // opening / forced-draw stays manual
   if ((view.legalMoves || []).length !== 1) return;
   const m = view.legalMoves[0];
   const captured = view.turn;
@@ -613,9 +689,16 @@ function previewEndsTotal(tileId, end) {
 }
 
 function renderTurnBanner() {
+  if (spectating) {
+    const nm = view.names?.[view.turn] || '';
+    setBanner(view.status === 'playing' ? `👁 بتتفرج — دور ${nm}` : '👁 بتتفرج', 'spect');
+    return;
+  }
   if (view.status !== 'playing') { setBanner('', ''); return; }
   if (view.turn === myId) {
-    if (view.leadForcedTile) {
+    if (view.forcedDrawTile) {
+      setBanner('دورك — لازم تلعب الكارت اللي سحبته', 'mine');
+    } else if (view.leadForcedTile) {
       setBanner('دورك — العب الكارت المحدد للبداية', 'mine');
     } else if (view.moves.length === 0) {
       setBanner('دورك — اختر أي كارت لبدء اللعبة', 'mine');
@@ -729,7 +812,18 @@ function renderModals() {
   // match end
   const matchModal = $('modalMatch');
   if (view.status === 'matchEnd') {
-    $('matchWinner').textContent = view.matchWinnerId === myId ? 'أنت' : (view.names[view.matchWinnerId] || 'الفائز');
+    const stalled = !!(view.handResult && view.handResult.stallEnd);
+    $('matchWinner').textContent = stalled
+      ? `${view.matchWinnerId === myId ? 'أنت' : (view.names[view.matchWinnerId] || 'الفائز')} (أعلى سكور)`
+      : (view.matchWinnerId === myId ? 'أنت' : (view.names[view.matchWinnerId] || 'الفائز'));
+    // Safety-net ending: no one reached the target, the leader takes it.
+    const stallNote = $('matchStallNote');
+    if (stallNote) {
+      stallNote.textContent = stalled
+        ? 'انتهت المباراة تلقائيًا بعد عدة جولات بلا تسجيل — الفوز لأعلى مجموع نقاط.'
+        : '';
+      stallNote.classList.toggle('hidden', !stalled);
+    }
     const st = $('matchStandings');
     st.innerHTML = '';
     [...view.players].sort((a, b) => view.scores[b] - view.scores[a]).forEach((pid, i) => {
@@ -803,6 +897,37 @@ function playActionSounds() {
 let prevTurnKey = null;
 
 // ══════════ interaction ══════════
+// Server-side hint (AD-2): the bot brain needs real engine methods (cloneGame),
+// so we ask the server and it replies with ONLY { type, tileId, end } — never
+// any opponent hand data. See game:hint in server.js.
+let hintPending = false;
+async function requestHint() {
+  if (hintPending || !view || view.status !== 'playing' || view.turn !== myId) return;
+  hintPending = true;
+  const btn = $('btnHint');
+  btn.disabled = true;
+  sfx.click();
+  try {
+    const res = await emit('game:hint');
+    if (!res?.ok || res.type !== 'play') {
+      floatText(res?.type === 'draw' ? '💡 مفيش حركة — اسحب كارت'
+        : res?.type === 'pass' ? '💡 مفيش حركة — مرّر' : 'مفيش تلميح متاح دلوقتي');
+      return;
+    }
+    selectedTile = res.tileId;
+    if (board) {
+      const moves = (view.legalMoves || []).filter(m => m.tileId === res.tileId);
+      const ends = moves.map(m => m.end).filter(e => e != null);
+      if (ends.length) board.showMarkers(ends);
+    }
+    renderHand();
+    sfx.select();
+  } finally {
+    hintPending = false;
+    btn.disabled = false;
+  }
+}
+
 function onBoneyardDraw(targetMesh) {
   if (!view || view.status !== 'playing' || view.turn !== myId || !view.canDraw) return;
   socket.emit('game:draw');
@@ -922,6 +1047,10 @@ function onBoardMiss() {
 function initGameUI() {
   $('btnDraw').onclick = () => { socket.emit('game:draw'); sfx.click(); };
   $('btnPass').onclick = () => { socket.emit('game:pass'); sfx.click(); };
+  $('btnHint').onclick = requestHint;
+  $('btnSort').onclick = cycleSort;
+  $('btnSort').textContent = SORT_LABELS[sortMode];
+  $('btnSort').title = 'ترتيب اليد: ' + SORT_LABELS[sortMode];
   $('btnNextHand').onclick = () => socket.emit('game:nextHand');
   $('btnRematch').onclick = () => socket.emit('game:rematch');
   $('btnNextHandVote').onclick = () => { socket.emit('game:nextHandVote'); sfx.click(); };
@@ -1808,6 +1937,17 @@ function startSocket(base) {
           // was in voice before the drop? announce again — the mesh rebuilds
           if (voiceSelf.joined) voice.rejoin();
           showScreen(res.state === 'playing' ? 'game' : 'lobby');
+          // F1.4: we may be returning from a locked screen / slept device. We
+          // cannot trust the incremental render cursor after rAF stalls, so force
+          // a full table rebuild and tell the player where things stand.
+          if (res.state === 'playing' && board) {
+            board.invalidate();
+            // Prefer the freshly assigned local view; fall back to the ack payload.
+            const g = (view && view.playerId === res.playerId) ? view : null;
+            const myTurnNow = g ? (g.turn === myId) : !!res.youAreUp;
+            setBanner(myTurnNow ? 'اتصلت من جديد — دورك الآن' : 'اتصلت من جديد', myTurnNow ? 'mine' : '');
+            if (myTurnNow) startTurnAlert();
+          }
         }
       });
     }
@@ -1973,7 +2113,10 @@ function initAppNetUI() {
 function boot() {
   if (IN_APP) startAppNet(); else startSocket('');
   initHome(); initLobby(); initGameUI(); initAppNetUI();
-  setInterval(updateTurnTimer, 200);
+  // F1.3: skip the countdown tick entirely while the tab is hidden — it is pure
+  // DOM work nobody can see, and it keeps SFX (alarm/tick) from firing in a
+  // background tab. The state render on return catches the clock up instantly.
+  setInterval(() => { if (!document.hidden) updateTurnTimer(); }, 200);
 }
 
 boot();
