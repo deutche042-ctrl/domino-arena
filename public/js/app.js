@@ -3,7 +3,7 @@ import { Board3D } from './board3d.js?v=17';
 import { Home3D } from './home3d.js?v=2';
 import { tileImage } from './tiles.js?v=11';
 import { sfx } from './sfx.js?v=15';
-import { VoiceChat, setIceConfig } from './voice.js?v=3';
+import { VoiceChat, setIceConfig } from './voice.js?v=4';
 
 const $ = id => document.getElementById(id);
 const VARIANT_DESC = {
@@ -325,6 +325,7 @@ function initLobby() {
   };
   $('btnLeave').onclick = leaveRoom;
   $('btnLobbyMic').onclick = () => toggleMic();
+  bindPttHold($('btnLobbyMic'));
   for (const id of ['selVariant', 'selTarget', 'selMax', 'selTurnMs']) {
     $(id).onchange = () => emit('lobby:config', {
       variant: $('selVariant').value,
@@ -830,6 +831,7 @@ function initGameUI() {
     e.stopPropagation();
     toggleMic();
   };
+  bindPttHold($('btnMic'));
   $('chatClose').onclick = (e) => {
     e.stopPropagation();
     closeChat();
@@ -1301,6 +1303,7 @@ function initVoice() {
     onInfo: (msg) => showVoiceInfo(msg),
   });
   if (myId) voice.setSelf(myId);
+  try { voice.setPtt(localStorage.getItem('domino_ptt') === '1'); } catch { /* no storage */ }
 }
 
 async function toggleMic() {
@@ -1315,10 +1318,31 @@ async function toggleMic() {
       voiceSelf = { ...voiceSelf, joined: false, status: 'idle' };
       updateMicUI();
     }
-  } else {
+  } else if (!voice.ptt) {
+    // in push-to-talk mode the mic button is a hold key — no toggle on tap
     voice.toggleMute();
     voiceSelf.muted ? sfx.micOff() : sfx.micOn();
   }
+}
+
+// hold-to-talk wiring: while PTT is on, holding a mic button opens the mic
+function bindPttHold(el) {
+  if (!el) return;
+  const down = (e) => {
+    if (!voice?.ptt || !voiceSelf.joined) return; // tap path joins/toggles normally
+    e.preventDefault();
+    voice.setTalking(true);
+    updateMicUI();
+  };
+  const up = () => {
+    if (!voice?.ptt) return;
+    voice.setTalking(false);
+    updateMicUI();
+  };
+  el.addEventListener('pointerdown', down);
+  el.addEventListener('pointerup', up);
+  el.addEventListener('pointercancel', up);
+  el.addEventListener('pointerleave', up);
 }
 
 function updateMicUI() {
@@ -1336,6 +1360,7 @@ function updateMicUI() {
     btn.title = waiting ? waitTitle
       : voiceSelf.joined && hostMuted ? 'المضيف كتّمك'
       : !voiceSelf.joined ? 'فتح المايك'
+      : voice.ptt ? 'اضغط واستمر بالضغط للكلام'
       : muted ? 'فك كتم المايك' : 'كتم المايك';
     btn.setAttribute('aria-label', btn.title);
   }
@@ -1347,6 +1372,7 @@ function updateMicUI() {
     lb.textContent = waiting ? (voiceSelf.status === 'connecting' ? '🎤 بنوصل بالصوت…' : '🎤 بنطلب إذن المايك…')
       : !voiceSelf.joined ? '🎤 فتح المايك'
       : hostMuted ? '🔇 المضيف كتّمك'
+      : voice.ptt ? '🖐 اضغط واستمر للكلام'
       : muted ? '🔇 المايك مكتوم — اضغط للكلام' : '🎙 المايك شغال — اضغط للكتم';
     const lbTitle = waiting ? waitTitle : (voiceSelf.joined && hostMuted ? 'المضيف كتّمك' : '');
     if (lbTitle) lb.title = lbTitle;
@@ -1374,8 +1400,27 @@ function closeVoicePanel() {
 
 function renderVoicePanel() {
   const list = $('voiceList');
-  if (!list) return;
+  if (!list || !voice) return;
   list.innerHTML = '';
+
+  // push-to-talk mode toggle (persisted in localStorage)
+  const pttRow = document.createElement('div');
+  pttRow.className = 'vp-ptt-row';
+  const pttBtn = document.createElement('button');
+  pttBtn.className = 'vp-ptt' + (voice.ptt ? ' on' : '');
+  pttBtn.title = voice.ptt ? 'اضغط على زرار المايك واستمر ضاغط عشان تتكلم' : 'شغّل الوضع ده عشان المايك يفتح وأنت ضاغط بس';
+  pttBtn.textContent = voice.ptt ? '🖐 اضغط وكلم: مفعّل' : '🖐 اضغط وكلم: مقفول';
+  pttBtn.setAttribute('aria-pressed', String(!!voice.ptt));
+  pttBtn.onclick = () => {
+    const on = !voice.ptt;
+    voice.setPtt(on);
+    try { localStorage.setItem('domino_ptt', on ? '1' : '0'); } catch {}
+    updateMicUI();
+    renderVoicePanel();
+    sfx.click();
+  };
+  pttRow.appendChild(pttBtn);
+  list.appendChild(pttRow);
 
   if (!voiceSelf.joined && !voicePeers.length) {
     const empty = document.createElement('div');

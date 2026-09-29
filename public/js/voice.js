@@ -84,6 +84,8 @@ export class VoiceChat {
 
     this._muted = false;         // self mute
     this._hostMuted = false;     // server-enforced host mute
+    this.ptt = false;            // push-to-talk mode: muted by default, setTalking() opens the mic
+    this._pttTalking = false;    // currently holding the talk key
     this.stream = null;          // local mic MediaStream
 
     this.peers = new Map();      // pid -> peer record (see _createPeer)
@@ -152,6 +154,7 @@ export class VoiceChat {
     this._stopPoll();
     this._muted = false;
     this._hostMuted = false;
+    this._pttTalking = false;
     this.selfSpeaking = false;
     this.status = 'idle';
     this._emitSelf();
@@ -249,7 +252,7 @@ export class VoiceChat {
     }
 
     this.joined = true;
-    if (!isRejoin) this._muted = false; // a fresh call starts unmuted
+    if (!isRejoin) this._muted = this.ptt; // push-to-talk joins muted
     this.status = 'connecting';
     this._applyTracks();       // re-assert track state (host mute wins over the flag)
     this._watchSelf();         // start/refresh own-mic speaking detection
@@ -308,13 +311,45 @@ export class VoiceChat {
 
   toggleMute() {
     if (!this.joined) return;
+    // In push-to-talk mode the mic button is a hold key, not a toggle —
+    // tapping it must not flip the mute state underneath.
+    if (this.ptt) return;
     this.setMuted(!this._muted);
   }
 
+  /** Push-to-talk mode: on = muted by default (hold to talk), off = normal. */
+  setPtt(on) {
+    this.ptt = !!on;
+    if (!this.joined) { this._pttTalking = false; return; }
+    if (this.ptt) {
+      this._pttTalking = false;
+      this.setMuted(true);
+    } else {
+      this._pttTalking = false;
+      this.setMuted(false);
+    }
+  }
+
+  /** Hold-to-talk signal (only meaningful while ptt is on). */
+  setTalking(talk) {
+    if (!this.ptt || !this.joined) return;
+    talk = !!talk;
+    if (talk === this._pttTalking) return;
+    if (talk && this._hostMuted) {
+      this.hooks.onError?.('المضيف كتّم المايك بتاعك — مش هينفع تفكه بنفسك.');
+      return;
+    }
+    this._pttTalking = talk;
+    this.setMuted(!talk);
+  }
+
+  get talking() { return this._pttTalking; }
+
   setMuted(m) {
     if (!this.joined) return;
-    if (this._hostMuted) {
+    if (this._hostMuted && !m) {
       // Host mute is server-enforced — flapping the local flag can't undo it.
+      // (Muting *into* a host mute is harmless and allowed: tracks stay dead.)
       this.hooks.onError?.('المضيف كتّم المايك بتاعك — مش هينفع تفكه بنفسك.');
       return;
     }

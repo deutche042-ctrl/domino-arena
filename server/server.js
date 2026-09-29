@@ -165,7 +165,15 @@ function currentCtx(socket) {
 // same hygiene as the turn timer above.
 
 const BOT_NAMES = ['بوت حسن', 'بوت نور', 'بوت كريم', 'بوت سلمى', 'بوت زيكو', 'بوت ميرا'];
-const BOT_EMOJIS = ['🔥', '😂', '👏', '😎', '🤔', '😅', '🎉'];
+// Contextual bot chatter (Egyptian Arabic) — pools picked by what just happened
+const BOT_LINES = {
+  play: ['خد دي بقى 😏', 'اللعب عليا', 'تمام كده', 'شايف الطاولة؟ 👀', 'دبل من القلب'],
+  scored: ['+10 على مزاجك 😎', 'حسبتهمولك؟', 'دي كانت محسوبة', 'نقاط في الجيب'],
+  handWin: ['جولة في الجيب 😎', 'متلعبوش كده!', 'اللي يغلب يتحسب', 'حلوة أوي دي'],
+  draw: ['هسحب كارت يعني', 'الطاولة سخونة النهاردة', 'يمكن أطلع حاجة أحلى'],
+  pass: ['معنديش… مرر', 'امسك الكلام باقي 😅', 'مفيش حاجة تلعب، خد انت'],
+  neutral: ['🔥', '👏', '🎉'],
+};
 
 function scheduleBotTurn(room) {
   if (room.botTimer) { clearTimeout(room.botTimer); room.botTimer = null; }
@@ -204,14 +212,20 @@ function botAct(room, pid) {
 }
 
 function botChatter(room, bot, action) {
-  if (action.type !== 'play' || Math.random() >= 0.08) return;
+  if (Math.random() >= 0.12) return;
   const now = Date.now();
   if (bot.lastChatAt && now - bot.lastChatAt < 8000) return;
+  const game = room.game;
+  // pick a pool by context: hand win > scored play > the bare action
+  let pool = BOT_LINES.neutral;
+  if (action.type === 'pass') pool = BOT_LINES.pass;
+  else if (action.type === 'draw') pool = BOT_LINES.draw;
+  else if (game.status === 'handEnd' && game.handResult?.winnerId === bot.id) pool = BOT_LINES.handWin;
+  else if (game.lastAction?.scored) pool = BOT_LINES.scored;
+  else if (action.type === 'play') pool = BOT_LINES.play;
+  const line = pool[Math.floor(Math.random() * pool.length)];
   bot.lastChatAt = now;
-  io.to(room.code).emit('chat:msg', {
-    from: bot.name, pid: bot.id, at: now,
-    emoji: BOT_EMOJIS[Math.floor(Math.random() * BOT_EMOJIS.length)],
-  });
+  io.to(room.code).emit('chat:msg', { from: bot.name, pid: bot.id, at: now, text: line });
 }
 
 function deleteRoom(room) {
