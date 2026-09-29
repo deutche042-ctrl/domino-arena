@@ -3,10 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b1120">
 <title>دومينو أرينا | Domino Arena</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
+<link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=40">
+<link rel="stylesheet" href="css/style.css?v=41">
 <script type="importmap">
 {
   "imports": {
@@ -143,13 +145,32 @@
       </label>
       <label>وقت الدور
         <select id="selTurnMs">
-          <option value="15000">15 ثانية</option>
+          <option value="0">بدون مؤقّت</option>
+          <option value="10000">10 ثواني</option>
+          <option value="20000">20 ثانية</option>
           <option value="30000" selected>30 ثانية</option>
           <option value="60000">60 ثانية</option>
         </select>
       </label>
+      <label>عدد الكروت لكل لاعب
+        <select id="selHandSize">
+          <option value="" selected>افتراضي (حسب النوع)</option>
+          <option value="5">5 كروت</option>
+          <option value="7">7 كروت</option>
+          <option value="9">9 كروت</option>
+        </select>
+      </label>
+      <label class="rule-row" title="لو قفلت الخيار ده، اللاعب اللي مش عنده حركة لازم يستنى المؤقّت">
+        <input type="checkbox" id="chkAllowPass" checked>
+        <span>السماح بالتمرير (باص)</span>
+      </label>
+      <label class="rule-row" title="آخر كرتين في السحابة يفضلوا محجوبين — بيدي إحساس بالشد في آخر الجولة">
+        <input type="checkbox" id="chkKeepLastTwo">
+        <span>حجب آخر كرتين في السحابة</span>
+      </label>
     </div>
     <p id="variantDesc" class="variant-desc"></p>
+    <p id="rulesSummary" class="rules-summary hidden"></p>
     <label class="autoplay-row" title="لو إيدك فيها حركة واحدة بس، هنتلعبها لوحدنا">
       <input type="checkbox" id="chkAutoplay">
       <span>لعب تلقائي لما يكون فيه حركة واحدة بس</span>
@@ -198,6 +219,8 @@
   </div>
 
   <div id="turnTimer" class="hidden"><span id="turnTimerSecs">30</span></div>
+
+  <div id="perfOverlay" class="hidden"></div>
 
   <div id="actionBar">
     <button id="btnDraw" class="btn hidden">سحب <span id="boneyardCount"></span></button>
@@ -348,6 +371,7 @@
       <canvas id="confetti"></canvas>
       <button id="btnRematch" class="btn primary hidden">مباراة جديدة</button>
       <button id="btnRematchVote" class="btn hidden">أطلب مباراة جديدة</button>
+      <p id="matchVoteNote" class="muted small hidden"></p>
       <p id="matchWait" class="muted hidden">في انتظار المضيف…</p>
     </div>
   </div>
@@ -365,6 +389,6 @@
   </div>
 </section>
 
-<script type="module" src="js/app.js?v=42"></script>
+<script type="module" src="js/app.js?v=44"></script>
 </body>
 </html>

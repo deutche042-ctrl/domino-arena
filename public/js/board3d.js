@@ -68,10 +68,30 @@ export class Board3D {
     this.scene.add(this.chainGroup, this.markerGroup, this.boneGroup);
 
     this._texCache = new Map();
+    this._matCache = new Map();    // F3.1: pooled face materials, keyed `f:a-b`
     this._scoreMats = new Map();   // "+N" All-Fives preview badge sprites
+    // SHARED geometry for every tile mesh in the scene. NEVER dispose it
+    // per-mesh — disposing it once would blank out every tile that uses it.
+    // If the renderer is ever torn down, dispose this exactly once there.
     this._geo = new RoundedBoxGeometry(TILE_W, TILE_H, TILE_L, 4, 0.09);
+    // F3.1 (extended): hit-area geometry + material. Boneyard/marker hit boxes used
+    // to allocate a fresh BoxGeometry AND a fresh transparent MeshBasicMaterial on
+    // every sync (markers re-render each turn), which churned hundreds of GL objects
+    // per game. All hit boxes are unit-ish and only ever scaled via `.scale`, and the
+    // transparent material is identical for all of them — so both are shared, exactly
+    // like _geo. Created lazily (a board with no hits never pays for them).
+    this._hitBoxGeo = null;        // shared BoxGeometry(TILE_W*3.6, 3, TILE_L*3.2) — scaled per use
+    this._hitMatC = null;          // shared transparent MeshBasicMaterial for every hit box
+    this._disposed = false;
     this._anims = [];
     this._movesRendered = 0;
+    // Append-only rendering state: the layout fold cursor, the meshes currently
+    // in chainGroup (parallel to _layoutState.spots), the last move list we
+    // rendered (for prefix checks), and its variant.
+    this._layoutState = null;
+    this._layoutIsAllFives = false;
+    this._chainViews = [];
+    this._lastMoves = null;
     this._downX = 0;
     this._downY = 0;
     this._downTime = 0;
@@ -105,6 +125,11 @@ export class Board3D {
       }
     });
     window.addEventListener('resize', () => this.resize());
+    // battery saver: stop rendering while the tab is hidden
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this.pauseLoop();
+      else this.resumeLoop();
+    });
     this.resize();
     this._loop();
   }
@@ -161,15 +186,81 @@ export class Board3D {
     return this._sideMatC;
   }
 
+  // ── F3.1 material pool ──
+  // Every tile used to allocate 2 fresh MeshStandardMaterials (face + back), so a
+  // long game churned through hundreds of them and forced a WebGL program/texture
+  // rebind per mesh. Materials are immutable per (face, back) pair, so we cache
+  // them for the lifetime of the board exactly like _texCache does for textures.
+  // A 28-tile deck can only ever produce 28 faces + 1 back → a hard upper bound.
+  _faceMat(a, b) {
+    const k = `f:${a}-${b}`;
+    if (!this._matCache.has(k)) {
+      this._matCache.set(k, new THREE.MeshStandardMaterial({ map: this._faceTex(a, b), roughness: 0.3 }));
+    }
+    return this._matCache.get(k);
+  }
+
+  _backMat() {
+    if (!this._backMatC) {
+      this._backMatC = new THREE.MeshStandardMaterial({ map: this._backTex(), roughness: 0.5 });
+    }
+    return this._backMatC;
+  }
+
   _tileMesh(a, b, faceUp = true) {
-    const face = new THREE.MeshStandardMaterial({ map: this._faceTex(a, b), roughness: 0.3 });
-    const back = new THREE.MeshStandardMaterial({ map: this._backTex(), roughness: 0.5 });
+    // Pooled: never disposed per-mesh (see _disposeTileMesh) — disposing a shared
+    // material would blank out every tile using it, exactly like _geo.
+    const face = this._faceMat(a, b);
+    const back = this._backMat();
     const side = this._sideMat();
     const mats = [side, side, faceUp ? face : back, faceUp ? back : face, side, side];
     const m = new THREE.Mesh(this._geo, mats);
     m.castShadow = true;
     m.receiveShadow = true;
     return m;
+  }
+
+  // ── F3.1 (extended): pooled hit areas ──
+  // A shared, invisible click target: one unit-ish BoxGeometry scaled per use, one
+  // shared fully-transparent material. Only ever add()ed to a group and cleared via
+  // _disposeTileMesh, which leaves both shared resources alone.
+  _hitGeometry() {
+    if (!this._hitBoxGeo) {
+      this._hitBoxGeo = new THREE.BoxGeometry(TILE_W * 3.6, 3.0, TILE_L * 3.2);
+    }
+    return this._hitBoxGeo;
+  }
+
+  _hitMaterial() {
+    if (!this._hitMatC) {
+      this._hitMatC = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
+    }
+    return this._hitMatC;
+  }
+
+  /** A pooled hit-area mesh. `sx/sy/sz` scale the shared geometry (default = full). */
+  _hitMesh(sx = 1, sy = 1, sz = 1) {
+    const m = new THREE.Mesh(this._hitGeometry(), this._hitMaterial());
+    if (sx !== 1 || sy !== 1 || sz !== 1) m.scale.set(sx, sy, sz);
+    return m;
+  }
+
+  // Release the resources owned by a single mesh (tile, marker, hit area).
+  // IMPORTANT: everything shared must be left alone —
+  //   • the tile geometry (_geo),
+  //   • the shared hit-area geometry/material (_hitBoxGeo / _hitMatC),
+  //   • the side material (_sideMatC),
+  //   • the pooled face/back materials (_matCache / _backMatC),
+  //   • the cached textures (_texCache).
+  // Disposing any of them would break every OTHER tile in the scene, which is
+  // exactly the F0.2 bug this helper was written to fix. Only per-mesh geometry
+  // that is NOT one of the shared resources is genuinely ours to release.
+  _disposeTileMesh(mesh) {
+    if (!mesh) return;
+    const geo = mesh.geometry;
+    if (geo && geo !== this._geo && geo !== this._hitBoxGeo) geo.dispose?.();
+    mesh.material = null;
+    mesh.geometry = null;
   }
 
   // ── layout: moves → positions ──
@@ -319,61 +410,78 @@ export class Board3D {
     }
   }
 
-  _layout(moves, isAllFives = false) {
-    const spots = [];   // {x, z, rotY, dbl}
-    let curL = null, curR = null, curU = null, curD = null, spinner = null;
+  // Fresh fold cursor. _layout advances a cursor across moves, so resetting it
+  // and replaying from move 0 must reproduce the exact same spots (prefix
+  // stability), which is what lets sync() append tiles instead of rebuilding.
+  _newLayoutState(isAllFives = false) {
+    return { spots: [], curL: null, curR: null, curU: null, curD: null, spinner: null, isAllFives };
+  }
 
-    for (const mv of moves) {
-      const dbl = mv.t.a === mv.t.b;
-      if (mv.e === null) {
-        let spot;
-        if (dbl) {
-          spot = { x: 0, z: 0, rotY: 0, dbl };
-          curL = { pos: { x: -TILE_W / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', prevDx: -1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
-          curR = { pos: { x: TILE_W / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', prevDx: 1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
-          if (isAllFives) {
-            spinner = { x: 0, z: 0, extZ: TILE_L / 2 };
-            curU = { pos: { x: 0, z: -TILE_L / 2 }, dir: { dx: 0, dz: -1 }, side: 'U', isArm: true, prevDx: -1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
-            curD = { pos: { x: 0, z: TILE_L / 2 }, dir: { dx: 0, dz: 1 }, side: 'D', isArm: true, prevDx: 1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
-          }
-        } else {
-          const rotY = Math.PI / 2 + (mv.f ? Math.PI : 0);
-          spot = { x: 0, z: 0, rotY, dbl };
-          curL = { pos: { x: -TILE_L / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', prevDx: -1, lastCenter: { x: 0, z: 0 }, lastDbl: false };
-          curR = { pos: { x: TILE_L / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', prevDx: 1, lastCenter: { x: 0, z: 0 }, lastDbl: false };
+  // Fold ONE move into the cursor and return its spot (or null if it can't attach).
+  _layoutStep(st, mv) {
+    const { isAllFives } = st;
+    const dbl = mv.t.a === mv.t.b;
+    if (mv.e === null) {
+      let spot;
+      if (dbl) {
+        spot = { x: 0, z: 0, rotY: 0, dbl };
+        st.curL = { pos: { x: -TILE_W / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', prevDx: -1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
+        st.curR = { pos: { x: TILE_W / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', prevDx: 1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
+        if (isAllFives) {
+          st.spinner = { x: 0, z: 0, extZ: TILE_L / 2 };
+          st.curU = { pos: { x: 0, z: -TILE_L / 2 }, dir: { dx: 0, dz: -1 }, side: 'U', isArm: true, prevDx: -1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
+          st.curD = { pos: { x: 0, z: TILE_L / 2 }, dir: { dx: 0, dz: 1 }, side: 'D', isArm: true, prevDx: 1, lastCenter: { x: 0, z: 0 }, lastDbl: true };
         }
-        spots.push(spot);
-        continue;
+      } else {
+        const rotY = Math.PI / 2 + (mv.f ? Math.PI : 0);
+        spot = { x: 0, z: 0, rotY, dbl };
+        st.curL = { pos: { x: -TILE_L / 2, z: 0 }, dir: { dx: -1, dz: 0 }, side: 'L', prevDx: -1, lastCenter: { x: 0, z: 0 }, lastDbl: false };
+        st.curR = { pos: { x: TILE_L / 2, z: 0 }, dir: { dx: 1, dz: 0 }, side: 'R', prevDx: 1, lastCenter: { x: 0, z: 0 }, lastDbl: false };
       }
-
-      const cur = mv.e === 'L' ? curL : mv.e === 'R' ? curR : mv.e === 'U' ? curU : curD;
-      if (!cur) continue;
-      const { spot, nextCur } = this._calcNextSpot(cur, dbl, isAllFives);
-      Object.assign(cur, nextCur);
-      spot.rotY += mv.f ? Math.PI : 0;
-      spots.push(spot);
-
-      if (dbl && !spinner && isAllFives) {
-        const extZ = Math.abs(Math.sin(spot.rotY)) > 0.5 ? TILE_W / 2 : TILE_L / 2;
-        spinner = { x: spot.x, z: spot.z, extZ };
-        curU = { pos: { x: spot.x, z: spot.z - extZ }, dir: { dx: 0, dz: -1 }, side: 'U', isArm: true, prevDx: -1, lastCenter: { x: spot.x, z: spot.z }, lastDbl: true };
-        curD = { pos: { x: spot.x, z: spot.z + extZ }, dir: { dx: 0, dz: 1 }, side: 'D', isArm: true, prevDx: 1, lastCenter: { x: spot.x, z: spot.z }, lastDbl: true };
-      }
+      return spot;
     }
 
-    // next-placement spots for markers (assume non-double orientation)
+    const cur = mv.e === 'L' ? st.curL : mv.e === 'R' ? st.curR : mv.e === 'U' ? st.curU : st.curD;
+    if (!cur) return null;
+    const { spot, nextCur } = this._calcNextSpot(cur, dbl, isAllFives);
+    Object.assign(cur, nextCur);
+    spot.rotY += mv.f ? Math.PI : 0;
+
+    if (dbl && !st.spinner && isAllFives) {
+      const extZ = Math.abs(Math.sin(spot.rotY)) > 0.5 ? TILE_W / 2 : TILE_L / 2;
+      st.spinner = { x: spot.x, z: spot.z, extZ };
+      st.curU = { pos: { x: spot.x, z: spot.z - extZ }, dir: { dx: 0, dz: -1 }, side: 'U', isArm: true, prevDx: -1, lastCenter: { x: spot.x, z: spot.z }, lastDbl: true };
+      st.curD = { pos: { x: spot.x, z: spot.z + extZ }, dir: { dx: 0, dz: 1 }, side: 'D', isArm: true, prevDx: 1, lastCenter: { x: spot.x, z: spot.z }, lastDbl: true };
+    }
+    return spot;
+  }
+
+  _endSpotsFor(st) {
+    const { movesLen, curL, curR, curU, curD, isAllFives } = st;
     const endSpots = {};
-    if (moves.length === 0) {
+    if (!movesLen) {
       endSpots.C = { x: 0, z: 0, rotY: Math.PI / 2 };
-    } else {
-      if (curL) endSpots.L = this._peek(curL, isAllFives);
-      if (curR) endSpots.R = this._peek(curR, isAllFives);
-      if (isAllFives) {
-        if (curU) endSpots.U = this._peek(curU, isAllFives);
-        if (curD) endSpots.D = this._peek(curD, isAllFives);
-      }
+      return endSpots;
     }
-    return { spots, endSpots };
+    if (curL) endSpots.L = this._peek(curL, isAllFives);
+    if (curR) endSpots.R = this._peek(curR, isAllFives);
+    if (isAllFives) {
+      if (curU) endSpots.U = this._peek(curU, isAllFives);
+      if (curD) endSpots.D = this._peek(curD, isAllFives);
+    }
+    return endSpots;
+  }
+
+  _layout(moves, isAllFives = false) {
+    const st = this._newLayoutState(isAllFives);
+    for (const mv of moves) {
+      const spot = this._layoutStep(st, mv);
+      // Skip-push semantics match the original loop exactly (a move that cannot
+      // attach to any open end contributes no spot).
+      if (spot) st.spots.push(spot);
+    }
+    st.movesLen = moves.length;
+    return { spots: st.spots, endSpots: this._endSpotsFor(st) };
   }
 
   _peek(cur, isAllFives = false) {
@@ -382,37 +490,178 @@ export class Board3D {
     return spot;
   }
 
+  /**
+   * F3.3: live render statistics for the developer overlay (see the `P` key in
+   * app.js). Everything here comes from three.js's own bookkeeping, so the numbers
+   * are the real ones the GPU sees — not an estimate.
+   *   calls/tris  — draw calls + triangles in the last frame (the two numbers that
+   *                 actually predict frame time)
+   *   geos/texs   — allocations that must NOT grow over a long game; a rising
+   *                 geometries count is the classic leak signature
+   *   chainMeshes — tiles currently on the table (our own count)
+   *   matPool/texPool — size of the F3.1/F0.2 shared caches (bounded by design)
+   */
+  stats() {
+    const info = this.renderer?.info;
+    return {
+      calls: info?.render.calls ?? 0,
+      tris: info?.render.triangles ?? 0,
+      geos: info?.memory.geometries ?? 0,
+      texs: info?.memory.textures ?? 0,
+      programs: info?.programs?.length ?? 0,
+      chainMeshes: this.chainGroup?.children.length ?? 0,
+      boneMeshes: this.boneGroup?.children.length ?? 0,
+      matPool: this._matCache?.size ?? 0,
+      texPool: this._texCache?.size ?? 0,
+      anims: this._anims?.length ?? 0,
+    };
+  }
+
   // ── public sync ──
+  /**
+   * Reconcile the 3D chain with an engine view.
+   *
+   * Append-only fast path: the layout is a pure forward fold, so when the
+   * incoming move list simply extends the one we already rendered, the existing
+   * meshes keep their exact positions and we only build the new tiles. That
+   * turns a per-move O(n) rebuild (O(n²) per game, with full texture/material
+   * churn) into O(1) per move.
+   *
+   * The rebuild path remains for the rare cases where the list shrinks or
+   * changes (new hand, reconnect, variant switch) — those still cost O(n).
+   */
   sync(view) {
     const moves = view.moves || [];
+    const isAllFives = view.variant === 'allfives';
+
+    // Nothing changed: only the boneyard may have moved.
     if (moves.length === this._movesRendered) {
       this._syncBoneyard(view.boneyardCount);
       return;
     }
-    const isNew = moves.length === this._movesRendered + 1 && this._movesRendered > 0;
-    this._movesRendered = moves.length;
+
+    // Can we append? Requires: same variant, same count as before, a live
+    // layout cursor, and the prev moves still being a prefix of the new list.
+    const sameVariant = isAllFives === this._layoutIsAllFives;
+    const canAppend =
+      this._movesRendered > 0 &&
+      moves.length > this._movesRendered &&
+      sameVariant &&
+      !!this._layoutState &&
+      this._prefixMatches(moves, this._movesRendered);
+
     this.clearMarkers();
-    this.chainGroup.clear();
 
-    const isAllFives = view.variant === 'allfives';
-    const { spots, endSpots } = this._layout(moves, isAllFives);
-    this._endSpots = endSpots;
+    if (canAppend) {
+      this._appendMoves(moves, isAllFives, view);
+      return;
+    }
 
-    moves.forEach((mv, i) => {
-      const s = spots[i];
+    this._rebuildMoves(moves, isAllFives, view);
+  }
+
+  /**
+   * Force a full rebuild on the next sync() — used after the tab was hidden /
+   * the device slept, where we cannot trust the incremental cursor anymore
+   * (requestAnimationFrame stalls, geometry may be stale in the GL context).
+   * Cheap: the next sync() simply takes the O(n) rebuild path once.
+   */
+  invalidate() {
+    this._movesRendered = -1;   // -1 (not 0) so a legitimately-empty table still rebuilds
+    this._lastMoves = null;
+    this._layoutState = null;
+  }
+
+  /** True when the first `n` moves are identical to what we rendered last time. */
+  _prefixMatches(moves, n) {
+    const prev = this._lastMoves;
+    if (!prev || prev.length < n) return false;
+    for (let i = 0; i < n; i++) {
+      const a = prev[i], b = moves[i];
+      if (a.t.id !== b.t.id || a.e !== b.e || a.f !== b.f) return false;
+    }
+    return true;
+  }
+
+  /** Fold only the newly-added moves onto the existing cursor + chain. */
+  _appendMoves(moves, isAllFives, view) {
+    const st = this._layoutState;
+    const startIdx = this._movesRendered;
+    const addedSpots = [];
+
+    for (let i = startIdx; i < moves.length; i++) {
+      const mv = moves[i];
+      const s = this._layoutStep(st, mv);
+      if (!s) continue;
+      addedSpots.push(s);
       const mesh = this._tileMesh(mv.t.a, mv.t.b);
       mesh.position.set(s.x, 0, s.z);
       mesh.rotation.y = s.rotY;
       this.chainGroup.add(mesh);
-      if (isNew && i === moves.length - 1) {
+      this._chainViews.push(mesh);
+      // Only the very last tile gets the drop-in flourish.
+      if (i === moves.length - 1) {
         mesh.position.y = 7;
         mesh.rotation.x = 0.6;
         this._anims.push({ mesh, t: 0, dur: 0.45, kind: 'drop', baseRotY: s.rotY });
       }
-    });
+    }
+
+    st.movesLen = moves.length;
+    this._movesRendered = moves.length;
+    this._lastMoves = moves;
+    this._layoutIsAllFives = isAllFives;
+    this._endSpots = this._endSpotsFor(st);
 
     this._syncBoneyard(view.boneyardCount);
-    this._fitCamera(spots);
+    const allSpots = st.spots;   // full spot list, prefix + appended
+    this._fitCamera(allSpots.length ? allSpots : addedSpots);
+  }
+
+  /** Full rebuild — used when the chain is not a pure extension of the last one. */
+  _rebuildMoves(moves, isAllFives, view) {
+    // Any in-flight 'drop' animation targets a chain mesh that is about to be
+    // recycled; drop those anims first so the loop cannot write to a detached,
+    // already-disposed mesh. 'draw' anims own their own scene meshes, so they
+    // are left to finish normally.
+    this._anims = this._anims.filter(a => a.kind !== 'drop');
+
+    // Release each tile's own materials before dropping the meshes, otherwise
+    // every rebuild leaks two MeshStandardMaterials. The shared geometry (_geo)
+    // and cached textures are deliberately preserved by _disposeTileMesh.
+    for (const child of this.chainGroup.children) this._disposeTileMesh(child);
+    this.chainGroup.clear();
+    this._chainViews = [];
+
+    const st = this._newLayoutState(isAllFives);
+    const dropLast = moves.length === this._movesRendered + 1 && this._movesRendered > 0;
+
+    for (let i = 0; i < moves.length; i++) {
+      const mv = moves[i];
+      const s = this._layoutStep(st, mv);
+      if (!s) continue;
+      st.spots.push(s);
+      const mesh = this._tileMesh(mv.t.a, mv.t.b);
+      mesh.position.set(s.x, 0, s.z);
+      mesh.rotation.y = s.rotY;
+      this.chainGroup.add(mesh);
+      this._chainViews.push(mesh);
+      if (dropLast && i === moves.length - 1) {
+        mesh.position.y = 7;
+        mesh.rotation.x = 0.6;
+        this._anims.push({ mesh, t: 0, dur: 0.45, kind: 'drop', baseRotY: s.rotY });
+      }
+    }
+
+    st.movesLen = moves.length;
+    this._layoutState = st;
+    this._movesRendered = moves.length;
+    this._lastMoves = moves;
+    this._layoutIsAllFives = isAllFives;
+    this._endSpots = this._endSpotsFor(st);
+
+    this._syncBoneyard(view.boneyardCount);
+    this._fitCamera(st.spots);
   }
 
   setCanDraw(canDraw) {
@@ -429,6 +678,9 @@ export class Board3D {
   _syncBoneyard(count = 0) {
     if (count === this._boneCount && this.boneGroup.children.length > 0) return;
     this._boneCount = count;
+    // Boneyard tiles and their hit-area boxes each own materials (and the hit
+    // boxes own a BoxGeometry), so release them before clearing the group.
+    for (const child of this.boneGroup.children) this._disposeTileMesh(child);
     this.boneGroup.clear();
     const cols = 7;
     for (let i = 0; i < count; i++) {
@@ -446,11 +698,8 @@ export class Board3D {
       m.receiveShadow = true;
       this.boneGroup.add(m);
 
-      // Hit area mesh for forgiving touch/mouse clicks
-      const hit = new THREE.Mesh(
-        new THREE.BoxGeometry(TILE_W * 1.3, 1.8, TILE_L * 1.3),
-        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
-      );
+      // Hit area mesh for forgiving touch/mouse clicks (pooled geo + material)
+      const hit = this._hitMesh(TILE_W * 1.3 / (TILE_W * 3.6), 1.8 / 3.0, TILE_L * 1.3 / (TILE_L * 3.2));
       hit.position.set(x, 0.6, z);
       hit.rotation.y = jitterRot;
       hit.userData = { isBoneyard: true, index: i, targetMesh: m };
@@ -541,11 +790,8 @@ export class Board3D {
       g.userData.end = e;
       this.markerGroup.add(g);
 
-      // Hit area mesh (generous hit box for forgiving touch/mouse clicks)
-      const hitArea = new THREE.Mesh(
-        new THREE.BoxGeometry(TILE_W * 3.6, 3.0, TILE_L * 3.2),
-        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
-      );
+      // Hit area mesh (generous hit box for forgiving touch/mouse clicks; pooled)
+      const hitArea = this._hitMesh(1, 1, 1);
       hitArea.position.set(s.x, 0.5, s.z);
       hitArea.rotation.y = s.rotY;
       hitArea.userData.end = e;
@@ -591,7 +837,11 @@ export class Board3D {
     return mat;
   }
 
-  clearMarkers() { this.markerGroup.clear(); }
+  clearMarkers() {
+    // Marker meshes own their own materials; release them before clearing.
+    for (const child of this.markerGroup.children) this._disposeTileMesh(child);
+    this.markerGroup.clear();
+  }
 
   /** Which playable end (if any) sits under this client point — used by drag & drop. */
   endFromPoint(clientX, clientY) {
@@ -706,8 +956,19 @@ export class Board3D {
   }
 
   // ── loop ──
+  pauseLoop() {
+    if (this._raf) cancelAnimationFrame(this._raf);
+    this._raf = 0;
+  }
+
+  resumeLoop() {
+    if (this._raf) return;
+    this.clock = performance.now();
+    this._raf = requestAnimationFrame(() => { this._raf = 0; this._loop(); });
+  }
+
   _loop() {
-    requestAnimationFrame(() => this._loop());
+    this._raf = requestAnimationFrame(() => { this._raf = 0; this._loop(); });
     const dt = Math.min(this.clock ? (performance.now() - this.clock) / 1000 : 0.016, 0.05);
     this.clock = performance.now();
 
@@ -741,7 +1002,8 @@ export class Board3D {
         const { isMe, mesh, startPos, midPos, endPos, startRotY, dur1, dur2, dur3, totalDur } = a;
         if (a.t >= totalDur) {
           this.scene.remove(mesh);
-          mesh.geometry?.dispose?.();
+          // Release this tile's own materials; the shared _geo is left intact.
+          this._disposeTileMesh(mesh);
           return false;
         }
 
@@ -810,5 +1072,36 @@ export class Board3D {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+  }
+
+  /**
+   * Tear the whole board down. This is the ONLY place that may dispose the shared
+   * resources (F3.1 pooled materials, F3.2 shared geometry, cached textures) —
+   * doing it anywhere else blanks the tiles that still use them.
+   */
+  dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
+    this.clearMarkers();
+    for (const child of this.chainGroup.children) this._disposeTileMesh(child);
+    for (const child of this.boneGroup.children) this._disposeTileMesh(child);
+    this.chainGroup.clear();
+    this.boneGroup.clear();
+    for (const mat of this._matCache.values()) mat.dispose?.();
+    this._matCache.clear();
+    this._backMatC?.dispose?.();
+    this._backMatC = null;
+    this._sideMatC?.dispose?.();
+    this._sideMatC = null;
+    for (const mat of this._scoreMats.values()) mat.dispose?.();
+    this._scoreMats.clear();
+    for (const tex of this._texCache.values()) tex.dispose?.();
+    this._texCache.clear();
+    this._geo?.dispose?.();
+    this._hitBoxGeo?.dispose?.();
+    this._hitBoxGeo = null;
+    this._hitMatC?.dispose?.();
+    this._hitMatC = null;
+    this.renderer?.dispose?.();
   }
 }

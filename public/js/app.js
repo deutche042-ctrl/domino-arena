@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=19';
+import { Board3D } from './board3d.js?v=20';
 import { Home3D } from './home3d.js?v=2';
 import { tileImage } from './tiles.js?v=11';
 import { sfx } from './sfx.js?v=15';
@@ -49,6 +49,15 @@ let lastTimerKey = null, lastTickSec = null;
 let clockOffset = 0; // server clock minus client clock, captured per state
 let autoPlayTimer = null;
 let spectating = false; // true when riding along without a seat
+
+// ── F3.3 performance overlay (toggle with the P key) ──
+// Deliberately dependency-free: it reads three.js's own renderer.info plus a few
+// counters we maintain here, so it costs ~nothing when hidden and tells the truth
+// when shown. Used to validate the F0.4/F3.1/F3.2 optimisations on real devices.
+let perfOn = false, perfRaf = 0, perfTimer = null;
+let perfFrames = 0, perfFrameStart = 0, perfMsgs = 0;
+let perfLastSyncMs = 0, perfSyncCount = 0;
+let perfPeakGeos = 0, perfPeakTexs = 0, perfMinFps = Infinity, perfMaxSyncMs = 0;
 
 // ══════════ screens ══════════
 function showScreen(name) {
@@ -300,13 +309,38 @@ function renderLobby(st) {
   const allReady = others.length > 0 && others.every(p => p.ready);
   $('btnStart').disabled = !(st.players && st.players.length >= 2 && allReady);
 
+  // F2.1: mirror the server's config back into the controls so non-hosts SEE the
+  // house rules the host picked, and a late-joining host sees the current state.
   if (st.config) {
     if (st.config.variant) $('selVariant').value = st.config.variant;
     if (st.config.targetScore) $('selTarget').value = st.config.targetScore;
     if (st.config.maxPlayers) $('selMax').value = st.config.maxPlayers;
-    if (st.config.turnMs) $('selTurnMs').value = String(st.config.turnMs);
+    // turnMs 0 is a real choice ("no timer") — must not be swallowed by a truthy check.
+    $('selTurnMs').value = String(st.config.turnMs ?? 30000);
+    const hs = $('selHandSize');
+    if (hs) hs.value = st.config.handSize == null ? '' : String(st.config.handSize);
+    const ap = $('chkAllowPass');
+    if (ap) ap.checked = st.config.allowPass !== false;
+    const k2 = $('chkKeepLastTwo');
+    if (k2) k2.checked = !!st.config.keepLastTwo;
     $('variantDesc').textContent = VARIANT_DESC[st.config.variant] || '';
+    renderRulesSummary(st.config);
   }
+}
+
+// A compact human-readable echo of the active house rules — visible to everyone
+// in the lobby, so nobody is surprised by a rule they didn't notice.
+function renderRulesSummary(cfg) {
+  const el = $('rulesSummary');
+  if (!el) return;
+  const bits = [];
+  if (cfg.handSize) bits.push(`${cfg.handSize} كروت`);
+  if (cfg.turnMs === 0) bits.push('بدون مؤقّت');
+  else if (cfg.turnMs) bits.push(`${Math.round(cfg.turnMs / 1000)} ثانية/دور`);
+  if (cfg.allowPass === false) bits.push('بدون باص');
+  if (cfg.keepLastTwo) bits.push('آخر كرتين محجوبين');
+  el.textContent = bits.length ? '⚙ ' + bits.join(' · ') : '';
+  el.classList.toggle('hidden', bits.length === 0);
 }
 
 function initLobby() {
@@ -352,13 +386,20 @@ function initLobby() {
   $('btnLeave').onclick = leaveRoom;
   $('btnLobbyMic').onclick = () => toggleMic();
   bindPttHold($('btnLobbyMic'));
-  for (const id of ['selVariant', 'selTarget', 'selMax', 'selTurnMs']) {
-    $(id).onchange = () => emit('lobby:config', {
-      variant: $('selVariant').value,
-      targetScore: +$('selTarget').value,
-      maxPlayers: +$('selMax').value,
-      turnMs: +$('selTurnMs').value,
-    });
+  // F2.1: push the whole rule set on every change. The server's allowlist
+  // (sanitizeConfig) is the authority — we just send what the host picked.
+  const pushConfig = () => emit('lobby:config', {
+    variant: $('selVariant').value,
+    targetScore: +$('selTarget').value,
+    maxPlayers: +$('selMax').value,
+    turnMs: +$('selTurnMs').value,
+    handSize: $('selHandSize').value === '' ? null : +$('selHandSize').value,
+    allowPass: $('chkAllowPass').checked,
+    keepLastTwo: $('chkKeepLastTwo').checked,
+  });
+  for (const id of ['selVariant', 'selTarget', 'selMax', 'selTurnMs', 'selHandSize', 'chkAllowPass', 'chkKeepLastTwo']) {
+    const el = $(id);
+    if (el) el.onchange = pushConfig;
   }
 }
 function lobbyError(msg) { $('lobbyError').textContent = msg || ''; }
@@ -403,6 +444,7 @@ function closeLeaveConfirm() { $('modalLeave').classList.add('hidden'); }
 // ══════════ game rendering ══════════
 function renderGame() {
   if (!view) return;
+  const t0 = perfOn ? performance.now() : 0;
   $('screen-game').classList.toggle('spectating', spectating);
   board?.sync(view);
   board?.setCanDraw(!spectating && view.turn === myId && view.status === 'playing' && view.canDraw);
@@ -421,6 +463,7 @@ function renderGame() {
   playActionSounds();
   if (!spectating) maybeAutoPlay();
   prevHand = [...(view.hand || [])];
+  if (perfOn) { perfLastSyncMs = performance.now() - t0; perfSyncCount++; }
 }
 
 function renderOpponents() {
@@ -594,6 +637,81 @@ function setBanner(text, cls) {
   $('turnBanner').className = cls || '';
 }
 
+// ══════════ F3.3 performance overlay ══════════
+function togglePerf(force) {
+  perfOn = force === undefined ? !perfOn : !!force;
+  const box = $('perfOverlay');
+  if (!box) return;
+  box.classList.toggle('hidden', !perfOn);
+  if (perfOn) {
+    if (!localStorage.getItem('domino_perf_seen')) {
+      localStorage.setItem('domino_perf_seen', '1');
+      floatText('📊 لوحة الأداء — اضغط P تاني للقفل');
+    }
+    perfFrames = 0; perfFrameStart = performance.now(); perfMsgs = 0;
+    perfSyncCount = 0; perfPeakGeos = 0; perfPeakTexs = 0;
+    perfMinFps = Infinity; perfMaxSyncMs = 0;
+    perfTickLoop();
+    clearInterval(perfTimer);
+    perfTimer = setInterval(updatePerfText, 500);
+  } else {
+    cancelAnimationFrame(perfRaf);
+    clearInterval(perfTimer);
+    perfRaf = 0; perfTimer = null;
+  }
+}
+
+// Count frames via rAF so the FPS figure is what the display is actually doing.
+function perfTickLoop() {
+  const loop = () => {
+    if (!perfOn) return;
+    perfFrames++;
+    const now = performance.now();
+    if (now - perfFrameStart >= 1000) {
+      const fps = Math.round((perfFrames * 1000) / (now - perfFrameStart));
+      if (fps < perfMinFps) perfMinFps = fps;
+      perfLastFps = fps;
+      perfFrames = 0; perfFrameStart = now;
+    }
+    perfRaf = requestAnimationFrame(loop);
+  };
+  perfRaf = requestAnimationFrame(loop);
+}
+let perfLastFps = 0;
+
+function updatePerfText() {
+  if (!perfOn) return;
+  const box = $('perfOverlay');
+  if (!box) return;
+  const s = board?.stats?.() || {};
+  if (s.geos > perfPeakGeos) perfPeakGeos = s.geos;
+  if (s.texs > perfPeakTexs) perfPeakTexs = s.texs;
+  if (perfLastSyncMs > perfMaxSyncMs) perfMaxSyncMs = perfLastSyncMs;
+  const mem = performance.memory
+    ? Math.round(performance.memory.usedJSHeapSize / 1048576) + 'MB'
+    : '—';
+  const rows = [
+    ['FPS', `${perfLastFps} <span class="perf-dim">min ${perfMinFps === Infinity ? '—' : perfMinFps}</span>`],
+    ['draw calls', String(s.calls ?? 0)],
+    ['triangles', (s.tris ?? 0).toLocaleString('en-US')],
+    ['geometries', `${s.geos ?? 0} <span class="perf-dim">peak ${perfPeakGeos}</span>`],
+    ['textures', `${s.texs ?? 0} <span class="perf-dim">peak ${perfPeakTexs}</span>`],
+    ['programs', String(s.programs ?? 0)],
+    ['chain tiles', String(s.chainMeshes ?? 0)],
+    ['anims', String(s.anims ?? 0)],
+    ['mat pool', String(s.matPool ?? 0)],
+    ['sync ms', `${perfLastSyncMs.toFixed(1)} <span class="perf-dim">max ${perfMaxSyncMs.toFixed(1)}</span>`],
+    ['syncs/s', String(perfSyncCount)],
+    ['msgs/s', String(perfMsgs)],
+    ['moves', String(view?.moves?.length ?? 0)],
+    ['heap', mem],
+  ];
+  box.innerHTML = '<div class="perf-title">📊 أداء</div>'
+    + rows.map(([k, v]) => `<div class="perf-row"><span>${k}</span><b>${v}</b></div>`).join('');
+  perfSyncCount = 0;
+  perfMsgs = 0;
+}
+
 // ── "your turn" attention: flashing tab title + vibration + optional notification ──
 const BASE_TITLE = document.title;
 let turnAlertOn = false;
@@ -720,7 +838,8 @@ function renderTurnBanner() {
 function updateTurnTimer() {
   const wrap = $('turnTimer');
   if (!wrap) return;
-  if (!view || view.status !== 'playing' || !view.turnEndsAt) {
+  // F2.1: turnMs 0 = the host chose "no turn timer" → the countdown never shows.
+  if (!view || view.status !== 'playing' || !view.turnEndsAt || view.turnMs === 0) {
     wrap.classList.add('hidden');
     lastTimerKey = null;
     return;
@@ -832,17 +951,29 @@ function renderModals() {
       row.innerHTML = `<span>${['🥇', '🥈', '🥉', '4.'][i]} ${esc(view.names[pid] || 'لاعب')}</span><span>${view.scores[pid]} نقطة</span>`;
       st.appendChild(row);
     });
-    const rmVotes = view.rematchVotes;
+    // F2.2: the vote is per-player and tracked by name, not just a counter, and
+    // a NON-host can now start the match outright if every other human voted.
+    const rmVotes = view.rematchVotes || [];              // names, from rookm.rematchVotes
+    const humans = view.humanCount || 1;
+    const iVoted = (view.rematchVoters || []).includes(myId);
     const rmBtn = $('btnRematch');
     rmBtn.classList.toggle('hidden', !isHost);
-    if (isHost && rmVotes?.count) rmBtn.textContent = `مباراة جديدة (${rmVotes.count}/${rmVotes.humans} يطلبوا)`;
-    else rmBtn.textContent = 'مباراة جديدة';
+    rmBtn.textContent = rmVotes.length
+      ? `مباراة جديدة (${rmVotes.length}/${humans} وافقوا)`
+      : 'مباراة جديدة';
     const rmVoteBtn = $('btnRematchVote');
     rmVoteBtn.classList.toggle('hidden', isHost);
     if (!isHost) {
-      const already = rmVotes?.count ? ' ✓ تم الإرسال' : '';
-      rmVoteBtn.textContent = `أطلب مباراة جديدة${rmVotes?.count ? ` (${rmVotes.count}/${rmVotes.humans})` : ''}${already}`;
-      rmVoteBtn.disabled = !!rmVotes?.count;
+      rmVoteBtn.textContent = iVoted ? '✓ طلبت مباراة جديدة' : 'أطلب مباراة جديدة';
+      rmVoteBtn.disabled = iVoted;
+    }
+    // Show WHICH players are in, so the table can see who is holding things up.
+    const voteNote = $('matchVoteNote');
+    if (voteNote) {
+      voteNote.textContent = rmVotes.length
+        ? `منتظرين: ${rmVotes.join('، ')} (${rmVotes.length}/${humans})`
+        : '';
+      voteNote.classList.toggle('hidden', rmVotes.length === 0);
     }
     $('matchWait').classList.toggle('hidden', isHost);
     matchModal.classList.remove('hidden');
@@ -1104,6 +1235,14 @@ function initGameUI() {
     }
   });
   document.addEventListener('keydown', (e) => {
+    // F3.3: `P` toggles the performance overlay. Ignored while typing in a field
+    // (chat name/input) so it can never eat a real keystroke.
+    const t = e.target;
+    const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (!typing && (e.key === 'p' || e.key === 'P') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      togglePerf();
+      return;
+    }
     if (e.key === 'Escape') {
       if (!$('modalLeave').classList.contains('hidden')) {
         sfx.click();
@@ -1153,6 +1292,11 @@ function initGameUI() {
       renderHomeStats();
       sfx.click();
     };
+  }
+  // PWA: register the offline app-shell worker on secure contexts only
+  if ('serviceWorker' in navigator &&
+      (location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname))) {
+    navigator.serviceWorker.register('sw.js').catch(() => { /* offline shell is best-effort */ });
   }
   $('btnExit').onclick = () => { sfx.click(); openLeaveConfirm(); };
   $('btnLeaveCancel').onclick = () => { sfx.click(); closeLeaveConfirm(); };
@@ -1965,6 +2109,7 @@ function startSocket(base) {
     sfx.ambient(true);
   });
   socket.on('game:state', (st) => {
+    perfMsgs++;                                     // F3.3: messages/sec counter
     clockOffset = st.serverNow ? st.serverNow - Date.now() : 0;
     view = st; isHost = st.hostId === myId; renderGame();
   });
