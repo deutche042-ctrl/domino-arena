@@ -635,6 +635,7 @@ function cycleSort() {
 }
 
 function renderHand() {
+  if (!view) return; // boot/themes can repaint before any game:state arrives
   const hand = $('hand');
   const myTurn = !spectating && view.turn === myId && view.status === 'playing';
   hand.classList.toggle('my-turn', myTurn);

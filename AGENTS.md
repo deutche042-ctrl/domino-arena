@@ -130,7 +130,7 @@ home → lobby → game.
 **Reduced motion (F4.4).** `board3d.js` reads `prefers-reduced-motion: reduce` once at construction and flattens the arc/drop flourishes and the centre pulse; `app.js`'s `prefersReducedMotion()` makes score roll-ups snap. Keep new animation behind that gate.
 
 **Cache-busting convention:** every client asset is imported with a `?v=N` query
-(`js/app.js?v=47`, `./board3d.js?v=22`, `./domboard.js?v=1`, `./tiles.js?v=13`, `./voice.js?v=5`, `css/style.css?v=44`). When you edit a client
+(`js/app.js?v=48`, `./board3d.js?v=22`, `./domboard.js?v=1`, `./tiles.js?v=13`, `./voice.js?v=5`, `css/style.css?v=44`). When you edit a client
 module, bump its tag in `index.html` and in every importer's `import` line — otherwise browsers keep
 running the stale module and your change appears to do nothing.
 
