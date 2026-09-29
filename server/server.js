@@ -44,6 +44,15 @@ app.get('/host-info', (req, res) => {
   res.json({ port: Number(PORT), ips, rooms, players });
 });
 
+// Voice ICE config: lets a self-hosted TURN (coturn) be injected via env vars
+// without touching the client — TURN_URLS is comma-separated. With nothing set
+// the client keeps its built-in defaults (Google STUN + OpenRelay TURN).
+app.get('/voice-config', (req, res) => {
+  const urls = (process.env.TURN_URLS || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!urls.length) return res.json({ iceServers: null });
+  res.json({ iceServers: [{ urls, username: process.env.TURN_USER || '', credential: process.env.TURN_PASS || '' }] });
+});
+
 const http = createServer(app);
 const io = new Server(http, {
   // long-polling fallback keeps the game working through any tunnel/proxy;
@@ -663,10 +672,13 @@ io.on('connection', (socket) => {
   // ---- voice ----
 
   socket.on('voice:join', (_, cb) => {
-    const { room, playerId } = currentCtx(socket);
+    const ctx = currentCtx(socket);
+    const { room, playerId } = ctx;
     if (!room) return cb?.({ ok: false, error: 'لازم تكون جوه غرفة عشان تفتح المايك.' });
+    if (ctx.spectating) return cb?.({ ok: false, error: 'المتفرج مش بيفتح مايك — اقعد في الغرفة الأول.' });
     const p = room.players.find(p => p.id === playerId);
-    if (!p || p.isBot) return cb?.({ ok: false });
+    if (!p) return cb?.({ ok: false, error: 'مش لاقي لاعبك في الغرفة — جرّب تدخل من جديد.' });
+    if (p.isBot) return cb?.({ ok: false, error: 'البوتات ملهاش مايك.' });
     p.voice = true;
     p.voiceMuted = false;
     // p.hostMuted is intentionally NOT cleared here: a host-muted player who

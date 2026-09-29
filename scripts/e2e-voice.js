@@ -85,10 +85,15 @@ const cr = await emit(a, 'room:create', { name: 'Alice' });
 if (!cr?.ok) { console.error('FATAL: room:create failed:', cr); a.close(); process.exit(1); }
 ok((await pFirstA)?.length === 0, 'unicast voice:state right after room:create (empty roster)');
 
-// voice:join outside any room is refused (bots are refused server-side too,
-// but they have no socket — covered indirectly by the S11 roster check)
+// voice:join outside any room is refused, with an actionable Arabic error
+// (bots are refused server-side too, but they have no socket — covered
+// indirectly by the S11 roster check)
 const loner = await client();
-ok((await emit(loner, 'voice:join', {})).ok === false, 'voice:join outside a room is rejected');
+{
+  const lr = await emit(loner, 'voice:join', {});
+  ok(lr?.ok === false && typeof lr.error === 'string' && /[\u0600-\u06FF]/.test(lr.error),
+    'voice:join outside a room is rejected with an Arabic error');
+}
 loner.close();
 
 // Alice opens her mic BEFORE Bob joins, so his fresh-join unicast has content
@@ -296,6 +301,20 @@ ok(crC?.ok, 'cara joined the room');
   ok(rosterEntry(rC2, crC.playerId)?.hostMuted === false &&
      (botId == null || everyRosterOnA.every(r => rosterEntry(r, botId) === null)),
     "S11: mute-all clear lifted cara's host mute; bot still never on a roster");
+}
+
+// S12 — spectators can't open a mic (explicit Arabic rejection, not a silent no)
+{
+  const h = await client();
+  const hr = await emit(h, 'room:create', { name: 'Hana', vsBots: true });
+  ok(hr?.ok === true, 'S12: full bot room created for the spectator check');
+  const sp = await client();
+  const spj = await emit(sp, 'room:join', { code: hr.code, name: 'Sam' });
+  ok(spj?.ok === true && spj.spectating === true, 'S12: fifth joiner rides along as a spectator');
+  const vj = await emit(sp, 'voice:join', {});
+  ok(vj?.ok === false && typeof vj.error === 'string' && /[\u0600-\u06FF]/.test(vj.error),
+    'S12: spectator voice:join rejected with an Arabic error');
+  sp.close(); h.close();
 }
 
 a.close(); c.close();
