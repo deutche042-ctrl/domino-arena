@@ -1,8 +1,8 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=16';
+import { Board3D } from './board3d.js?v=17';
 import { Home3D } from './home3d.js?v=2';
 import { tileImage } from './tiles.js?v=11';
-import { sfx } from './sfx.js?v=14';
+import { sfx } from './sfx.js?v=15';
 import { VoiceChat, setIceConfig } from './voice.js?v=3';
 
 const $ = id => document.getElementById(id);
@@ -47,6 +47,7 @@ const CHAT_EMOJI_GROUPS = [
 const CHAT_COLORS = ['247,179,43', '46,230,168', '122,165,255', '255,122,149'];
 let lastTimerKey = null, lastTickSec = null;
 let clockOffset = 0; // server clock minus client clock, captured per state
+let autoPlayTimer = null;
 
 // ══════════ screens ══════════
 function showScreen(name) {
@@ -258,13 +259,37 @@ function initLobby() {
   $('btnCopyCode').onclick = () => copyText(roomCode, 'تم نسخ الكود!');
   $('btnCopyLink').onclick = () => copyText(location.origin + '?room=' + roomCode, 'تم نسخ رابط الدعوة!');
   $('btnReady').onclick = () => {
+    askNotifyPermission();
     const cur = $('btnReady').textContent === 'لست جاهزاً';
     socket.emit('lobby:ready', { ready: !cur });
     sfx.click();
   };
-  $('btnStart').onclick = () => emit('game:start').then(res => {
-    if (res && !res.ok) lobbyError(res.error);
-  });
+  $('btnStart').onclick = () => {
+    askNotifyPermission();
+    emit('game:start').then(res => {
+      if (res && !res.ok) lobbyError(res.error);
+    });
+  };
+  const chkAuto = $('chkAutoplay');
+  if (chkAuto) {
+    chkAuto.checked = localStorage.getItem('domino_autoplay') === '1';
+    chkAuto.onchange = () => {
+      localStorage.setItem('domino_autoplay', chkAuto.checked ? '1' : '0');
+      sfx.click();
+    };
+  }
+  $('btnQr').onclick = () => {
+    const pop = $('qrPop');
+    if (!pop) return;
+    if (!pop.classList.contains('hidden')) {
+      pop.classList.add('hidden');
+      sfx.click();
+      return;
+    }
+    renderQr(location.origin + '?room=' + (roomCode || ''), $('qrCanvas'));
+    pop.classList.remove('hidden');
+    sfx.click();
+  };
   $('btnLeave').onclick = leaveRoom;
   $('btnLobbyMic').onclick = () => toggleMic();
   for (const id of ['selVariant', 'selTarget', 'selMax']) {
@@ -292,6 +317,8 @@ function leaveRoom() {
   lastLobbyState = null;
   view = null;
   selectedTile = null;
+  clearTimeout(autoPlayTimer);
+  stopTurnAlert();
   board?.clearMarkers();
   closeChat();
   voice?.leave();
@@ -324,12 +351,69 @@ function renderGame() {
   renderScoreCard();
   renderModals();
   playActionSounds();
+  maybeAutoPlay();
   prevHand = [...(view.hand || [])];
 }
 
 function renderOpponents() {
   const wrap = $('opponents');
-  if (wrap) wrap.innerHTML = '';
+  if (!wrap || !view) return;
+  wrap.innerHTML = '';
+  for (const pid of view.players) {
+    if (pid === myId) continue;
+    const name = view.names[pid] || 'لاعب';
+    const isTurn = view.turn === pid && view.status === 'playing';
+    const connected = view.connected?.[pid] !== false;
+    const card = document.createElement('div');
+    card.className = 'opp-card' + (isTurn ? ' turn' : '') + (!connected ? ' off' : '');
+    const avCol = document.createElement('div');
+    avCol.className = 'opp-avatar-col';
+    const av = document.createElement('div');
+    av.className = 'opp-avatar' + (isTurn ? ' active' : '');
+    av.textContent = view.isBot?.[pid] ? '🤖' : name.trim().charAt(0).toUpperCase();
+    avCol.appendChild(av);
+    if (isTurn) {
+      const ring = document.createElement('div');
+      ring.className = 'opp-avatar-ring';
+      avCol.appendChild(ring);
+    }
+    const info = document.createElement('div');
+    info.className = 'opp-info-col';
+    const nm = document.createElement('span');
+    nm.className = 'opp-name';
+    nm.textContent = name;
+    nm.title = name;
+    info.appendChild(nm);
+    const st = document.createElement('span');
+    st.className = 'opp-status';
+    if (!connected) {
+      const off = document.createElement('span');
+      off.className = 'opp-badge offline';
+      off.textContent = 'مقطوع';
+      st.appendChild(off);
+    } else if (isTurn) {
+      const th = document.createElement('span');
+      th.className = 'opp-badge thinking';
+      const dot = document.createElement('span');
+      dot.className = 'pulse-dot';
+      th.appendChild(dot);
+      th.appendChild(document.createTextNode('دوره'));
+      st.appendChild(th);
+    } else {
+      const tiles = document.createElement('span');
+      tiles.className = 'opp-badge tiles';
+      tiles.textContent = '🁢 ';
+      const mini = document.createElement('i');
+      mini.className = 'mini-tile';
+      mini.textContent = '×' + (view.handCounts?.[pid] ?? 0);
+      tiles.appendChild(mini);
+      st.appendChild(tiles);
+    }
+    info.appendChild(st);
+    card.appendChild(avCol);
+    card.appendChild(info);
+    wrap.appendChild(card);
+  }
 }
 
 function renderHand() {
@@ -389,6 +473,100 @@ function renderScoreCard() {
 function setBanner(text, cls) {
   $('turnBannerText').textContent = text;
   $('turnBanner').className = cls || '';
+}
+
+// ── "your turn" attention: flashing tab title + vibration + optional notification ──
+const BASE_TITLE = document.title;
+let turnAlertOn = false;
+function startTurnAlert() {
+  if (turnAlertOn) return;
+  turnAlertOn = true;
+  document.title = '🔔 دورك — دومينو أرينا';
+  try { navigator.vibrate?.([180, 80, 180]); } catch (e) { /* unsupported */ }
+  if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+    try {
+      new Notification('🔔 دورك!', { body: `دورك في غرفة ${roomCode || ''} — افتح اللعبة واتحرك` });
+    } catch (e) { /* some platforms throw without a service worker */ }
+  }
+}
+function stopTurnAlert() {
+  if (!turnAlertOn) return;
+  turnAlertOn = false;
+  document.title = BASE_TITLE;
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) stopTurnAlert(); });
+// The permission prompt needs a user gesture — we piggyback on lobby button
+// clicks instead of surprising people with a popup mid-game.
+function askNotifyPermission() {
+  try {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+  } catch (e) { /* unsupported */ }
+}
+
+// ── optional autoplay: when my hand has exactly one legal move, play it after a beat ──
+function maybeAutoPlay() {
+  clearTimeout(autoPlayTimer);
+  autoPlayTimer = null;
+  try { if (localStorage.getItem('domino_autoplay') !== '1') return; } catch (e) { return; }
+  if (!view || view.status !== 'playing' || view.turn !== myId) return;
+  if (view.leadForcedTile || view.moves.length === 0) return;   // opening stays manual
+  if ((view.legalMoves || []).length !== 1) return;
+  const m = view.legalMoves[0];
+  const captured = view.turn;
+  autoPlayTimer = setTimeout(() => {
+    if (!view || view.status !== 'playing' || view.turn !== captured) return;
+    const cur = (view.legalMoves || [])[0];
+    if (!cur || cur.tileId !== m.tileId || cur.end !== m.end) return;
+    socket.emit('game:play', { tileId: m.tileId, end: m.end });
+    floatText('⚡ لعبناها لك');
+  }, 400);
+}
+
+// ── All Fives preview: replay the public move history client-side and compute
+// the ends total if tileId were played on end. Mirrors engine rules (lead double
+// counts once, doubles score full pips, spinner U/D arms attach at spinner value). ──
+function previewEndsTotal(tileId, end) {
+  if (!view || view.variant !== 'allfives') return null;
+  const byId = new Map();
+  for (const t of (view.hand || [])) byId.set(t.id, t);
+  for (const m of (view.moves || [])) byId.set(m.t.id, m.t);
+  const tileOf = (id) => {
+    if (byId.has(id)) return byId.get(id);
+    const [x, y] = id.split('-').map(Number);
+    return { id, a: Math.min(x, y), b: Math.max(x, y) };
+  };
+  const ends = {};
+  let spinnerId = null;
+  const applyPlay = (id, e) => {
+    const tile = tileOf(id);
+    const dbl = tile.a === tile.b;
+    const pips = tile.a + tile.b;
+    if (!Object.keys(ends).length) {
+      ends.L = { match: tile.a, score: dbl ? pips : tile.a, tileId: id, dbl };
+      ends.R = { match: tile.b, score: dbl ? pips : tile.b, tileId: id, dbl };
+      if (dbl) spinnerId = id;
+      return;
+    }
+    const cur = ends[e];
+    const match = cur ? cur.match : (spinnerId ? tileOf(spinnerId).a : null);
+    if (match == null) return;
+    const outer = tile.a === match ? tile.b : tile.a;
+    ends[e] = { match: outer, score: dbl ? pips : outer, tileId: id, dbl };
+    if (dbl && !spinnerId) spinnerId = id;
+  };
+  for (const m of (view.moves || [])) applyPlay(m.t.id, m.e);
+  if (tileId && end) applyPlay(tileId, end);
+  const seen = new Set();
+  let total = 0;
+  for (const k of ['L', 'R', 'U', 'D']) {
+    const e2 = ends[k];
+    if (!e2) continue;
+    if (e2.dbl) { if (seen.has(e2.tileId)) continue; seen.add(e2.tileId); }
+    total += e2.score;
+  }
+  return total;
 }
 
 function renderTurnBanner() {
@@ -514,7 +692,11 @@ function playActionSounds() {
   }
   else if (la.type === 'handEnd') sfx.handWin();
   else if (la.type === 'matchEnd') sfx.matchWin();
-  if (view.status === 'playing' && view.turn === myId && !wasMyTurn) sfx.yourTurn();
+  if (view.status === 'playing' && view.turn === myId) {
+    if (!wasMyTurn) { sfx.yourTurn(); startTurnAlert(); }
+  } else {
+    stopTurnAlert();
+  }
   prevTurnKey = view.turn;
 }
 let prevTurnKey = null;
@@ -554,7 +736,11 @@ function onTileClick(tile, el) {
   }
   selectedTile = tile.id;
   const uniqueEnds = [...new Set(moves.map(m => m.end))];
-  board.showMarkers(uniqueEnds);
+  const previews = {};
+  if (view.variant === 'allfives') {
+    for (const e of uniqueEnds) previews[e] = previewEndsTotal(tile.id, e);
+  }
+  board.showMarkers(uniqueEnds, view.variant === 'allfives' ? previews : null);
   renderHand();
   if (uniqueEnds.length > 1) {
     setBanner('اختر النقطة الخضراء للطرف الذي تريد اللعب عليه!', 'mine');
@@ -651,6 +837,20 @@ function initGameUI() {
   const btnFs = $('btnFullscreen');
   if (btnFs) {
     btnFs.onclick = toggleFullscreen;
+  }
+  const btnSound = $('btnSound');
+  if (btnSound) {
+    const syncSoundBtn = () => {
+      btnSound.classList.toggle('is-muted', sfx.isMuted());
+      btnSound.title = sfx.isMuted() ? 'تشغيل الصوت' : 'كتم الصوت';
+      btnSound.setAttribute('aria-label', btnSound.title);
+    };
+    btnSound.onclick = () => {
+      sfx.setMuted(!sfx.isMuted());
+      syncSoundBtn();
+      if (!sfx.isMuted()) sfx.click();
+    };
+    syncSoundBtn();
   }
   $('btnExit').onclick = () => { sfx.click(); openLeaveConfirm(); };
   $('btnLeaveCancel').onclick = () => { sfx.click(); closeLeaveConfirm(); };
@@ -1288,6 +1488,28 @@ function stopConfetti() { cancelAnimationFrame(confettiRAF); }
 
 // ══════════ helpers ══════════
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+// render an invite-link QR onto a canvas (global qrcode lib, vendored)
+function renderQr(text, canvas) {
+  if (!canvas || typeof qrcode !== 'function' || !text) return;
+  try {
+    const qr = qrcode(0, 'M');   // typeNumber 0 = auto size
+    qr.addData(text);
+    qr.make();
+    const n = qr.getModuleCount();
+    const cell = Math.max(2, Math.floor(canvas.width / (n + 4)));
+    const side = (n + 4) * cell;
+    canvas.width = canvas.height = side;
+    const g = canvas.getContext('2d');
+    g.fillStyle = '#ffffff';
+    g.fillRect(0, 0, side, side);
+    g.fillStyle = '#0b1120';
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        if (qr.isDark(r, c)) g.fillRect((c + 2) * cell, (r + 2) * cell, cell, cell);
+      }
+    }
+  } catch (e) { /* oversized payload etc. — leave the canvas empty */ }
+}
 function copyText(text, toast) {
   const showToast = () => {
     const el = document.createElement('div');

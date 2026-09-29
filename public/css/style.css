@@ -579,9 +579,16 @@ input:focus, select:focus { border-color: var(--accent); }
 }
 .btn.danger:hover { filter: brightness(1.08); }
 
-/* ── OPPONENTS (REMOVED / HIDDEN) ── */
+/* ── OPPONENTS (live tile counters per opponent seat) ── */
 #opponents {
-  display: none !important;
+  position: absolute;
+  top: 14px;
+  inset-inline-start: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 40;
+  pointer-events: none;
 }
 .opp-card {
   pointer-events: auto;
@@ -782,6 +789,46 @@ input:focus, select:focus { border-color: var(--accent); }
 #btnFullscreen .icon-compress { display: none; }
 #btnFullscreen.is-fullscreen .icon-expand { display: none; }
 #btnFullscreen.is-fullscreen .icon-compress { display: block; }
+
+#btnSound .icon-sound-off { display: none; }
+#btnSound.is-muted .icon-sound-on { display: none; }
+#btnSound.is-muted .icon-sound-off { display: block; }
+#btnSound.is-muted { color: #94a3b8; }
+
+/* ── QR invite popover (lobby) ── */
+.qr-pop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(247, 179, 43, 0.55);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+}
+.qr-pop.hidden { display: none; }
+.qr-pop canvas {
+  border-radius: 8px;
+  image-rendering: pixelated;
+}
+.qr-hint { font-size: 12px; color: #334155; font-weight: 600; margin: 0; }
+
+/* ── autoplay single-move preference (lobby) ── */
+.autoplay-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  margin-top: 10px;
+  user-select: none;
+}
+.autoplay-row input { accent-color: var(--accent-2); width: 16px; height: 16px; cursor: pointer; }
+.autoplay-row:hover { color: var(--text); }
 
 #actionBar { position: absolute; right: 16px; bottom: 150px; display: flex; flex-direction: column; gap: 10px; z-index: 5; }
 
@@ -1330,6 +1377,7 @@ input:focus, select:focus { border-color: var(--accent); }
   .score-card { bottom: 8px; left: 8px; min-width: 106px; max-width: 150px; padding: 6px 8px; gap: 2px; }
   .sc-row { font-size: 11px; }
   #hud { top: 8px; left: 8px; right: 8px; gap: 6px; }
+  #opponents { top: 8px; inset-inline-start: 8px; gap: 6px; }
   .opp-card { min-width: 80px; padding: 5px 8px; }
   .opp-avatar { width: 24px; height: 24px; font-size: 10px; }
   .opp-name { max-width: 55px; font-size: 11px; }
@@ -1740,6 +1788,7 @@ input:focus, select:focus { border-color: var(--accent); }
    carries the real insets; these rules lift the interactive DOM overlays clear. */
 @supports (padding: env(safe-area-inset-top)) {
   #hud { top: max(12px, calc(env(safe-area-inset-top) + 4px)); }
+  #opponents { top: max(14px, calc(env(safe-area-inset-top) + 6px)); }
   #actionBar { bottom: max(150px, calc(env(safe-area-inset-bottom) + 24px)); }
   .exit-fab { bottom: max(16px, calc(env(safe-area-inset-bottom) + 8px)); }
   .home-foot { bottom: max(18px, calc(env(safe-area-inset-bottom) + 8px)); }

@@ -68,6 +68,7 @@ export class Board3D {
     this.scene.add(this.chainGroup, this.markerGroup, this.boneGroup);
 
     this._texCache = new Map();
+    this._scoreMats = new Map();   // "+N" All-Fives preview badge sprites
     this._geo = new RoundedBoxGeometry(TILE_W, TILE_H, TILE_L, 4, 0.09);
     this._anims = [];
     this._movesRendered = 0;
@@ -523,7 +524,9 @@ export class Board3D {
   }
 
   // ── markers ──
-  showMarkers(ends) {
+  // scoreBy: optional map end → predicted ends total (All Fives preview);
+  // when present a "+N" badge floats above each marker.
+  showMarkers(ends, scoreBy = null) {
     this.clearMarkers();
     if (!this._endSpots) return;
     for (const e of ends) {
@@ -553,7 +556,39 @@ export class Board3D {
       halo.position.set(s.x, 1.2, s.z);
       halo.userData.end = e;
       this.markerGroup.add(halo);
+
+      const sc = scoreBy && scoreBy[e];
+      if (sc != null) {
+        const spr = new THREE.Sprite(this._scoreBadgeMat(sc));
+        spr.position.set(s.x, 2.0, s.z);
+        spr.scale.set(1.7, 0.85, 1);
+        this.markerGroup.add(spr);
+      }
     }
+  }
+
+  // canvas-painted "+N" pill shared by SpriteMaterial, cached per value
+  _scoreBadgeMat(n) {
+    const key = 'score' + n;
+    if (this._scoreMats.has(key)) return this._scoreMats.get(key);
+    const c = document.createElement('canvas');
+    c.width = 128; c.height = 64;
+    const g = c.getContext('2d');
+    g.fillStyle = 'rgba(8,12,24,0.92)';
+    g.beginPath();
+    if (g.roundRect) g.roundRect(4, 4, 120, 56, 18); else g.rect(4, 4, 120, 56);
+    g.fill();
+    g.lineWidth = 4;
+    g.strokeStyle = '#2ee6a8';
+    g.stroke();
+    g.fillStyle = '#2ee6a8';
+    g.font = '900 34px system-ui, sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText('+' + n, 64, 35);
+    const mat = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false });
+    this._scoreMats.set(key, mat);
+    return mat;
   }
 
   clearMarkers() { this.markerGroup.clear(); }

@@ -17,6 +17,11 @@ let _noiseBuf = null;
 let ambSrc = null, ambGain = null;
 const _irCache = new Map();
 
+// user mute preference (persisted). Every SFX voice routes through out(), so
+// gating there silences everything except the ambient bed, which gates itself.
+let muted = false;
+try { muted = localStorage.getItem('domino_sfx_muted') === '1'; } catch (e) { /* no storage */ }
+
 function ac() {
   if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
   if (!master) {
@@ -71,6 +76,13 @@ function noise() {
 // per-voice output: gain → optional pan → dry bus (+ optional reverb send)
 function out(pan, rev) {
   const a = ac();
+  if (muted) {
+    // silent dummy sink: oscillators still get scheduled (negligible cost)
+    // but nothing reaches the speakers
+    const g = a.createGain();
+    g.gain.value = 0;
+    return g;
+  }
   const g = a.createGain();
   let tail = g;
   if (a.createStereoPanner && pan) {
@@ -173,6 +185,14 @@ export const sfx = {
     _noiseBuf = null;
     ambSrc = ambGain = null;
     _irCache.clear();
+  },
+
+  isMuted() { return muted; },
+
+  setMuted(m) {
+    muted = !!m;
+    try { localStorage.setItem('domino_sfx_muted', muted ? '1' : '0'); } catch (e) { /* no storage */ }
+    if (muted) this.ambient(false);
   },
 
   click() {
@@ -315,6 +335,7 @@ export const sfx = {
   // match and stops on leaving — gives the table a sense of place
   ambient(on) {
     const a = ac();
+    if (on && muted) return; // gate the bed while muted; stopping always works
     if (on) {
       if (ambSrc) return;
       const len = a.sampleRate * 3;

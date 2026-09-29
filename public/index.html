@@ -6,7 +6,7 @@
 <title>دومينو أرينا | Domino Arena</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=32">
+<link rel="stylesheet" href="css/style.css?v=33">
 <script type="importmap">
 {
   "imports": {
@@ -16,6 +16,7 @@
 }
 </script>
 <script src="vendor/socket.io/4.8.1/socket.io.min.js"></script>
+<script src="vendor/qrcode/qrcode.js?v=1"></script>
 </head>
 <body>
 
@@ -107,6 +108,11 @@
       <div class="code-actions">
         <button id="btnCopyCode" class="btn small">نسخ الكود</button>
         <button id="btnCopyLink" class="btn small">نسخ رابط الدعوة</button>
+        <button id="btnQr" class="btn small">QR 📱</button>
+      </div>
+      <div id="qrPop" class="qr-pop hidden">
+        <canvas id="qrCanvas" width="180" height="180"></canvas>
+        <p class="qr-hint">امسح الكود بالكاميرا وادخل الغرفة على طول</p>
       </div>
     </div>
     <div class="players-title">اللاعبون <span id="playerCount" class="player-count"></span></div>
@@ -133,6 +139,10 @@
       </label>
     </div>
     <p id="variantDesc" class="variant-desc"></p>
+    <label class="autoplay-row" title="لو إيدك فيها حركة واحدة بس، هنتلعبها لوحدنا">
+      <input type="checkbox" id="chkAutoplay">
+      <span>لعب تلقائي لما يكون فيه حركة واحدة بس</span>
+    </label>
     <div class="lobby-actions">
       <button id="btnReady" class="btn">أنا جاهز</button>
       <button id="btnStart" class="btn primary hidden">بدء اللعبة</button>
@@ -153,6 +163,18 @@
     <div id="turnBanner"><span id="turnBannerText"></span></div>
     <div class="hud-right">
       <div id="connPill" class="ok" title="حالة الاتصال">●</div>
+      <button id="btnSound" class="hud-btn" title="كتم الصوت" aria-label="تبديل الصوت">
+        <svg class="icon-sound-on" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+        </svg>
+        <svg class="icon-sound-off" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+          <line x1="23" y1="9" x2="17" y2="15"></line>
+          <line x1="17" y1="9" x2="23" y2="15"></line>
+        </svg>
+      </button>
       <button id="btnFullscreen" class="hud-btn" title="ملء الشاشة" aria-label="تبديل ملء الشاشة">
         <svg class="icon-expand" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
@@ -170,6 +192,8 @@
     <button id="btnDraw" class="btn hidden">سحب <span id="boneyardCount"></span></button>
     <button id="btnPass" class="btn hidden">تمرير (باص)</button>
   </div>
+
+  <div id="opponents"></div>
 
   <div id="scoreCard" class="score-card"></div>
 
@@ -325,6 +349,6 @@
   </div>
 </section>
 
-<script type="module" src="js/app.js?v=34"></script>
+<script type="module" src="js/app.js?v=35"></script>
 </body>
 </html>
