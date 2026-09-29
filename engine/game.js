@@ -4,12 +4,32 @@
 
 import { buildDeck, shuffle, mulberry32, pips, isDouble } from './deck.js';
 
-const DEFAULT_TARGET = { block: 100, draw: 100, allfives: 250 };
+// F2.3: All Fives targets scale with the table size — a 4-player match reaches a
+// given score far faster than heads-up, so a flat 250 made long games drag.
+// 2P stays 250 (the classic), 3-4P use 200 (matches plan.md §2.3).
+const DEFAULT_TARGET = { block: 100, draw: 100, allfives: { 2: 250, 3: 200, 4: 200 } };
 const DEFAULT_HAND = {
   block:   { 2: 7, 3: 5, 4: 5 },
   draw:    { 2: 7, 3: 5, 4: 5 },
   allfives:{ 2: 7, 3: 7, 4: 5 },
 };
+
+/** Resolve a DEFAULT_TARGET entry that may be a plain number or a per-count map. */
+function targetFor(target, playerCount) {
+  if (typeof target === 'number') return target;
+  return target[playerCount] ?? target[2];
+}
+// Consecutive scoreless (blocked + pip-tie) hands before a stalled match is called.
+// Deliberately generous — see the comment in _endHand.
+const STALL_GUARD_HANDS = 8;
+
+// F3.2: derived-ends cache, kept OFF the instance so the engine stays purely
+// serializable (JSON.stringify(game) must not include cache churn — bot.js clones
+// games via JSON and the anti-cheat test asserts chooseAction mutates nothing).
+// ENDS_CACHE: game instance → { rev, ends }
+// REV:        game instance → revision counter, bumped by every mutation
+const ENDS_CACHE = new WeakMap();
+const REV = new WeakMap();
 
 export class IllegalMove extends Error {}
 
@@ -20,6 +40,8 @@ export class DominoGame {
    *  playerIds: string[2..4]
    *  targetScore?: number
    *  handSize?: number (override)
+   *  allowPass?: boolean  (F2.1, default true) — false forbids passing entirely
+   *  keepLastTwo?: boolean (F2.1, default false) — reserve the last 2 boneyard tiles
    *  seed?: number (shuffle seed)
    *  deal?: { hands: {pid: tileId[]}, boneyard: tileId[] } — test hook, skips shuffle
    */
@@ -30,8 +52,12 @@ export class DominoGame {
       throw new Error('need 2-4 players');
     this.variant = variant;
     this.playerIds = playerIds.slice();
-    this.targetScore = opt.targetScore || DEFAULT_TARGET[variant];
+    this.targetScore = opt.targetScore || targetFor(DEFAULT_TARGET[variant], playerIds.length);
     this.handSize = opt.handSize || DEFAULT_HAND[variant][playerIds.length];
+    // F2.1 house rules — persisted in room.config and re-applied on every hand
+    // via _deal's `opt`, so they survive nextHand()/rematch().
+    this.allowPass = opt.allowPass !== false;
+    this.keepLastTwo = !!opt.keepLastTwo;
     this.scores = Object.fromEntries(playerIds.map(id => [id, 0]));
     this.status = 'playing';            // 'playing' | 'handEnd' | 'matchEnd'
     this.handNumber = 0;
@@ -47,9 +73,10 @@ export class DominoGame {
     this.handNumber++;
     this.moves = [];                    // [{t:{id,a,b}, e:'L'|'R'|'U'|'D'|null, f:0|1, p}]
     this.ends = { L: null, R: null, U: null, D: null }; // {match, score, tileId}
-    this.spinner = null;                // { id, sidesFilled }
+    this.spinner = null;                // { id, sidesFilled, value }
     this.passCount = 0;
     this.handResult = null;
+    this.forcedDrawTileId = null;       // Draw rules: a playable drawn tile must be played
     this.hands = {};
     let boneyard;
     if (opt.deal) {
@@ -96,17 +123,40 @@ export class DominoGame {
 
   handPips(pid) { return this.hands[pid].reduce((s, t) => s + pips(t), 0); }
 
-  /** Attachable ends with their match values. U/D only once spinner has both side tiles. */
+  /** Attachable ends with their match values. U/D only once spinner has both side tiles.
+   *
+   *  F3.2: `viewFor` calls this once per player per broadcast, so the result is cached.
+   *  The cache lives in a module-level WeakMap rather than on `this`, for two reasons:
+   *    1. the engine must stay purely serializable — `JSON.stringify(game)` is used by
+   *       bot.js (cloneGame) and by the "bot must not mutate the game" anti-cheat test,
+   *       and a cache field on the instance would show up as a mutation;
+   *    2. it must be invisible to anything that snapshots or clones the object.
+   *  Invalidation is a revision counter: every mutation bumps `_rev(game)`, and a cached
+   *  entry is only reused when its revision still matches. */
   attachableEnds() {
+    const cached = ENDS_CACHE.get(this);
+    const rev = REV.get(this) || 0;
+    if (cached && cached.rev === rev) return cached.ends;
+
     const out = [];
-    if (this.moves.length === 0) return [{ end: null, match: null }];
-    out.push({ end: 'L', match: this.ends.L.match }, { end: 'R', match: this.ends.R.match });
-    if (this.variant === 'allfives' && this.spinner && this.spinner.sidesFilled >= 2) {
-      const sv = this._tileById(this.spinner.id).a;
-      out.push({ end: 'U', match: this.ends.U ? this.ends.U.match : sv });
-      out.push({ end: 'D', match: this.ends.D ? this.ends.D.match : sv });
+    if (this.moves.length === 0) {
+      // Empty table: a single "any tile" pseudo-end (end null = lead move).
+      out.push({ end: null, match: null });
+    } else {
+      out.push({ end: 'L', match: this.ends.L.match }, { end: 'R', match: this.ends.R.match });
+      if (this.variant === 'allfives' && this.spinner && this.spinner.sidesFilled >= 2) {
+        const sv = this.spinner.value;   // stored at creation — no hand/boneyard lookup
+        out.push({ end: 'U', match: this.ends.U ? this.ends.U.match : sv });
+        out.push({ end: 'D', match: this.ends.D ? this.ends.D.match : sv });
+      }
     }
+    ENDS_CACHE.set(this, { rev, ends: out });
     return out;
+  }
+
+  /** Mark the derived-ends cache stale. Called from every state mutation. */
+  _invalidateEnds() {
+    REV.set(this, (REV.get(this) || 0) + 1);
   }
 
   legalMoves(pid) {
@@ -119,6 +169,15 @@ export class DominoGame {
       }
       return hand.map(t => ({ tileId: t.id, end: null }));
     }
+    // Draw rules: once you draw a playable tile you must play THAT tile, and only it.
+    if (this.forcedDrawTileId) {
+      const t = hand.find(x => x.id === this.forcedDrawTileId);
+      if (!t) return [];
+      for (const { end, match } of this.attachableEnds()) {
+        if (t.a === match || t.b === match) moves.push({ tileId: t.id, end });
+      }
+      return moves;
+    }
     for (const { end, match } of this.attachableEnds()) {
       for (const t of hand) {
         if (t.a === match || t.b === match) moves.push({ tileId: t.id, end });
@@ -127,14 +186,22 @@ export class DominoGame {
     return moves;
   }
 
+  /** F2.1: how many boneyard tiles may actually be drawn right now.
+   *  keepLastTwo reserves the final 2 tiles (a common house rule that keeps some
+   *  tension at the end of a Draw hand instead of letting it drain to nothing). */
+  drawableCount() {
+    return this.keepLastTwo ? Math.max(0, this.boneyard.length - 2) : this.boneyard.length;
+  }
+
   canDraw(pid) {
-    return this.variant !== 'block' && this.boneyard.length > 0 &&
+    return this.variant !== 'block' && this.drawableCount() > 0 &&
            this.legalMoves(pid).length === 0 && this.status === 'playing';
   }
 
   canPass(pid) {
     if (this.status !== 'playing' || this.legalMoves(pid).length > 0) return false;
-    return this.variant === 'block' || this.boneyard.length === 0;
+    if (!this.allowPass) return false;              // F2.1 house rule
+    return this.variant === 'block' || this.drawableCount() === 0;
   }
 
   /** Current total of open ends (All Fives). A double sitting at both ends (lead double) counts once. */
@@ -168,7 +235,7 @@ export class DominoGame {
       const dbl = isDouble(tile);
       this.ends.L = { match: tile.a, score: dbl ? pips(tile) : tile.a, tileId, dbl };
       this.ends.R = { match: tile.b, score: dbl ? pips(tile) : tile.b, tileId, dbl };
-      if (dbl && this.variant === 'allfives') this.spinner = { id: tile.id, sidesFilled: 0 };
+      if (dbl && this.variant === 'allfives') this.spinner = { id: tile.id, sidesFilled: 0, value: tile.a };
       this.moves.push({ t: tile, e: null, f: 0, p: pid });
     } else {
       const attach = this.attachableEnds().find(x => x.end === end);
@@ -186,12 +253,15 @@ export class DominoGame {
         tileId,
         dbl: isDouble(tile),
       };
-      if (isDouble(tile) && !this.spinner && this.variant === 'allfives') this.spinner = { id: tile.id, sidesFilled: 1 };
+      if (isDouble(tile) && !this.spinner && this.variant === 'allfives')
+        this.spinner = { id: tile.id, sidesFilled: 1, value: tile.a };
       this.moves.push({ t: tile, e: end, f, p: pid });
     }
 
     this.passCount = 0;
     this.leadForcedTile = null;
+    this.forcedDrawTileId = null;       // a move clears the draw restriction
+    this._invalidateEnds();
     this.lastAction = { type: 'place', pid, tileId, end };
 
     // All Fives: immediate multiple-of-5 scoring
@@ -213,10 +283,17 @@ export class DominoGame {
 
   draw(pid) {
     this._assertTurn(pid);
-    if (!this.canDraw(pid)) throw new IllegalMove('cannot draw now');
-    const tile = this.boneyard.pop();
+    if (!this.canDraw(pid)) throw new IllegalMove('cannot draw now');    const tile = this.boneyard.pop();
     this.hands[pid].push(tile);
-    this.lastAction = { type: 'draw', pid, count: 1 };
+    this._invalidateEnds();
+    this.lastAction = { type: 'draw', pid, count: 1, tileId: tile.id };
+
+    // Draw rules: a drawn tile that fits an open end must be played right away.
+    // (Otherwise a player could draw, keep the tile, and freely choose another.)
+    const playable = this.moves.length === 0
+      ? true
+      : this.attachableEnds().some(e => e.match !== null && (tile.a === e.match || tile.b === e.match));
+    this.forcedDrawTileId = playable ? tile.id : null;
     return tile;
   }
 
@@ -224,6 +301,8 @@ export class DominoGame {
     this._assertTurn(pid);
     if (!this.canPass(pid)) throw new IllegalMove('cannot pass now');
     this.passCount++;
+    this.forcedDrawTileId = null;
+    this._invalidateEnds();
     this.lastAction = { type: 'pass', pid };
     if (this.passCount >= this.playerIds.length) return this._endHand(null, true);
     this._advanceTurn(pid);
@@ -235,6 +314,8 @@ export class DominoGame {
   forceSkip(pid) {
     this._assertTurn(pid);
     this.passCount++;
+    this.forcedDrawTileId = null;
+    this._invalidateEnds();
     this.lastAction = { type: 'skip', pid };
     if (this.passCount >= this.playerIds.length) return this._endHand(null, true);
     this._advanceTurn(pid);
@@ -260,10 +341,15 @@ export class DominoGame {
       hand: this.hands[pid],
       handCounts: Object.fromEntries(this.playerIds.map(id => [id, this.hands[id].length])),
       boneyardCount: this.boneyard.length,
+      // F2.1: keepLastTwo reserves tiles — tell the client how many are actually
+      // drawable, else the draw button hides while the pile still shows tiles.
+      drawableCount: this.drawableCount(),
+      rules: { allowPass: this.allowPass, keepLastTwo: this.keepLastTwo, handSize: this.handSize },
       moves: this.moves,
       ends: this.moves.length ? this.attachableEnds() : [],
       endsTotal: this.endsTotal(),
       leadForcedTile: this.turn === pid ? this.leadForcedTile : null,
+      forcedDrawTile: this.turn === pid && this.status === 'playing' ? this.forcedDrawTileId : null,
       scores: { ...this.scores },
       legalMoves: this.turn === pid && this.status === 'playing' ? this.legalMoves(pid) : [],
       canDraw: this.turn === pid && this.canDraw(pid),
@@ -306,8 +392,13 @@ export class DominoGame {
     if (winnerId && this.scores[winnerId] >= this.targetScore) return this._endMatch(winnerId);
 
     // Stalled match: end it and award the win to the current points leader.
-    if (this._scorelessHands >= 3) {
+    // Threshold is high on purpose: with a fresh random deal every hand (production) a
+    // 3-hand scoreless streak is effectively unreachable (measured 0/4000 matches), so
+    // this is a safety net and NOT something that should ever decide a live game.
+    // A low threshold would only bite deterministic/seed-replay setups.
+    if (this._scorelessHands >= STALL_GUARD_HANDS) {
       const leader = this.playerIds.slice().sort((x, y) => this.scores[y] - this.scores[x])[0];
+      this.handResult.stallEnd = true;
       return this._endMatch(leader);
     }
     this.status = 'handEnd';
@@ -324,6 +415,7 @@ export class DominoGame {
   }
 
   _advanceTurn(fromPid) {
+    this._invalidateEnds();
     const i = this.playerIds.indexOf(fromPid);
     this.turn = this.playerIds[(i + 1) % this.playerIds.length];
   }
@@ -349,7 +441,8 @@ export class DominoGame {
     if (m) return m.t;
     const b = this.boneyard.find(t => t.id === id);
     if (b) return b;
-    const [a, bb] = id.split('-').map(Number);
-    return { id, a, b: bb };
+    // Never fabricate a tile from a string: a bogus id would yield NaN match values
+    // and silently freeze the match (nothing can ever attach to NaN).
+    throw new Error(`unknown tile id: ${id}`);
   }
 }

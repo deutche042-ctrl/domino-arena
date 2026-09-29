@@ -7,8 +7,11 @@ const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no confusing chars
 // Per-turn time limit shared with clients. The enforcement timer itself lives in
 // server.js (the engine must stay timer-free); this is the single source of truth.
 export const TURN_MS = Math.max(1000, Number(process.env.TURN_TIME_MS) || 30000);
-// Lobby-selectable per-turn limits (server.js reads config.turnMs || TURN_MS)
-const TURN_MS_OPTIONS = [15000, 30000, 60000];
+// Lobby-selectable per-turn limits (server.js reads config.turnMs || TURN_MS).
+// 0 means "no timer at all" (F2.1) — a deliberate house-rule choice.
+const TURN_MS_OPTIONS = [0, 10000, 20000, 30000, 60000];
+// Lobby-selectable hand sizes (F2.1); null = let the variant/player-count decide.
+const HAND_SIZE_OPTIONS = [5, 7, 9];
 
 function makeCode() {
   let c = '';
@@ -29,7 +32,16 @@ export class RoomManager {
       code,
       hostId: player.id,
       state: 'lobby', // 'lobby' | 'playing'
-      config: { variant: 'draw', targetScore: 100, maxPlayers: 4 },
+      // F2.1 house rules. Every field is mirrored into the engine on startGame,
+      // so changing one in the lobby affects real rules, not just the UI.
+      //  - handSize:   null → variant/player-count default (DEFAULT_HAND)
+      //  - allowPass:  false → a stuck player can only be rescued by the timer
+      //  - keepLastTwo: true → the final 2 boneyard tiles are never drawable
+      //  - turnMs:     null → TURN_MS; 0 → no turn timer at all
+      config: {
+        variant: 'draw', targetScore: 100, maxPlayers: 4,
+        handSize: null, allowPass: true, keepLastTwo: false, turnMs: null,
+      },
       players: [player],
       game: null,
       createdAt: Date.now(),
@@ -148,8 +160,14 @@ export class RoomManager {
       variant: room.config.variant,
       playerIds: room.players.map(p => p.id),
       targetScore: room.config.targetScore,
+      // F2.1 house rules (undefined falls back to the engine default).
+      handSize: room.config.handSize || undefined,
+      allowPass: room.config.allowPass,
+      keepLastTwo: room.config.keepLastTwo,
     });
     room.state = 'playing';
+    room.continueVotes = null;
+    room.rematchVotes = null;                 // F2.2: votes are per-match
     room.players.forEach(p => { p.ready = false; });
   }
 
@@ -161,7 +179,7 @@ export class RoomManager {
     this.startGame(room);
   }
 
-  /** Sanitized config for lobby:config — turnMs clamped to the allowed choices. */
+  /** Sanitized config for lobby:config — every value clamped to a known-good choice. */
   sanitizeConfig(cfg = {}) {
     const out = {};
     if (cfg.variant) out.variant = String(cfg.variant);
@@ -170,6 +188,17 @@ export class RoomManager {
     if (cfg.turnMs != null) {
       const want = Number(cfg.turnMs);
       out.turnMs = TURN_MS_OPTIONS.includes(want) ? want : TURN_MS;
+    }
+    // F2.1 house rules. Booleans are coerced strictly; handSize only accepts a
+    // listed size, and `null`/'' clears the override back to the variant default.
+    if (cfg.allowPass != null) out.allowPass = cfg.allowPass === true || cfg.allowPass === 'true';
+    if (cfg.keepLastTwo != null) out.keepLastTwo = cfg.keepLastTwo === true || cfg.keepLastTwo === 'true';
+    if (cfg.handSize !== undefined) {
+      if (cfg.handSize == null || cfg.handSize === '') out.handSize = null;
+      else {
+        const want = Number(cfg.handSize);
+        out.handSize = HAND_SIZE_OPTIONS.includes(want) ? want : null;
+      }
     }
     return out;
   }
@@ -215,9 +244,18 @@ export class RoomManager {
         if (set?.size) view[`${kind}Votes`] = { count: set.size, humans };
       }
     }
+    // F2.2: who (by name) has voted for a rematch, so the end-of-match modal can
+    // show real names instead of a bare counter.
+    const rematchWho = [...(room.rematchVotes || [])]
+      .map(id => room.players.find(p => p.id === id)?.name)
+      .filter(Boolean);
+    view.rematchVotes = rematchWho;
+    view.rematchVoters = [...(room.rematchVotes || [])];
+    view.humanCount = room.players.filter(p => !p.isBot).length;
     // Turn countdown (server clock epoch ms). serverNow lets clients correct for clock skew.
+    // turnMs 0 means "no timer" — the client hides the countdown entirely (F2.1).
     view.turnEndsAt = room.turnEndsAt || null;
-    view.turnMs = room.config.turnMs || TURN_MS;
+    view.turnMs = room.config.turnMs ?? TURN_MS;
     view.serverNow = Date.now();
     return view;
   }

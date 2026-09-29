@@ -104,16 +104,21 @@ ok(final.status === 'matchEnd', `match ended after ${actions} actions, ${handEnd
 ok(final.matchWinnerId && final.scores[final.matchWinnerId] >= 50, 'winner reached target score');
 ok(handEnds >= 0, 'hand flow ok');
 
-// rematch with a non-host vote: b votes first, host's view shows the request
-b.emit('game:rematchVote');
-const vs = await once(a, 'game:state');
-await once(b, 'game:state');   // drain bob's in-flight copy of the vote broadcast
-ok(vs && vs.rematchVotes && vs.rematchVotes.count === 1, 'non-host rematch vote reaches the host view');
-ok(vs.rematchVotes.humans === 2, 'vote report counts seated humans');
-
-a.emit('game:rematch');
-const rs = await once(b, 'game:state');
-ok(rs && rs.status === 'playing' && rs.scores[cr.playerId] === 0, 'rematch resets scores');
+// F2.2 rematch voting: advisory vote nudges the host; a binding non-host vote
+// (unanimous minus the host, who can always act alone) restarts the match.
+{
+  const nudgeP = new Promise(r => a.once('chat:msg', r));
+  const voteStateP = new Promise(r => a.once('game:state', r));
+  b.emit('game:rematchVote');
+  const nudge = await nudgeP;
+  ok(nudge && /مباراة جديدة/.test(nudge.text || ''), 'advisory rematch vote nudges the host');
+  await voteStateP;   // drain the advisory-vote broadcast
+  const restartP = new Promise(r => a.once('game:state', r));
+  b.emit('game:rematch');   // 1 of 2 humans >= unanimous-minus-host → instant restart
+  const rs = await restartP;
+  await once(b, 'game:state');   // drain bob's copy of the restart broadcast
+  ok(rs && rs.status === 'playing' && rs.scores[cr.playerId] === 0, 'non-host rematch vote restarts the match');
+}
 
 // chat
 a.emit('chat:send', { text: 'gg' });
@@ -268,15 +273,15 @@ const d2 = await client();
 const dj2 = await emit(d2, 'room:join', { code: ncr.code, name: 'Guest2' });
 ok(dj2.ok, 'new guest joined after kick');
 ok(!(await emit(d2, 'lobby:config', { turnMs: 60000 })).ok, 'non-host config refused');
-ok((await emit(c, 'lobby:config', { variant: 'block', targetScore: 50, turnMs: 15000 })).ok, 'host set 15s turns');
+ok((await emit(c, 'lobby:config', { variant: 'block', targetScore: 50, turnMs: 10000 })).ok, 'host set 10s turns');
 d2.emit('lobby:ready', { ready: true });
 await sleep(60);
 const cStatePromise = once(c, 'game:state');   // register BEFORE start: server broadcasts before the ack
 ok((await emit(c, 'game:start')).ok, 'bot is auto-ready: game starts');
 const cState = await cStatePromise;
 ok(cState && cState.players.length === 3, 'game started with the bot seated (host + guest + bot)');
-ok(cState.turnMs === 15000, 'view reports the configured 15s turn time');
-ok(typeof cState.turnEndsAt === 'number' && cState.turnEndsAt - cState.serverNow <= 15100,
+ok(cState.turnMs === 10000, 'view reports the configured 10s turn time');
+ok(typeof cState.turnEndsAt === 'number' && cState.turnEndsAt - cState.serverNow <= 10100,
   'turn countdown armed within the configured window');
 
 a.close(); b2.close(); c.close(); d.close();

@@ -93,6 +93,14 @@ function clearTurnTimer(room) {
 function armTurnTimer(room) {
   const game = room.game;
   if (!game || game.status !== 'playing') return clearTurnTimer(room);
+  // F2.1: turnMs === 0 is an explicit "no turn timer" house rule. We must NOT
+  // fall back to TURN_MS here (that is what `||` would do), and we must clear any
+  // timer already armed in case the host turned the clock off mid-match.
+  if (room.config.turnMs === 0) {
+    clearTurnTimer(room);
+    room.turnEndsAt = null;
+    return;
+  }
   if (room.turnTimer && room.turnTimerPid === game.turn) return;
   clearTurnTimer(room);
   const turnMs = room.config.turnMs || TURN_MS;
@@ -557,9 +565,7 @@ io.on('connection', (socket) => {
     room.continueVotes = null;
     manager.nextHand(room);
     broadcastGame(room);
-  });
-
-  // ── hint (F1.5) ──
+  });  // ── hint (F1.5) ──
   // The bot brain needs cloneGame()/real engine methods, so this runs server-side
   // (decision AD-2). We reply with ONLY the chosen action — tileId + end, both of
   // which the asking player can already derive from their own view.legalMoves.
@@ -573,24 +579,50 @@ io.on('connection', (socket) => {
       const action = chooseAction(room.game, playerId, { level: 'medium' });
       // Sanity gate: never hand back an illegal suggestion.
       if (action?.type === 'play') {
-        const legal = room.game.legalMoves().some(m => m.tileId === action.tileId && m.end === action.end);
+        const legal = room.game.legalMoves(playerId).some(m => m.tileId === action.tileId && m.end === action.end);
         if (!legal) return cb?.({ ok: false });
         return cb?.({ ok: true, type: 'play', tileId: action.tileId, end: action.end });
       }
       return cb?.({ ok: true, type: action?.type || 'pass' });
-    } catch {
+    } catch (err) {
+      console.warn('game:hint failed', err?.message);
       return cb?.({ ok: false });
     }
   });
 
-  socket.on('game:rematch', () => {
-    const { room, playerId } = currentCtx(socket);
-    if (!room?.game || room.game.status !== 'matchEnd') return;
-    if (playerId !== room.hostId) return;
+  // Vote-driven rematch (F2.2). The old handler was host-only, so if the host
+  // walked away the whole table was stuck on the results screen forever.
+  // Rules now: the host may start alone; anyone else votes, and the match
+  // restarts once every OTHER human has voted (unanimous-minus-one).
+  function doRematch(room) {
     room.continueVotes = null;
+    room.rematchVotes = null;
     manager.rematch(room);
     io.to(room.code).emit('game:started');
     broadcastGame(room);
+  }
+
+  socket.on('game:rematch', () => {
+    const { room, playerId } = currentCtx(socket);
+    if (!room?.game || room.game.status !== 'matchEnd') return;
+    const me = room.players.find(p => p.id === playerId);
+    if (!me || me.isBot) return;                       // no seat, no vote
+
+    if (playerId === room.hostId) return doRematch(room);  // host acts alone
+
+    const humans = room.players.filter(p => !p.isBot);
+    room.rematchVotes = room.rematchVotes || new Set();
+    if (room.rematchVotes.has(playerId)) return;       // idempotent
+    room.rematchVotes.add(playerId);
+
+    io.to(room.code).emit('chat:msg', {
+      from: 'النظام',
+      text: `${me.name} عايز مباراة جديدة (${room.rematchVotes.size}/${humans.length})`,
+    });
+
+    // Unanimous minus the host (who can always act alone anyway).
+    if (room.rematchVotes.size >= humans.length - 1) doRematch(room);
+    else broadcastGame(room);                          // surface the vote counter
   });
 
   // ---- chat ----

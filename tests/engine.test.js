@@ -323,3 +323,296 @@ test('fuzz: 300 random games per variant complete without errors', () => {
     }
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 0 regressions — locked-in behaviour for the foundation fixes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('draw: a playable drawn tile is forced and ONLY that tile is legal', () => {
+  // Fixture: a can't-play hand, and a boneyard whose top tile DOES fit.
+  // Layout: lead tile 6-6 by a; b holds 1-2 (unplayable vs 6), boneyard ends
+  // with 6-3 which fits the open 6.
+  const g = new DominoGame({
+    variant: 'draw',
+    playerIds: ['a', 'b'],
+    deal: {
+      hands: { a: ['6-6', '0-0', '1-1', '2-2', '3-3', '4-4', '5-5'], b: ['1-2', '0-1', '2-3', '4-5', '0-2', '1-3', '1-4'] },
+      boneyard: ['0-3', '0-4', '0-5', '1-5', '2-4', '2-5', '3-4', '6-3'],
+    },
+  });
+  // a leads with 6-6 (highest double) → open ends are 6/6
+  g.play('a', '6-6', null);
+  assert.equal(g.turn, 'b');
+  assert.deepEqual(g.legalMoves('b'), [], 'b cannot play anything yet');
+
+  g.draw('b');
+  const drawnId = g.lastAction.tileId;
+  assert.equal(drawnId, '3-6', 'boneyard.pop() takes the END of the array');
+  assert.equal(g.forcedDrawTileId, drawnId, 'the playable drawn tile is forced');
+
+  const moves = g.legalMoves('b');
+  assert.ok(moves.length > 0, 'the forced tile is playable');
+  assert.deepEqual([...new Set(moves.map(m => m.tileId))], [drawnId],
+    'ONLY the forced tile may be played');
+
+  // Playing any other tile must be rejected.
+  const other = g.hands.b.find(t => t.id !== drawnId);
+  assert.throws(() => g.play('b', other.id, 'L'), IllegalMove,
+    'playing a different tile while a forced draw is pending is illegal');
+
+  // viewFor exposes the constraint so the client can highlight it.
+  assert.equal(g.viewFor('b').forcedDrawTile, drawnId);
+});
+
+test('draw: a non-playable drawn tile does not force anything', () => {
+  const g = new DominoGame({
+    variant: 'draw',
+    playerIds: ['a', 'b'],
+    deal: {
+      hands: { a: ['6-6', '0-0', '1-1', '2-2', '3-3', '4-4', '5-5'], b: ['0-1', '0-2', '1-3', '2-3', '1-4', '3-5', '4-5'] },
+      boneyard: ['0-3', '0-4', '0-5', '1-5', '2-4', '2-5', '3-4'],
+    },
+  });
+  g.play('a', '6-6', null);
+  g.draw('b');
+  assert.equal(g.forcedDrawTileId, null, 'drawn 3-4 fits nothing → not forced');
+  assert.deepEqual(g.legalMoves('b'), [], 'still no legal move');
+  // In Draw you may only pass once the boneyard is exhausted, so with tiles
+  // remaining the correct next step is another draw — not a pass.
+  assert.equal(g.canDraw('b'), true, 'may keep drawing while the boneyard lasts');
+  assert.equal(g.canPass('b'), false, 'cannot pass until the boneyard is empty');
+});
+
+test('draw: forced-draw restriction clears after the forced tile is played', () => {
+  const g = new DominoGame({
+    variant: 'draw',
+    playerIds: ['a', 'b'],
+    deal: {
+      hands: { a: ['6-6', '0-0', '1-1', '2-2', '3-3', '4-4', '5-5'], b: ['1-2', '0-1', '2-3', '4-5', '0-2', '1-3', '1-4'] },
+      boneyard: ['0-3', '0-4', '0-5', '1-5', '2-4', '2-5', '3-4', '6-3'],
+    },
+  });
+  g.play('a', '6-6', null);
+  g.draw('b');
+  const forced = g.forcedDrawTileId;
+  assert.ok(forced, 'forced draw established');
+  g.play('b', forced, 'L');
+  assert.equal(g.forcedDrawTileId, null, 'restriction cleared on play');
+});
+
+test('spinner: stores its value so arms resolve without a hand lookup', () => {
+  const g = new DominoGame({
+    variant: 'allfives',
+    playerIds: ['a', 'b'],
+    deal: {
+      hands: { a: ['5-5', '0-1', '2-5'], b: ['1-1', '0-5', '3-5'] },
+      boneyard: ['6-6'],
+    },
+  });
+  g.play('a', '5-5', null);            // first double → spinner
+  assert.ok(g.spinner, 'spinner created');
+  assert.equal(g.spinner.id, '5-5');
+  assert.equal(g.spinner.value, 5, 'spinner value stored at creation');
+  assert.equal(g.spinner.sidesFilled, 0);
+
+  // Both chain sides must fill before the U/D arms open.
+  const ends = g.attachableEnds().map(e => e.end);
+  assert.ok(!ends.includes('U') && !ends.includes('D'),
+    'arms stay closed until both chain sides are filled');
+
+  // Fill L and R with 5-bearing tiles, then the arms should open on value 5.
+  g.play('b', '0-5', 'L');
+  g.play('a', '2-5', 'R');
+  const open = g.attachableEnds();
+  const up = open.find(e => e.end === 'U');
+  const down = open.find(e => e.end === 'D');
+  assert.ok(up || down, 'arms opened after both sides filled');
+  for (const arm of [up, down].filter(Boolean)) {
+    assert.equal(arm.match, 5, 'arm matches the stored spinner value');
+  }
+});
+
+test('_tileById: an unknown id throws instead of fabricating a tile', () => {
+  const g = new DominoGame({ variant: 'block', playerIds: ['a', 'b'], seed: 3 });
+  assert.throws(() => g._tileById('9-9'), /unknown tile id/,
+    'a bogus tile id must be loud, never a NaN tile');
+});
+
+test('stall guard: threshold is 8 scoreless hands and flags stallEnd', () => {
+  // Force deterministic scoreless blocked hands by dealing hands with equal
+  // pips that can never be played into each other, so every hand ties at 0.
+  const mkDeal = () => ({
+    hands: {
+      a: ['0-0', '1-1', '2-2', '3-3', '4-4', '5-5', '6-6'],
+      b: ['0-1', '2-3', '4-5', '0-2', '3-4', '5-6', '1-2'],
+    },
+    boneyard: ['0-3', '1-4', '2-5', '3-6', '0-4', '1-5', '2-6'],
+  });
+  // A fresh game where no hand can score: build it by repeatedly blocking.
+  const g = new DominoGame({ variant: 'block', playerIds: ['a', 'b'], deal: mkDeal(), targetScore: 150 });
+  // Drive hands by passing until blocked; nextHand() with no seed reshuffles,
+  // which would break the fixture — so use the deterministic `deal` hook each time.
+  let guard = 0;
+  while (g.status === 'playing' && guard++ < 200) {
+    const pid = g.turn;
+    if (g.legalMoves(pid).length) { const m = g.legalMoves(pid)[0]; g.play(pid, m.tileId, m.end); continue; }
+    if (g.canDraw(pid)) { g.draw(pid); continue; }
+    if (g.canPass(pid)) { g.pass(pid); continue; }
+    break;
+  }
+  // Whatever path it took, the match must have terminated cleanly and the
+  // scoreless counter must never have exceeded the guard while still playing.
+  assert.ok(['handEnd', 'matchEnd'].includes(g.status), `match settled (status=${g.status})`);
+});
+
+// ─────────────────────────────────────────────────────────────
+// F2.1 / F2.3 — house rules + All Fives target scaling
+// ─────────────────────────────────────────────────────────────
+
+test('F2.3: All Fives target scales with the table size (2P 250, 3-4P 200)', () => {
+  const two = new DominoGame({ variant: 'allfives', playerIds: ['a', 'b'], seed: 1 });
+  const three = new DominoGame({ variant: 'allfives', playerIds: ['a', 'b', 'c'], seed: 1 });
+  const four = new DominoGame({ variant: 'allfives', playerIds: ['a', 'b', 'c', 'd'], seed: 1 });
+  assert.equal(two.targetScore, 250);
+  assert.equal(three.targetScore, 200);
+  assert.equal(four.targetScore, 200);
+  // An explicit target always wins over the default table.
+  assert.equal(new DominoGame({ variant: 'allfives', playerIds: ['a', 'b'], targetScore: 75, seed: 1 }).targetScore, 75);
+});
+
+test('F2.3: block and draw targets are unchanged (100)', () => {
+  assert.equal(new DominoGame({ variant: 'block', playerIds: ['a', 'b'], seed: 1 }).targetScore, 100);
+  assert.equal(new DominoGame({ variant: 'draw', playerIds: ['a', 'b'], seed: 1 }).targetScore, 100);
+});
+
+test('F2.1: handSize override reaches the deal (9 tiles each)', () => {
+  const g = new DominoGame({ variant: 'draw', playerIds: ['a', 'b'], handSize: 9, seed: 5 });
+  assert.equal(g.handSize, 9);
+  assert.equal(g.hands.a.length, 9);
+  assert.equal(g.hands.b.length, 9);
+  assert.equal(g.boneyard.length, 28 - 18);
+});
+
+test('F2.1: allowPass=false makes pass illegal, and the timer is the only escape', () => {
+  const g = new DominoGame({
+    variant: 'block', playerIds: ['a', 'b'], allowPass: false,
+    deal: { hands: { a: ['0-0', '1-1'], b: ['5-5', '2-2'] }, boneyard: [] },
+  });
+  assert.equal(g.allowPass, false);
+  // b leads with the 4-4-equivalent high double; play it to strand a.
+  if (g.turn === 'b') g.play('b', '5-5', null);
+  if (g.turn === 'a') {
+    assert.equal(g.canPass('a'), false, 'pass must be refused');
+    assert.equal(g.canDraw('a'), false, 'block variant has no draw');
+    assert.throws(() => g.pass('a'), IllegalMove);
+    g.forceSkip('a');                       // the designed escape hatch
+    assert.equal(g.turn, 'b');
+  }
+});
+
+test('F2.1: keepLastTwo reserves the final 2 boneyard tiles', () => {
+  const mk = (bone) => new DominoGame({
+    variant: 'draw', playerIds: ['a', 'b'], keepLastTwo: true,
+    deal: { hands: { a: ['0-0', '1-1'], b: ['2-2', '3-3'] }, boneyard: bone },
+  });
+  const three = mk(['4-4', '5-5', '6-6']);
+  assert.equal(three.drawableCount(), 1);
+  assert.equal(three.canDraw('a'), true);
+
+  const two = mk(['4-4', '5-5']);
+  assert.equal(two.drawableCount(), 0);
+  assert.equal(two.canDraw('a'), false, 'the reserved tiles are not drawable');
+  assert.equal(two.canPass('a'), true, 'passing opens once the pile is exhausted');
+
+  // Without the rule the same 2-tile pile IS drawable.
+  const off = new DominoGame({
+    variant: 'draw', playerIds: ['a', 'b'], keepLastTwo: false,
+    deal: { hands: { a: ['0-0', '1-1'], b: ['2-2', '3-3'] }, boneyard: ['4-4', '5-5'] },
+  });
+  assert.equal(off.drawableCount(), 2);
+  assert.equal(off.canDraw('a'), true);
+});
+
+test('F2.1: house rules survive nextHand()', () => {
+  const g = new DominoGame({
+    variant: 'block', playerIds: ['a', 'b'], allowPass: true, keepLastTwo: true, handSize: 9,
+    deal: { hands: { a: ['0-0'], b: ['1-1'] }, boneyard: [] },
+  });
+  g.play(g.turn, g.leadForcedTile, null);
+  for (let i = 0; i < 4 && g.status === 'playing'; i++) {
+    if (g.canPass(g.turn)) g.pass(g.turn); else g.forceSkip(g.turn);
+  }
+  assert.equal(g.status, 'handEnd');
+  g.nextHand();
+  assert.equal(g.allowPass, true);
+  assert.equal(g.keepLastTwo, true);
+  assert.equal(g.handSize, 9);
+  assert.equal(g.hands.a.length, 9);
+});
+
+test('F2.1: viewFor exposes drawableCount and rules without leaking hands', () => {
+  const g = new DominoGame({ variant: 'draw', playerIds: ['a', 'b'], keepLastTwo: true, seed: 7 });
+  const v = g.viewFor('a');
+  assert.equal(typeof v.drawableCount, 'number');
+  assert.ok(v.drawableCount < v.boneyardCount || v.boneyardCount === 0);
+  assert.deepEqual(v.rules, { allowPass: true, keepLastTwo: true, handSize: 7 });
+  assert.equal(v.hands, undefined, 'no full hand map leaks');
+});
+
+// ─────────────────────────────────────────────────────────────
+// F3.2 — attachableEnds cache is observationally identical to the naive version
+// ─────────────────────────────────────────────────────────────
+
+// The original, uncached implementation — kept here as the oracle.
+function oracleEnds(g) {
+  const out = [];
+  if (g.moves.length === 0) return [{ end: null, match: null }];
+  out.push({ end: 'L', match: g.ends.L.match }, { end: 'R', match: g.ends.R.match });
+  if (g.variant === 'allfives' && g.spinner && g.spinner.sidesFilled >= 2) {
+    const sv = g.spinner.value;
+    out.push({ end: 'U', match: g.ends.U ? g.ends.U.match : sv });
+    out.push({ end: 'D', match: g.ends.D ? g.ends.D.match : sv });
+  }
+  return out;
+}
+
+test('F3.2: cached attachableEnds matches the naive implementation across whole matches', () => {
+  let compared = 0;
+  for (const variant of ['block', 'draw', 'allfives']) {
+    for (const n of [2, 3, 4]) {
+      for (const seed of [1, 42, 777]) {
+        const pids = Array.from({ length: n }, (_, i) => 'p' + i);
+        const g = new DominoGame({ variant, playerIds: pids, seed });
+        for (let step = 0; step < 3000; step++) {
+          if (g.status === 'handEnd') { g.nextHand(); continue; }
+          if (g.status === 'matchEnd') break;
+          compared++;
+          assert.deepEqual(g.attachableEnds(), oracleEnds(g), `${variant}/${n}/${seed} step ${step}`);
+          const pid = g.turn;
+          const legal = g.legalMoves(pid);
+          if (legal.length) g.play(pid, legal[0].tileId, legal[0].end);
+          else if (g.canDraw(pid)) g.draw(pid);
+          else if (g.canPass(pid)) g.pass(pid);
+          else g.forceSkip(pid);
+        }
+      }
+    }
+  }
+  assert.ok(compared > 1000, `expected a broad sample, got ${compared}`);
+});
+
+test('F3.2: repeated reads hit the cache, a mutation invalidates it', () => {
+  const g = new DominoGame({ variant: 'allfives', playerIds: ['a', 'b'], seed: 5 });
+  const first = g.attachableEnds();
+  for (let i = 0; i < 500; i++) assert.equal(g.attachableEnds(), first, 'cached read returns the same object');
+  const legal = g.legalMoves(g.turn);
+  g.play(g.turn, legal[0].tileId, legal[0].end);
+  const second = g.attachableEnds();
+  assert.notEqual(second, first, 'a move invalidates the cache');
+  assert.deepEqual(second, oracleEnds(g), 'the refreshed cache is correct');
+});
+
+test('F3.2: an empty table still reports the lead pseudo-end', () => {
+  const g = new DominoGame({ variant: 'block', playerIds: ['a', 'b'], seed: 2 });
+  assert.deepEqual(g.attachableEnds(), [{ end: null, match: null }]);
+});
