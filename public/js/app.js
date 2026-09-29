@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=17';
+import { Board3D } from './board3d.js?v=18';
 import { Home3D } from './home3d.js?v=2';
 import { tileImage } from './tiles.js?v=11';
 import { sfx } from './sfx.js?v=15';
@@ -470,7 +470,15 @@ function renderHand() {
       if (view.leadForcedTile === t.id) el.classList.add('forced');
     }
     if (selectedTile === t.id) el.classList.add('selected');
-    el.onclick = () => onTileClick(t, el);
+    if (myTurn && playableIds.has(t.id)) {
+      el.classList.add('draggable');
+      el.addEventListener('pointerdown', (e) => startTileDrag(e, t, el));
+      el.addEventListener('pointermove', moveTileDrag);
+      el.addEventListener('pointerup', endTileDrag);
+      el.addEventListener('pointercancel', endTileDrag);
+    } else {
+      el.onclick = () => onTileClick(t, el);
+    }
     hand.appendChild(el);
   }
 }
@@ -650,6 +658,41 @@ function updateTurnTimer() {
   }
 }
 
+// ── local career stats (no accounts — lives in localStorage on this device) ──
+let recordedMatchKey = null;
+function loadStats() {
+  try {
+    const s = JSON.parse(localStorage.getItem('domino_stats'));
+    if (s && typeof s === 'object') return { matches: s.matches || 0, wins: s.wins || 0, bestScore: s.bestScore || 0, botWins: s.botWins || 0 };
+  } catch { /* corrupt or absent */ }
+  return { matches: 0, wins: 0, bestScore: 0, botWins: 0 };
+}
+function recordMatchResult(v) {
+  const key = v.matchWinnerId + ':' + Object.entries(v.scores).sort().join(',');
+  if (recordedMatchKey === key) return; // renderModals re-runs — record once
+  recordedMatchKey = key;
+  const s = loadStats();
+  s.matches += 1;
+  if (v.matchWinnerId === myId) {
+    s.wins += 1;
+    if (Object.values(v.isBot || {}).some(Boolean)) s.botWins += 1;
+  }
+  const myScore = v.scores[myId] || 0;
+  if (myScore > s.bestScore) s.bestScore = myScore;
+  try { localStorage.setItem('domino_stats', JSON.stringify(s)); } catch { /* no storage */ }
+  renderHomeStats();
+}
+function renderHomeStats() {
+  const el = $('homeStats');
+  if (!el) return;
+  const s = loadStats();
+  el.textContent = s.matches
+    ? `🏆 ${s.wins} فوز من ${s.matches} مباراة · أعلى سكور ${s.bestScore}${s.botWins ? ` · ${s.botWins} ضد البوت` : ''}`
+    : '';
+  const reset = $('btnResetStats');
+  if (reset) reset.classList.toggle('hidden', !s.matches);
+}
+
 function renderModals() {
   // hand end
   const handModal = $('modalHand');
@@ -710,6 +753,7 @@ function renderModals() {
     $('matchWait').classList.toggle('hidden', isHost);
     matchModal.classList.remove('hidden');
     startConfetti();
+    recordMatchResult(view);
   } else { matchModal.classList.add('hidden'); stopConfetti(); }
 }
 
@@ -812,6 +856,65 @@ function onMarkerClick(end) {
   renderHand();
 }
 
+// ── drag & drop: pull a playable tile from the hand and drop it on a board end ──
+let tileDrag = null;
+function startTileDrag(e, tile, el) {
+  if (e.button !== undefined && e.button !== 0) return;
+  if (!view || view.status !== 'playing' || view.turn !== myId) return;
+  const moves = (view.legalMoves || []).filter(m => m.tileId === tile.id);
+  if (!moves.length || moves[0].end === null) return; // lead move has no drop target
+  tileDrag = { tile, el, startX: e.clientX, startY: e.clientY, moved: false, ghost: null, over: null };
+  try { el.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
+}
+function moveTileDrag(e) {
+  if (!tileDrag) return;
+  if (!tileDrag.moved && Math.hypot(e.clientX - tileDrag.startX, e.clientY - tileDrag.startY) < 8) return;
+  if (!tileDrag.moved) {
+    tileDrag.moved = true;
+    tileDrag.ghost = document.createElement('div');
+    tileDrag.ghost.className = 'drag-ghost';
+    tileDrag.ghost.style.backgroundImage = `url(${tileImage(tileDrag.tile.a, tileDrag.tile.b)})`;
+    document.body.appendChild(tileDrag.ghost);
+    if (board?.controls) board.controls.enabled = false; // camera stays put while dragging
+    // reveal drop targets for this tile (same preview as selection)
+    if (selectedTile !== tileDrag.tile.id) {
+      const moves = view.legalMoves.filter(m => m.tileId === tileDrag.tile.id);
+      const uniqueEnds = [...new Set(moves.map(m => m.end))];
+      const previews = {};
+      if (view.variant === 'allfives') {
+        for (const en of uniqueEnds) previews[en] = previewEndsTotal(tileDrag.tile.id, en);
+      }
+      board.showMarkers(uniqueEnds, view.variant === 'allfives' ? previews : null);
+    }
+  }
+  tileDrag.ghost.style.transform = `translate(${e.clientX}px, ${e.clientY}px)`;
+  const over = board?.endFromPoint?.(e.clientX, e.clientY) ?? null;
+  if (over !== tileDrag.over) {
+    tileDrag.over = over;
+    board?.highlightEnd?.(over);
+  }
+}
+function endTileDrag(e) {
+  if (!tileDrag) return;
+  const d = tileDrag;
+  tileDrag = null;
+  try { d.el.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+  d.ghost?.remove();
+  if (board?.controls) board.controls.enabled = true;
+  board?.highlightEnd?.(null);
+  if (d.moved && d.over) {
+    socket.emit('game:play', { tileId: d.tile.id, end: d.over });
+    selectedTile = null;
+    board.clearMarkers();
+    renderHand();
+  } else if (d.moved) {
+    // dropped nowhere — clean up the markers we revealed (unless tap-selected)
+    if (selectedTile !== d.tile.id) { board.clearMarkers(); }
+  } else {
+    onTileClick(d.tile, d.el); // no movement — treat as a plain tap
+  }
+}
+
 function onBoardMiss() {
   // Do not deselect on accidental miss so touch users aren't frustrated
 }
@@ -911,6 +1014,16 @@ function initGameUI() {
       if (!sfx.isMuted()) sfx.click();
     };
     syncSoundBtn();
+  }
+  renderHomeStats();
+  const resetStats = $('btnResetStats');
+  if (resetStats) {
+    resetStats.onclick = () => {
+      if (!confirm('تمسح إحصائياتك المحلية؟')) return;
+      localStorage.removeItem('domino_stats');
+      renderHomeStats();
+      sfx.click();
+    };
   }
   $('btnExit').onclick = () => { sfx.click(); openLeaveConfirm(); };
   $('btnLeaveCancel').onclick = () => { sfx.click(); closeLeaveConfirm(); };

@@ -593,6 +593,44 @@ export class Board3D {
 
   clearMarkers() { this.markerGroup.clear(); }
 
+  /** Which playable end (if any) sits under this client point — used by drag & drop. */
+  endFromPoint(clientX, clientY) {
+    if (!this.renderer || !this.markerGroup || this.markerGroup.children.length === 0) return null;
+    const r = this.renderer.domElement.getBoundingClientRect();
+    if (clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) return null;
+    this._pointer.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+    this._raycaster.setFromCamera(this._pointer, this.camera);
+    const hitTargets = this.markerGroup.children.filter(o => o.userData && o.userData.end !== undefined);
+    const hits = this._raycaster.intersectObjects(hitTargets, false);
+    if (hits.length) {
+      const hit = hits.find(h => h.object?.userData?.end !== undefined);
+      if (hit) return hit.object.userData.end;
+    }
+    // 2D screen-distance fallback (same tolerance as click picking)
+    const v = new THREE.Vector3();
+    let bestEnd = null, minDist = Infinity;
+    for (const t of hitTargets) {
+      if (!t.userData.isHitArea) continue;
+      t.getWorldPosition(v);
+      v.project(this.camera);
+      if (v.z > 1) continue;
+      const sx = ((v.x + 1) / 2) * r.width + r.left;
+      const sy = ((-v.y + 1) / 2) * r.height + r.top;
+      const d = Math.hypot(clientX - sx, clientY - sy);
+      if (d < minDist) { minDist = d; bestEnd = t.userData.end; }
+    }
+    return minDist < 75 && bestEnd !== null ? bestEnd : null;
+  }
+
+  /** Dim non-target markers during a drag; null restores all. */
+  highlightEnd(end) {
+    if (!this.markerGroup) return;
+    for (const o of this.markerGroup.children) {
+      if (o.userData?.end === undefined || !o.material || o.userData.isHitArea) continue;
+      o.material.opacity = (end == null || o.userData.end === end) ? 0.35 : 0.1;
+    }
+  }
+
   _pick(e) {
     const r = this.renderer.domElement.getBoundingClientRect();
     this._pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);

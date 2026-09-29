@@ -584,6 +584,36 @@ input:focus, select:focus { border-color: var(--accent); }
 }
 .btn.danger:hover { filter: brightness(1.08); }
 
+/* local career stats (home footer) */
+.home-stats-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 10px 16px 4px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+/* drag & drop tile ghost following the pointer */
+.drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 62px;
+  height: 96px;
+  border-radius: 8px;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  transform: translate(0, 0);
+  translate: -50% -110%;
+  pointer-events: none;
+  z-index: 2000;
+  filter: drop-shadow(0 10px 18px rgba(0, 0, 0, .55));
+  opacity: .95;
+}
+
 /* push-to-talk toggle (voice panel) */
 .vp-ptt-row { padding: 2px 4px 8px; }
 .vp-ptt {
@@ -872,13 +902,14 @@ input:focus, select:focus { border-color: var(--accent); }
   scrollbar-width: none;
 }
 #hand::-webkit-scrollbar { display: none; }
+.tile-h.draggable { touch-action: none; } /* pointer events drive drag & drop */
 
 .tile-h {
   width: 50px; height: 100px; border-radius: 9px; flex: 0 0 auto;
   background-size: cover; cursor: pointer; position: relative;
+  touch-action: pan-x; /* hand still scrolls; draggable tiles opt out below */
   box-shadow: 0 6px 14px rgba(0,0,0,.55), inset 0 0 0 1px rgba(0,0,0,.25);
   transition: transform .15s ease-out, box-shadow .15s ease-out, filter .15s ease-out;
-  touch-action: manipulation;
   user-select: none;
   -webkit-user-select: none;
 }
