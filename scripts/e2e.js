@@ -104,7 +104,13 @@ ok(final.status === 'matchEnd', `match ended after ${actions} actions, ${handEnd
 ok(final.matchWinnerId && final.scores[final.matchWinnerId] >= 50, 'winner reached target score');
 ok(handEnds >= 0, 'hand flow ok');
 
-// rematch
+// rematch with a non-host vote: b votes first, host's view shows the request
+b.emit('game:rematchVote');
+const vs = await once(a, 'game:state');
+await once(b, 'game:state');   // drain bob's in-flight copy of the vote broadcast
+ok(vs && vs.rematchVotes && vs.rematchVotes.count === 1, 'non-host rematch vote reaches the host view');
+ok(vs.rematchVotes.humans === 2, 'vote report counts seated humans');
+
 a.emit('game:rematch');
 const rs = await once(b, 'game:state');
 ok(rs && rs.status === 'playing' && rs.scores[cr.playerId] === 0, 'rematch resets scores');
@@ -170,9 +176,11 @@ ok(rosterDrop && rosterDrop.length === 1, 'disconnect removes bob from the voice
 const bToken = jr.token;
 await sleep(120);
 const b2 = await client();
+// the server unicasts the game state inside the join handler, so register first
+const b2stateP = once(b2, 'game:state', 3000);
 const rj = await emit(b2, 'room:join', { code: cr.code, name: 'Bob', token: bToken });
 ok(rj.ok && rj.reconnected && rj.state === 'playing', 'reconnect with token mid-game');
-const b2state = await once(b2, 'game:state');
+const b2state = await b2stateP;
 ok(b2state && Array.isArray(b2state.hand) && b2state.names, 'reconnected player receives state');
 
 // ── bots mode: instant room, bots drive the game, room dies with the human ──
@@ -239,12 +247,37 @@ d.emit('chat:send', { text: 'hello again' });
 const unmuted = await gotMsg;
 ok(unmuted && unmuted.text === 'hello again', 'unmuted guest message delivered');
 
-d.emit('lobby:ready', { ready: true });
+// ── host kick: removes the player now and refuses rejoin by token ──
+ok(!(await emit(d, 'lobby:kick', { pid: ncr.playerId })).ok, 'non-host cannot kick');
+ok(!(await emit(c, 'lobby:kick', { pid: ncr.playerId })).ok, 'host cannot kick himself');
+const kickedEvP = once(d, 'room:kicked', 2000);
+ok((await emit(c, 'lobby:kick', { pid: dj.playerId })).ok, 'host kicked the guest');
+const kickedEv = await kickedEvP;
+ok(kickedEv !== null, 'kicked socket got room:kicked');
+const rejoinKicked = await emit(d, 'room:join', { code: ncr.code, name: 'Guest', token: dj.token });
+ok(rejoinKicked.ok === false && /طردك/.test(rejoinKicked.error || ''), 'kicked player cannot rejoin by token');
+// Kick is session-scoped (no accounts exist): a genuinely fresh connection may
+// rejoin — the guarded paths are the stored-token auto-rejoin and the old id.
+const freshJoinKicked = await emit(d, 'room:join', { code: ncr.code, name: 'Guest2' });
+ok(freshJoinKicked.ok === true, 'fresh connection may join (kick is session-scoped)');
+await emit(d, 'room:leave');   // clean exit so the room is start-ready below
+d.close();
+
+// ── configurable turn timer: set before the bot-match start below ──
+const d2 = await client();
+const dj2 = await emit(d2, 'room:join', { code: ncr.code, name: 'Guest2' });
+ok(dj2.ok, 'new guest joined after kick');
+ok(!(await emit(d2, 'lobby:config', { turnMs: 60000 })).ok, 'non-host config refused');
+ok((await emit(c, 'lobby:config', { variant: 'block', targetScore: 50, turnMs: 15000 })).ok, 'host set 15s turns');
+d2.emit('lobby:ready', { ready: true });
 await sleep(60);
 const cStatePromise = once(c, 'game:state');   // register BEFORE start: server broadcasts before the ack
 ok((await emit(c, 'game:start')).ok, 'bot is auto-ready: game starts');
 const cState = await cStatePromise;
 ok(cState && cState.players.length === 3, 'game started with the bot seated (host + guest + bot)');
+ok(cState.turnMs === 15000, 'view reports the configured 15s turn time');
+ok(typeof cState.turnEndsAt === 'number' && cState.turnEndsAt - cState.serverNow <= 15100,
+  'turn countdown armed within the configured window');
 
 a.close(); b2.close(); c.close(); d.close();
 

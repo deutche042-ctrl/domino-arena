@@ -6,7 +6,7 @@
 <title>دومينو أرينا | Domino Arena</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=34">
+<link rel="stylesheet" href="css/style.css?v=35">
 <script type="importmap">
 {
   "imports": {
@@ -135,6 +135,13 @@
       <label>الحد الأقصى للاعبين
         <select id="selMax">
           <option>2</option><option>3</option><option selected>4</option>
+        </select>
+      </label>
+      <label>وقت الدور
+        <select id="selTurnMs">
+          <option value="15000">15 ثانية</option>
+          <option value="30000" selected>30 ثانية</option>
+          <option value="60000">60 ثانية</option>
         </select>
       </label>
     </div>
@@ -321,6 +328,7 @@
       <h2 id="handTitle">انتهت الجولة</h2>
       <div id="handBreakdown"></div>
       <button id="btnNextHand" class="btn primary hidden">الجولة التالية</button>
+      <button id="btnNextHandVote" class="btn hidden">أطلب الجولة التالية</button>
       <p id="handWait" class="muted hidden">في انتظار المضيف لبدء الجولة…</p>
     </div>
   </div>
@@ -332,6 +340,7 @@
       <div id="matchStandings"></div>
       <canvas id="confetti"></canvas>
       <button id="btnRematch" class="btn primary hidden">مباراة جديدة</button>
+      <button id="btnRematchVote" class="btn hidden">أطلب مباراة جديدة</button>
       <p id="matchWait" class="muted hidden">في انتظار المضيف…</p>
     </div>
   </div>
@@ -349,6 +358,6 @@
   </div>
 </section>
 
-<script type="module" src="js/app.js?v=36"></script>
+<script type="module" src="js/app.js?v=37"></script>
 </body>
 </html>

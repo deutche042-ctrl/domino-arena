@@ -236,6 +236,21 @@ function renderLobby(st) {
         } finally { cm.disabled = false; }
       };
       li.appendChild(cm);
+      const kick = document.createElement('button');
+      kick.className = 'bot-remove kick';
+      kick.textContent = '⛔';
+      kick.title = 'طرد اللاعب من الغرفة';
+      kick.setAttribute('aria-label', kick.title);
+      kick.onclick = async () => {
+        if (!confirm(`تطرد ${p.name} من الغرفة؟ مينفعش يرجع تاني.`)) return;
+        kick.disabled = true;
+        try {
+          const res = await emit('lobby:kick', { pid: p.id });
+          if (res && !res.ok) lobbyError(res.error);
+          else sfx.score();
+        } finally { kick.disabled = false; }
+      };
+      li.appendChild(kick);
     }
     list.appendChild(li);
   }
@@ -263,6 +278,7 @@ function renderLobby(st) {
     if (st.config.variant) $('selVariant').value = st.config.variant;
     if (st.config.targetScore) $('selTarget').value = st.config.targetScore;
     if (st.config.maxPlayers) $('selMax').value = st.config.maxPlayers;
+    if (st.config.turnMs) $('selTurnMs').value = String(st.config.turnMs);
     $('variantDesc').textContent = VARIANT_DESC[st.config.variant] || '';
   }
 }
@@ -309,11 +325,12 @@ function initLobby() {
   };
   $('btnLeave').onclick = leaveRoom;
   $('btnLobbyMic').onclick = () => toggleMic();
-  for (const id of ['selVariant', 'selTarget', 'selMax']) {
+  for (const id of ['selVariant', 'selTarget', 'selMax', 'selTurnMs']) {
     $(id).onchange = () => emit('lobby:config', {
       variant: $('selVariant').value,
       targetScore: +$('selTarget').value,
       maxPlayers: +$('selMax').value,
+      turnMs: +$('selTurnMs').value,
     });
   }
 }
@@ -649,7 +666,18 @@ function renderModals() {
         <span>${hr.pips[pid]} نقطة${pid === hr.winnerId ? ` ← +${hr.points}` : ''}</span>`;
       bd.appendChild(row);
     }
-    $('btnNextHand').classList.toggle('hidden', !isHost);
+    const nhVotes = view.nextHandVotes;
+    const nhBtn = $('btnNextHand');
+    nhBtn.classList.toggle('hidden', !isHost);
+    if (isHost && nhVotes?.count) nhBtn.textContent = `الجولة التالية (${nhVotes.count}/${nhVotes.humans} يطلبوا)`;
+    else nhBtn.textContent = 'الجولة التالية';
+    const nhVoteBtn = $('btnNextHandVote');
+    nhVoteBtn.classList.toggle('hidden', isHost);
+    if (!isHost) {
+      const already = nhVotes?.count ? ' ✓ تم الإرسال' : '';
+      nhVoteBtn.textContent = `أطلب الجولة التالية${nhVotes?.count ? ` (${nhVotes.count}/${nhVotes.humans})` : ''}${already}`;
+      nhVoteBtn.disabled = !!nhVotes?.count;
+    }
     $('handWait').classList.toggle('hidden', isHost);
     handModal.classList.remove('hidden');
   } else handModal.classList.add('hidden');
@@ -666,7 +694,18 @@ function renderModals() {
       row.innerHTML = `<span>${['🥇', '🥈', '🥉', '4.'][i]} ${esc(view.names[pid] || 'لاعب')}</span><span>${view.scores[pid]} نقطة</span>`;
       st.appendChild(row);
     });
-    $('btnRematch').classList.toggle('hidden', !isHost);
+    const rmVotes = view.rematchVotes;
+    const rmBtn = $('btnRematch');
+    rmBtn.classList.toggle('hidden', !isHost);
+    if (isHost && rmVotes?.count) rmBtn.textContent = `مباراة جديدة (${rmVotes.count}/${rmVotes.humans} يطلبوا)`;
+    else rmBtn.textContent = 'مباراة جديدة';
+    const rmVoteBtn = $('btnRematchVote');
+    rmVoteBtn.classList.toggle('hidden', isHost);
+    if (!isHost) {
+      const already = rmVotes?.count ? ' ✓ تم الإرسال' : '';
+      rmVoteBtn.textContent = `أطلب مباراة جديدة${rmVotes?.count ? ` (${rmVotes.count}/${rmVotes.humans})` : ''}${already}`;
+      rmVoteBtn.disabled = !!rmVotes?.count;
+    }
     $('matchWait').classList.toggle('hidden', isHost);
     matchModal.classList.remove('hidden');
     startConfetti();
@@ -781,6 +820,8 @@ function initGameUI() {
   $('btnPass').onclick = () => { socket.emit('game:pass'); sfx.click(); };
   $('btnNextHand').onclick = () => socket.emit('game:nextHand');
   $('btnRematch').onclick = () => socket.emit('game:rematch');
+  $('btnNextHandVote').onclick = () => { socket.emit('game:nextHandVote'); sfx.click(); };
+  $('btnRematchVote').onclick = () => { socket.emit('game:rematchVote'); sfx.click(); };
   $('btnChat').onclick = (e) => {
     e.stopPropagation();
     chatOpen ? closeChat() : openChat();
@@ -1634,6 +1675,15 @@ function startSocket(base) {
     // the server swept this idle lobby — back home with a note
     leaveRoom();
     homeError('اتقفلت الغرفة بسبب الخمول الطويل.');
+  });
+  socket.on('room:kicked', () => {
+    // the host removed us; clear stored tokens so auto-rejoin can't pull us back
+    if (roomCode) {
+      sessionStorage.removeItem('domino_token_' + roomCode);
+      localStorage.removeItem('domino_token_' + roomCode);
+    }
+    leaveRoom();
+    homeError('تم طردك من الغرفة.');
   });
   socket.on('error', (e) => {
     setBanner('⚠ ' + (e.message || 'خطأ'), '');

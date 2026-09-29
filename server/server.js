@@ -91,9 +91,10 @@ function armTurnTimer(room) {
   if (!game || game.status !== 'playing') return clearTurnTimer(room);
   if (room.turnTimer && room.turnTimerPid === game.turn) return;
   clearTurnTimer(room);
+  const turnMs = room.config.turnMs || TURN_MS;
   room.turnTimerPid = game.turn;
-  room.turnEndsAt = Date.now() + TURN_MS;
-  room.turnTimer = setTimeout(() => handleTurnTimeout(room), TURN_MS);
+  room.turnEndsAt = Date.now() + turnMs;
+  room.turnTimer = setTimeout(() => handleTurnTimeout(room), turnMs);
 }
 
 function handleTurnTimeout(room) {
@@ -366,11 +367,7 @@ io.on('connection', (socket) => {
     if (!room) return;
     if (playerId !== room.hostId) return cb?.({ ok: false, error: 'فقط المضيف يمكنه تعديل الإعدادات.' });
     if (room.state !== 'lobby') return;
-    const { variant, targetScore, maxPlayers } = config;
-    if (['block', 'draw', 'allfives'].includes(variant)) room.config.variant = variant;
-    if ([50, 100, 150, 200, 250].includes(targetScore)) room.config.targetScore = targetScore;
-    if ([2, 3, 4].includes(maxPlayers) && maxPlayers >= room.players.length)
-      room.config.maxPlayers = maxPlayers;
+    room.config = { ...room.config, ...manager.sanitizeConfig(config) };
     cb?.({ ok: true });
     broadcastLobby(room);
   });
@@ -458,10 +455,63 @@ io.on('connection', (socket) => {
   socket.on('game:draw', () => doAction((game, pid) => game.draw(pid)));
   socket.on('game:pass', () => doAction((game, pid) => game.pass(pid)));
 
+  // Host-only kick: removes the player now, refuses rejoin (id or token) for
+  // the life of the room, and tells the kicked socket why.
+  socket.on('lobby:kick', ({ pid } = {}, cb) => {
+    const { room, playerId } = currentCtx(socket);
+    if (!room) return cb?.({ ok: false, error: 'لازم تكون جوه غرفة.' });
+    if (playerId !== room.hostId) return cb?.({ ok: false, error: 'فقط المضيف يمكنه طرد اللاعبين.' });
+    if (room.state !== 'lobby') return cb?.({ ok: false, error: 'الطرد متاح في غرفة الانتظار بس.' });
+    if (typeof pid !== 'string') return cb?.({ ok: false, error: 'لازم تحدد لاعب.' });
+    const res = manager.kickPlayer(room, pid);
+    if (res.error) return cb?.({ ok: false, error: res.error });
+    cb?.({ ok: true });
+    if (res.empty) return;
+    if (res.kicked?.socketId) {
+      io.to(res.kicked.socketId).emit('room:kicked');
+    }
+    broadcastLobby(room);
+  });
+
+  // ── continue-votes ──
+  // nextHand/rematch stay host-executed, but any seated player can vote for it.
+  // Votes are advisory only: they surface in the views so the host's button
+  // shows "زملك عايزين يكملوا (n/m)" and a toast nudges the host.
+  function castContinueVote(room, playerId, kind) {
+    const p = room.players.find(x => x.id === playerId);
+    if (!p || p.isBot) return;
+    if (room.players.length < 2) return;
+    room.continueVotes = room.continueVotes || {};
+    const set = room.continueVotes[kind] || new Set();
+    set.add(playerId);
+    room.continueVotes[kind] = set;
+    const host = room.players.find(x => x.id === room.hostId);
+    if (host?.socketId && host.id !== playerId) {
+      io.to(host.socketId).emit('chat:msg', {
+        from: 'النظام',
+        text: `${p.name} عايز ${kind === 'rematch' ? 'مباراة جديدة' : 'الجولة التالية'} — أوصلك زرار التنفيذ`,
+      });
+    }
+    broadcastGame(room);
+  }
+
+  socket.on('game:nextHandVote', () => {
+    const { room, playerId } = currentCtx(socket);
+    if (!room?.game || room.game.status !== 'handEnd') return;
+    castContinueVote(room, playerId, 'nextHand');
+  });
+
+  socket.on('game:rematchVote', () => {
+    const { room, playerId } = currentCtx(socket);
+    if (!room?.game || room.game.status !== 'matchEnd') return;
+    castContinueVote(room, playerId, 'rematch');
+  });
+
   socket.on('game:nextHand', () => {
     const { room, playerId } = currentCtx(socket);
     if (!room?.game || room.game.status !== 'handEnd') return;
     if (playerId !== room.hostId) return;
+    room.continueVotes = null;
     manager.nextHand(room);
     broadcastGame(room);
   });
@@ -470,6 +520,7 @@ io.on('connection', (socket) => {
     const { room, playerId } = currentCtx(socket);
     if (!room?.game || room.game.status !== 'matchEnd') return;
     if (playerId !== room.hostId) return;
+    room.continueVotes = null;
     manager.rematch(room);
     io.to(room.code).emit('game:started');
     broadcastGame(room);

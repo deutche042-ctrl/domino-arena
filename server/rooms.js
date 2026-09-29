@@ -7,6 +7,8 @@ const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no confusing chars
 // Per-turn time limit shared with clients. The enforcement timer itself lives in
 // server.js (the engine must stay timer-free); this is the single source of truth.
 export const TURN_MS = Math.max(1000, Number(process.env.TURN_TIME_MS) || 30000);
+// Lobby-selectable per-turn limits (server.js reads config.turnMs || TURN_MS)
+const TURN_MS_OPTIONS = [15000, 30000, 60000];
 
 function makeCode() {
   let c = '';
@@ -41,6 +43,7 @@ export class RoomManager {
     if (!room) return { error: 'الغرفة غير موجودة. تأكد من صحة الكود.' };
     // Reconnect by token?
     if (token) {
+      if (this.isKicked(room, token)) return { error: 'تم طردك من هذه الغرفة.' };
       const existing = room.players.find(p => p.token === token);
       if (existing) {
         if (name && name !== existing.name) existing.name = name.slice(0, 16);
@@ -50,8 +53,31 @@ export class RoomManager {
     if (room.state !== 'lobby') return { error: 'بدأت اللعبة بالفعل في هذه الغرفة.' };
     if (room.players.length >= room.config.maxPlayers) return { error: 'الغرفة ممتلئة بالكامل.' };
     const player = this._newPlayer(name);
+    if (this.isKicked(room, player.id)) return { error: 'تم طردك من هذه الغرفة.' };
     room.players.push(player);
     return { room, player };
+  }
+
+  /** Host-only kick: removes the player and refuses rejoin attempts (by id or
+   *  token) for the life of the room. Not for bots (use removeBot) or the host. */
+  kickPlayer(room, playerId) {
+    const target = room.players.find(p => p.id === playerId);
+    if (!target) return { error: 'اللاعب مش موجود في الغرفة.' };
+    if (target.isBot) return { error: 'استخدم زرار حذف البوت.' };
+    if (target.id === room.hostId) return { error: 'مينفعش تطرد نفسك!' };
+    room.kicked = room.kicked || new Set();
+    room.kicked.add(target.id);
+    if (target.token) room.kicked.add(target.token);
+    room.players = room.players.filter(p => p.id !== playerId);
+    if (room.players.length === 0 || !room.players.some(p => !p.isBot)) {
+      this.rooms.delete(room.code);
+      return { empty: true };
+    }
+    return { kicked: target };
+  }
+
+  isKicked(room, idOrToken) {
+    return !!room.kicked && room.kicked.has(idOrToken);
   }
 
   getRoom(code) { return this.rooms.get((code || '').toUpperCase().trim()); }
@@ -103,6 +129,19 @@ export class RoomManager {
     this.startGame(room);
   }
 
+  /** Sanitized config for lobby:config — turnMs clamped to the allowed choices. */
+  sanitizeConfig(cfg = {}) {
+    const out = {};
+    if (cfg.variant) out.variant = String(cfg.variant);
+    if (cfg.targetScore != null) out.targetScore = Math.max(10, Math.min(500, Number(cfg.targetScore) || 100));
+    if (cfg.maxPlayers != null) out.maxPlayers = Math.max(2, Math.min(4, Number(cfg.maxPlayers) || 4));
+    if (cfg.turnMs != null) {
+      const want = Number(cfg.turnMs);
+      out.turnMs = TURN_MS_OPTIONS.includes(want) ? want : TURN_MS;
+    }
+    return out;
+  }
+
   removePlayer(room, playerId) {
     room.players = room.players.filter(p => p.id !== playerId);
     // Bots alone can't keep a room alive.
@@ -136,9 +175,17 @@ export class RoomManager {
     view.isBot = Object.fromEntries(room.players.map(p => [p.id, !!p.isBot]));
     view.roomCode = room.code;
     view.hostId = room.hostId;
+    // advisory continue-votes (nextHand/rematch): human vote count + humans seated
+    if (room.continueVotes) {
+      const humans = room.players.filter(p => !p.isBot).length;
+      for (const kind of ['nextHand', 'rematch']) {
+        const set = room.continueVotes[kind];
+        if (set?.size) view[`${kind}Votes`] = { count: set.size, humans };
+      }
+    }
     // Turn countdown (server clock epoch ms). serverNow lets clients correct for clock skew.
     view.turnEndsAt = room.turnEndsAt || null;
-    view.turnMs = TURN_MS;
+    view.turnMs = room.config.turnMs || TURN_MS;
     view.serverNow = Date.now();
     return view;
   }
