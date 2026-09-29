@@ -114,6 +114,10 @@ function createBoard(canvas, cbs) {
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   $(`screen-${name}`).classList.add('active');
+  // Self-heal: whenever the lobby becomes visible the code box must show a
+  // code — repaint from the freshest known source in case an earlier paint
+  // was missed, stale, or rendered while roomCode was still unset.
+  if (name === 'lobby') paintLobbyCode(lastLobbyState);
   if (name === 'game' && !board) {
     board = createBoard($('table3d'), { onMarkerClick, onBoardMiss, onBoneyardClick: onBoneyardDraw });
   }
@@ -279,7 +283,7 @@ function afterJoin(res, name) {
     localStorage.setItem('domino_last_code', roomCode);
   } catch { /* the room still works for this tab */ }
   try { history.replaceState(null, '', '?room=' + roomCode); } catch { /* sandboxed */ }
-  $('lobbyCode').textContent = roomCode || '----';
+  paintLobbyCode();
   const chip = $('chatRoomChip');
   if (chip) chip.textContent = 'غرفة ' + roomCode;
   if (res.lobby) {
@@ -290,11 +294,20 @@ function afterJoin(res, name) {
 }
 
 // ══════════ lobby ══════════
+// The room code is the one thing that must never paint empty — without it the
+// lobby is useless (nobody can share/join). Every paint path funnels through
+// here with a fallback chain, and showScreen('lobby') re-heals it, so a missed
+// or stale echo can never leave the box blank.
+function paintLobbyCode(st) {
+  const el = $('lobbyCode');
+  if (!el) return;
+  el.textContent = (st && st.code) || roomCode || (lastLobbyState && lastLobbyState.code) || '----';
+}
 function renderLobby(st) {
   if (!st) return;
   lastLobbyState = st;
   isHost = st.hostId === myId;
-  $('lobbyCode').textContent = st.code || roomCode || '----';
+  paintLobbyCode(st);
   const countEl = $('playerCount');
   if (countEl) countEl.textContent = `${(st.players || []).length}/${st.config?.maxPlayers ?? 4}`;
   // K2.S11/K3.C12: make spectators visible in the lobby.
@@ -1465,8 +1478,12 @@ function initGameUI() {
   $('btnSort').textContent = SORT_LABELS[sortMode];
   $('btnSort').title = 'ترتيب اليد: ' + SORT_LABELS[sortMode];
   // K3.C2: hand the camera back to auto-fit (no-op on the 2D board).
-  $('btnRecenter').onclick = () => { board?.recenter?.(); sfx.click(); };
-  $('btnSettings').onclick = () => { openSettings(); sfx.click(); };
+  // btnRecenter/btnSettings markup is not shipped yet — guard so a missing
+  // element can never abort initGameUI and orphan every handler after it.
+  const btnRecenter = $('btnRecenter');
+  if (btnRecenter) btnRecenter.onclick = () => { board?.recenter?.(); sfx.click(); };
+  const btnSettings = $('btnSettings');
+  if (btnSettings) btnSettings.onclick = () => { openSettings(); sfx.click(); };
   $('btnNextHand').onclick = () => socket.emit('game:nextHand');
   $('btnRematch').onclick = () => socket.emit('game:rematch');
   $('btnNextHandVote').onclick = () => { socket.emit('game:nextHandVote'); sfx.click(); };
