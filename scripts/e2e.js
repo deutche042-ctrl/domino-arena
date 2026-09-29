@@ -38,6 +38,14 @@ const bad = await emit(solo, 'room:join', { code: 'ZZZZ', name: 'X' });
 ok(bad.ok === false, 'bad room code rejected');
 solo.close();
 
+// ── join brute-force guard: 5 failures per socket, then lockout ──
+const brute = await client();
+let lastJoin = null;
+for (let i = 0; i < 6; i++) lastJoin = await emit(brute, 'room:join', { code: 'ZZZZ', name: 'X' });
+ok(lastJoin && lastJoin.ok === false && /محاولات كتير/.test(lastJoin.error || ''),
+  'join brute-force lockout after repeated failures');
+brute.close();
+
 // ── full game flow ──
 const a = await client();
 const b = await client();
@@ -138,6 +146,10 @@ emit(a, 'voice:signal', { to: jr.playerId, data: { description: { type: 'offer',
 const sig = await relayed;
 ok(sig && sig.from === cr.playerId && sig.data.description?.type === 'offer', 'signaling relayed to the target peer');
 
+const noOversize = once(b, 'voice:signal', 700);
+emit(a, 'voice:signal', { to: jr.playerId, data: { description: { type: 'offer', sdp: 'x'.repeat(20000) } } });
+ok(await noOversize === null, 'oversized voice signal is not relayed');
+
 const rosterLeftP = new Promise(r => a.once('voice:state', r));
 b.emit('voice:leave');
 const rosterLeft = await rosterLeftP;
@@ -205,7 +217,8 @@ ghost.close();
 const c = await client();
 const d = await client();
 const ncr = await emit(c, 'room:create', { name: 'Host' });
-ok((await emit(d, 'room:join', { code: ncr.code, name: 'Guest' })).ok, 'guest joined normal room');
+const dj = await emit(d, 'room:join', { code: ncr.code, name: 'Guest' });
+ok(dj.ok, 'guest joined normal room');
 const addBotRes = await emit(c, 'lobby:addBot', {});
 const botPlayer = addBotRes.lobby?.players?.at(-1);
 ok(addBotRes.ok && addBotRes.lobby.players.length === 3 && botPlayer.isBot === true,
@@ -213,6 +226,19 @@ ok(addBotRes.ok && addBotRes.lobby.players.length === 3 && botPlayer.isBot === t
 ok(!(await emit(d, 'lobby:addBot', {})).ok, 'non-host cannot add bots');
 ok((await emit(c, 'lobby:removeBot', { playerId: botPlayer.id })).ok, 'host removed the bot');
 ok((await emit(c, 'lobby:addBot', { level: 'hard' })).ok, 're-added a bot with hard level');
+
+// ── host chat mute: muted player's messages are dropped, unmute restores ──
+ok(!(await emit(d, 'lobby:chatMute', { pid: ncr.playerId, muted: true })).ok, 'non-host cannot chat-mute');
+ok((await emit(c, 'lobby:chatMute', { pid: dj.playerId, muted: true })).ok, 'host muted guest chat');
+const noMsg = once(c, 'chat:msg', 700);
+d.emit('chat:send', { text: 'spam' });
+ok(await noMsg === null, 'chat-muted guest message is dropped');
+ok((await emit(c, 'lobby:chatMute', { pid: dj.playerId, muted: false })).ok, 'host unmuted guest chat');
+const gotMsg = once(c, 'chat:msg', 2000);
+d.emit('chat:send', { text: 'hello again' });
+const unmuted = await gotMsg;
+ok(unmuted && unmuted.text === 'hello again', 'unmuted guest message delivered');
+
 d.emit('lobby:ready', { ready: true });
 await sleep(60);
 const cStatePromise = once(c, 'game:state');   // register BEFORE start: server broadcasts before the ack
@@ -221,6 +247,20 @@ const cState = await cStatePromise;
 ok(cState && cState.players.length === 3, 'game started with the bot seated (host + guest + bot)');
 
 a.close(); b2.close(); c.close(); d.close();
+
+// ── idle lobby sweeper (runs only when the server has a short LOBBY_TTL_MS) ──
+if (process.env.E2E_TTL) {
+  const t = await client();
+  const tcr = await emit(t, 'room:create', { name: 'IdleHost' });
+  ok(tcr.ok, 'ttl: idle lobby room created');
+  const closed = once(t, 'lobby:closed', 20000);
+  const gone = await closed;
+  ok(gone && gone.reason, 'ttl: idle lobby swept with lobby:closed notice');
+  const rejoinT = await emit(t, 'room:join', { code: tcr.code, name: 'IdleHost' });
+  ok(rejoinT.ok === false, 'ttl: swept room no longer joinable');
+  t.close();
+}
+
 clearTimeout(watchdog);
 console.log(`\n  E2E PASSED — ${passed} checks ✓\n`);
 process.exit(0);

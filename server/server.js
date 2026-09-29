@@ -58,6 +58,7 @@ const manager = new RoomManager();
 const sessions = new Map();
 
 function broadcastLobby(room) {
+  room.lastActivityAt = Date.now();
   io.to(room.code).emit('lobby:state', manager.lobbyState(room));
 }
 
@@ -218,7 +219,25 @@ function deleteRoom(room) {
   manager.rooms.delete(room.code);
 }
 
+// ---- idle lobby sweeper ----
+// A lobby nobody touches forever pins memory (matters on the APK host phone).
+// Sweep lobbies with no lobby activity (config/ready/chat/join) for LOBBY_TTL_MS.
+// Playing rooms are excluded — they have their own all-disconnected cleanup.
+const LOBBY_TTL_MS = Math.max(5000, Number(process.env.LOBBY_TTL_MS) || 30 * 60 * 1000);
+setInterval(() => {
+  const now = Date.now();
+  for (const room of [...manager.rooms.values()]) {
+    if (room.state !== 'lobby') continue;
+    if (now - (room.lastActivityAt || room.createdAt) < LOBBY_TTL_MS) continue;
+    io.to(room.code).emit('lobby:closed', { reason: 'اتقفلت الغرفة بسبب الخمول الطويل' });
+    deleteRoom(room);
+  }
+}, Math.min(60000, Math.max(1000, LOBBY_TTL_MS / 4))).unref();
+
 io.on('connection', (socket) => {
+  // failed room:join timestamps for the per-socket brute-force guard above
+  let joinFails = [];
+
   // ---- lobby ----
 
   socket.on('room:create', ({ name, vsBots, botLevel, botDelayMs } = {}, cb) => {
@@ -256,8 +275,19 @@ io.on('connection', (socket) => {
   });
 
   socket.on('room:join', ({ code, name, token } = {}, cb) => {
+    // 4-char room codes are brute-forceable — cap failed attempts per socket
+    // (5 failures / 10 s rolling window; success resets the counter).
+    const now = Date.now();
+    joinFails = joinFails.filter(t => now - t < 10000);
+    if (joinFails.length >= 5) {
+      return cb?.({ ok: false, error: 'محاولات كتير أوي — استنى شوية وجرب تاني.' });
+    }
     const res = manager.joinRoom(code, name, token);
-    if (res.error) return cb?.({ ok: false, error: res.error });
+    if (res.error) {
+      joinFails.push(now);
+      return cb?.({ ok: false, error: res.error });
+    }
+    joinFails = [];
     const { room, player } = res;
     // If this player was attached to another socket (refresh), detach the old one
     if (player.socketId && player.socketId !== socket.id) {
@@ -293,6 +323,7 @@ io.on('connection', (socket) => {
       p.voice = false;
       p.voiceMuted = false;
       p.hostMuted = false;
+      p.chatMuted = false; // leaving is a full cleanup
       if (room.state === 'lobby') {
         const res = manager.removePlayer(room, p.id);
         if (!res.empty) broadcastLobby(room);
@@ -371,6 +402,23 @@ io.on('connection', (socket) => {
     if (removed) broadcastLobby(room);
   });
 
+  // Host-only chat mute: a chat-muted player's chat:send is silently dropped
+  // until the host lifts it (or the player leaves/disconnects — full cleanup).
+  socket.on('lobby:chatMute', ({ pid, muted } = {}, cb) => {
+    const { room, playerId } = currentCtx(socket);
+    if (!room) return cb?.({ ok: false, error: 'لازم تكون جوه غرفة.' });
+    if (playerId !== room.hostId) return cb?.({ ok: false, error: 'فقط المضيف يمكنه كتم الشات.' });
+    if (room.state !== 'lobby') return cb?.({ ok: false, error: 'الكتم متاح في غرفة الانتظار بس.' });
+    if (typeof pid !== 'string') return cb?.({ ok: false, error: 'لازم تحدد لاعب.' });
+    const target = room.players.find(p => p.id === pid);
+    if (!target) return cb?.({ ok: false, error: 'اللاعب مش موجود في الغرفة.' });
+    if (target.isBot) return cb?.({ ok: false, error: 'البوتات أصلاً مش بتتكلم.' });
+    if (target.id === room.hostId) return cb?.({ ok: false, error: 'مينفعش تكتم نفسك.' });
+    target.chatMuted = !!muted;
+    cb?.({ ok: true });
+    broadcastLobby(room);
+  });
+
   socket.on('game:start', (_, cb) => {
     const { room, playerId } = currentCtx(socket);
     if (!room) return;
@@ -440,6 +488,8 @@ io.on('connection', (socket) => {
     if (++chatCount > 5) return;
     const p = room.players.find(p => p.id === playerId);
     if (!p) return;
+    room.lastActivityAt = now; // chat keeps an idle lobby alive
+    if (p.chatMuted) return; // host-muted chat — silently dropped
     const msg = { from: p.name, pid: p.id, at: now };
     if (typeof text === 'string' && text.trim()) msg.text = text.trim().slice(0, 200);
     else if (typeof emoji === 'string' && emoji.length <= 8) msg.emoji = emoji;
@@ -520,6 +570,10 @@ io.on('connection', (socket) => {
   socket.on('voice:signal', ({ to, data } = {}) => {
     const { room, playerId } = currentCtx(socket);
     if (!room || typeof to !== 'string' || !data) return;
+    // Payload cap: real SDP/ICE messages are a few KB; anything larger is abuse.
+    let size = 0;
+    try { size = JSON.stringify(data).length; } catch { return; }
+    if (size > 16384) return;
     const from = room.players.find(p => p.id === playerId);
     const target = room.players.find(p => p.id === to);
     // Both ends must be voice participants — no signaling to outsiders.
@@ -546,6 +600,7 @@ io.on('connection', (socket) => {
     p.voice = false;
     p.voiceMuted = false;
     p.hostMuted = false;
+    p.chatMuted = false; // disconnect is a full cleanup — rejoiners start clean
     if (hadVoice) broadcastVoice(room);
 
     // In lobby: remove the player after grace period (allows quick page refresh)

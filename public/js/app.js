@@ -220,6 +220,23 @@ function renderLobby(st) {
       rm.onclick = () => { socket.emit('lobby:removeBot', { playerId: p.id }); sfx.click(); };
       li.appendChild(rm);
     }
+    // host-only chat mute for human players (not himself)
+    if (isHost && !p.isBot && p.id !== myId) {
+      const cm = document.createElement('button');
+      cm.className = 'bot-remove chat-mute' + (p.chatMuted ? ' muted' : '');
+      cm.textContent = p.chatMuted ? '💬✕' : '💬';
+      cm.title = p.chatMuted ? 'فك كتم الشات عنه' : 'كتم شاته (للجميع)';
+      cm.setAttribute('aria-label', cm.title);
+      cm.onclick = async () => {
+        cm.disabled = true;
+        try {
+          const res = await emit('lobby:chatMute', { pid: p.id, muted: !p.chatMuted });
+          if (res && !res.ok) lobbyError(res.error);
+          else sfx.click();
+        } finally { cm.disabled = false; }
+      };
+      li.appendChild(cm);
+    }
     list.appendChild(li);
   }
 
@@ -1613,6 +1630,11 @@ function startSocket(base) {
     view = st; isHost = st.hostId === myId; renderGame();
   });
   socket.on('chat:msg', onChatMsg);
+  socket.on('lobby:closed', () => {
+    // the server swept this idle lobby — back home with a note
+    leaveRoom();
+    homeError('اتقفلت الغرفة بسبب الخمول الطويل.');
+  });
   socket.on('error', (e) => {
     setBanner('⚠ ' + (e.message || 'خطأ'), '');
   });

@@ -122,6 +122,7 @@ export class RoomManager {
       config: room.config,
       players: room.players.map(p => ({
         id: p.id, name: p.name, ready: p.ready, connected: p.connected, isBot: !!p.isBot,
+        chatMuted: !!p.chatMuted,
       })),
     };
   }

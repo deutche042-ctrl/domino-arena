@@ -334,6 +334,9 @@ input:focus, select:focus { border-color: var(--accent); }
   border-radius: 6px; line-height: 1;
 }
 .bot-remove:hover { background: rgba(255, 92, 122, .12); }
+.chat-mute { color: #94a3b8; }
+.chat-mute:hover { background: rgba(148, 163, 184, .15); }
+.chat-mute.muted { color: var(--danger); }
 #screen-home .home-foot {
   padding: 8px 18px; border-radius: 999px;
   background: rgba(8, 13, 28, .55);
