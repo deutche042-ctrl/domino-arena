@@ -70,6 +70,13 @@ generated copies). `server.js` must stay esbuild-safe: it already handles being 
 `mobile/launcher.cjs` is CJS by design (embedded runtime), never uses `process.exit`, and never
 writes to its own directory.
 
+`sync.mjs` step 1 clears `www/` before copying. In sandboxes that shim `rmSync` into a
+trash-then-delete, that can abort part-way and leave a half-deleted tree which then breaks every
+later run; `removeTree()` retries bottom-up and warns instead of throwing, so the copy always
+proceeds. If `cap sync android` (step 4) still fails on a locked generated dir, deleting
+`mobile/android/capacitor-cordova-android-plugins` first usually unblocks it — or copy `mobile/www/*`
+into `mobile/android/app/src/main/assets/public/` by hand (that is all the copy step does).
+
 ## Architecture
 
 Strict layering — dependencies point one way only: `server → engine`. Never the reverse, and never IO in the engine.
@@ -109,16 +116,21 @@ Three.js (0.160.0), socket.io-client (4.8.1) and the Cairo/Reem Kufi fonts are *
 reintroduce CDN URLs. No npm client deps. Screens are the three `<section class="screen">` elements:
 home → lobby → game.
 
-- `js/app.js` — UI orchestration + socket client: screen switching, scoreboard, hand rendering, modals, chat, voice panel, confetti. Talks to server only via the socket events above.
-- `js/board3d.js` — Three.js board: snake layout with L/R ends plus U/D spinner arms, auto-fit camera, click targets for ends (`onMarkerClick`).
+- `js/app.js` — UI orchestration + socket client: screen switching, scoreboard, hand rendering, modals, chat, voice panel, confetti. Talks to server only via the socket events above. Also owns the home stats (`loadStats`/`recordMatchResult`), the bot level/personality pickers, the tile-theme picker, the perf overlay (`P` key), the score roll-up (`rollNumber` + `_scorePrev`), and `createBoard()`.
+- `js/board3d.js` — Three.js board: snake layout with L/R ends plus U/D spinner arms, auto-fit camera, click targets for ends (`onMarkerClick`). Resources are pooled (see F3.1 below); `setTheme(name)` repaints in a new skin; `setMyTurn(b)`/`setCanDraw(b)` drive the centre turn ring and the boneyard spotlight; `stats()` feeds the perf overlay.
+- `js/domboard.js` — **F4.5 2D fallback.** When WebGL is unavailable (or `new Board3D` throws), `createBoard()` in `app.js` builds a `DomBoard` instead: same duck-typed API (`sync`/`showMarkers`/`endFromPoint`/…) so the game stays fully playable as a plain DOM table. Also exports `webglAvailable()` (never throws) and the pure `buildChain`/`chainEnds` helpers. Keep the API surface in step with `Board3D` when adding methods.
 - `js/home3d.js` — animated Three.js home-screen backdrop.
 - `js/voice.js` — `VoiceChat` (WebRTC mesh client). The file's header comment is the authoritative design note — read it before touching signaling. Key points: signaling over the game socket, Google STUN + public OpenRelay TURN (TURN is what makes it work behind carrier-grade NAT), "perfect negotiation" with politeness by player-id order, one ICE restart then one rebuild (never a rebuild loop), rosters arriving before `setSelf()` are buffered. Exposes `onSelf`/`onPeers`/`onSpeaking`/`onError`/`onInfo` hooks consumed by `app.js`.
-- `js/tiles.js` — canvas-painted tile faces/backs/felt textures (data-URL cached).
+- `js/tiles.js` — canvas-painted tile faces/backs/felt textures (data-URL cached). F4.3: a `THEMES` registry paints four skins (`classic`/`neon`/`wood`/`piano`); `setTheme(name)` clears the data-URL cache so the next paint uses the new skin. The board keys its texture cache by theme, so the pool stays bounded across switches.
 - `js/sfx.js` — WebAudio-synthesized sounds (no audio files).
-- `css/style.css` — all styling, single file.
+- `css/style.css` — all styling, single file. The tail holds the F4.5 `.board2d` fallback table styles.
+
+**Resource-pooling rules (F3.1) — read before touching the board.** The tile geometry (`_geo`), hit-area geometry/material (`_hitBoxGeo`/`_hitMatC`), side material, and the pooled face/back materials (`_matCache`/`_backMatC`) are **shared**. `_disposeTileMesh` deliberately skips them — disposing one would blank every tile using it. `dispose()` is the only place that may release them, and it is idempotent. The `engine/` `attachableEnds()` cache (F3.2) is a `WeakMap`-keyed revision counter so the engine stays pure and serializable.
+
+**Reduced motion (F4.4).** `board3d.js` reads `prefers-reduced-motion: reduce` once at construction and flattens the arc/drop flourishes and the centre pulse; `app.js`'s `prefersReducedMotion()` makes score roll-ups snap. Keep new animation behind that gate.
 
 **Cache-busting convention:** every client asset is imported with a `?v=N` query
-(`js/app.js?v=32`, `./board3d.js?v=16`, `./voice.js?v=2`, `css/style.css?v=30`). When you edit a client
+(`js/app.js?v=46`, `./board3d.js?v=22`, `./domboard.js?v=1`, `./tiles.js?v=13`, `./voice.js?v=4`, `css/style.css?v=43`). When you edit a client
 module, bump its tag in `index.html` and in every importer's `import` line — otherwise browsers keep
 running the stale module and your change appears to do nothing.
 

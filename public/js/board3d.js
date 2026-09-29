@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { tileFaceCanvas, tileBackCanvas, feltCanvas, setTheme as setTileTheme, getTheme } from './tiles.js?v=12';
+import { tileFaceCanvas, tileBackCanvas, feltCanvas, setTheme as setTileTheme, getTheme } from './tiles.js?v=13';
 
 const TILE_W = 1, TILE_L = 2, TILE_H = 0.42, GAP = 0.07;
 const MAX_X = 9.5;              // table boundary along X before turning

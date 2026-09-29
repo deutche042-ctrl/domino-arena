@@ -40,6 +40,10 @@ cloudflared tunnel --url http://localhost:3000         # public URL
 - Server-authoritative (opponent hands never leave the server), reconnect with token
 - Live scoreboard, turn glow, score toasts, synthesized sound effects
 - Chat + floating emoji reactions, confetti podium, rematch
+- 4 tile skins (classic / neon / wood / piano) and 3 bot personalities (balanced / aggressive / defensive) across 4 skill levels, including an "expert" with a one-ply lookahead
+- Centre-pulse turn hint, arced tile placement, animated score roll-up — all respecting `prefers-reduced-motion`
+- Home stats (`localStorage`): matches, wins, win streak, average/best score, recent form
+- Graceful 2D DOM fallback table when WebGL is unavailable — the game stays fully playable on weak devices
 
 ## Play on phones, offline (Android APK)
 
