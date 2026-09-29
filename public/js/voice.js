@@ -1,4 +1,4 @@
-// js/voice.js — WebRTC mesh voice chat, v2.
+// js/voice.js — WebRTC mesh voice chat, v3.
 //
 // Architecture:
 // - Signaling rides the game's Socket.IO connection (`voice:signal` is relayed
@@ -23,6 +23,10 @@
 // - Speaking detection: one shared AudioContext, an AnalyserNode per stream
 //   (remote + own mic), polled for RMS with hysteresis → onSpeaking callbacks.
 //   Suppressed while effectively muted (self mute or host mute).
+// - Recovery (v3): a dead mic track is re-captured once and hot-swapped into
+//   every live sender via replaceTrack (no renegotiation); a peer stuck in
+//   'connecting' past a deadline is rebuilt once; autoplay-blocked remote
+//   audio is surfaced as playBlocked so the UI can offer a gesture resume.
 
 const RTC_CONFIG = {
   iceServers: [
@@ -51,6 +55,8 @@ const SPEAK_OFF = 0.02;          // lower threshold to go dark (hysteresis)
 const POLL_MS = 180;             // speaking-detection poll interval
 const JOIN_ACK_TIMEOUT = 5000;   // how long to wait for the voice:join ack
 const RECOVERY_DELAY = 4000;     // grace period before rebuilding a failed peer
+const CONNECT_TIMEOUT_MS = 12000; // deadline before a stuck peer is rebuilt
+const ICE_ERROR_WARN = 3;        // candidate errors before we warn about TURN
 
 const sameId = (a, b) => String(a) === String(b);
 
@@ -62,9 +68,9 @@ export class VoiceChat {
    *        `voice:hostMute` (ack), `voice:signal` { to, data }.
    * @param hooks   optional callbacks (all invoked with ?.)
    *   onSelf(state)  -> { joined, muted, hostMuted, speaking, status }
-   *                     status: 'idle' | 'requesting' | 'connecting' | 'live'
+   *                     status: 'idle' | 'requesting' | 'connecting' | 'live' | 'failed'
    *   onPeers(list)  -> [{ id, name, muted, hostMuted, speaking, mutedLocal,
-   *                       volume, conn, me:false }]
+   *                       volume, conn, playBlocked, me:false }]
    *                     conn: 'connecting' | 'connected' | 'failed' | 'closed'
    *   onSpeaking(pid, on)
    *   onError(msg)   -> Arabic, fatal-ish (mic denied, unsupported, join failed)
@@ -80,7 +86,7 @@ export class VoiceChat {
     this.joined = false;
     this._joinPromise = null;    // guards concurrent join()/rejoin()
     this._abortJoin = false;     // set by leave() while a join is in flight
-    this.status = 'idle';        // 'idle' | 'requesting' | 'connecting' | 'live'
+    this.status = 'idle';        // 'idle' | 'requesting' | 'connecting' | 'live' | 'failed'
 
     this._muted = false;         // self mute
     this._hostMuted = false;     // server-enforced host mute
@@ -97,11 +103,23 @@ export class VoiceChat {
     this.audioBox = null;        // hidden container for remote <audio> elements
     this.ac = null;              // shared AudioContext for speaking detection
     this.selfAnalyser = null;    // { analyser, buf } for the own mic
+    this.selfSrcNode = null;     // MediaStreamAudioSourceNode feeding selfAnalyser
     this.selfSpeaking = false;
     this._pollTimer = null;
+    this._failNotified = false;  // one 'voice failed' error per join episode
+    this._micRecovering = false; // mic re-capture already in flight
 
     socket.on('voice:state', (roster) => this._applyRoster(roster || []));
     socket.on('voice:signal', (msg) => { this._onSignal(msg); });
+
+    // A device change can be the OS handing back (or taking) the mic — if our
+    // track died with the old device, this is our chance to recover it.
+    try {
+      navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+        const t = this.stream?.getAudioTracks?.()[0];
+        if (t && t.readyState === 'ended') this._recoverMic();
+      });
+    } catch { /* older browsers without the API — nothing to hook */ }
   }
 
   // ── public getters ──────────────────────────────────────────────────────
@@ -157,6 +175,7 @@ export class VoiceChat {
     this._pttTalking = false;
     this.selfSpeaking = false;
     this.status = 'idle';
+    this._failNotified = false;
     this._emitSelf();
     this.hooks.onPeers?.([]);
   }
@@ -171,6 +190,73 @@ export class VoiceChat {
     } finally {
       this._joinPromise = null;
     }
+  }
+
+  /** Ask for the mic and arm per-track death detection. Never throws. */
+  async _captureMic() {
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (e) {
+      this.stream = null;
+      return { ok: false, error: this._gumError(e) };
+    }
+    for (const t of this.stream.getAudioTracks()) {
+      t.onended = () => this._recoverMic();
+    }
+    return { ok: true };
+  }
+
+  /**
+   * The live mic track died (phone call, OS backgrounding, device unplug).
+   * One automatic re-capture; the new track is hot-swapped into every live
+   * sender via replaceTrack, so no renegotiation is needed. If the re-capture
+   * fails we leave voice cleanly instead of silently broadcasting silence.
+   */
+  async _recoverMic() {
+    if (!this.joined || this._micRecovering) return;
+    this._micRecovering = true;
+    try {
+      this.hooks.onInfo?.('المايك اتقطع — بنحاول نرجّعه…');
+      const got = await this._captureMic();       // old stream: ended tracks only
+      if (!got.ok) throw new Error(got.error);
+      const nt = this.stream.getAudioTracks()[0];
+      if (!nt) throw new Error('empty stream');
+      for (const peer of this.peers.values()) {
+        for (const sender of peer.pc.getSenders()) {
+          if (sender.track && sender.track.kind === 'audio') {
+            try { await sender.replaceTrack(nt); } catch { /* peer closing */ }
+          }
+        }
+      }
+      // Rebuild the self analyser around the new stream.
+      try { this.selfSrcNode?.disconnect(); } catch {}
+      this.selfSrcNode = null;
+      this.selfAnalyser = null;
+      this._watchSelf();
+      this._applyTracks();
+      this.hooks.onInfo?.('المايك رجع يشتغل.');
+    } catch (e) {
+      this._failJoinCleanup('المايك اتقطع ومش قادرين نرجّعه — دوس زرار المايك تاني.');
+    } finally {
+      this._micRecovering = false;
+    }
+  }
+
+  /** Common teardown when a join attempt fails — back to a clean idle state. */
+  _failJoinCleanup(msg) {
+    this.joined = false;
+    this._teardownPeers();
+    this._stopStream();
+    this._stopPoll();
+    this._hostMuted = false;
+    this.selfSpeaking = false;
+    this.status = 'idle';
+    this._failNotified = false;
+    this._emitSelf();
+    this.hooks.onPeers?.([]);
+    if (msg) this.hooks.onError?.(msg);
   }
 
   /**
@@ -194,22 +280,27 @@ export class VoiceChat {
       // Emit immediately so the UI can show a spinner while we ask for the mic.
       this.status = 'requesting';
       this._emitSelf();
-      try {
-        this.stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        });
-      } catch (e) {
-        this.stream = null;
+      const got = await this._captureMic();
+      if (!got.ok) {
         this.status = 'idle';
         this._emitSelf();
-        const msg = this._gumError(e);
-        this.hooks.onError?.(msg);
-        return { ok: false, error: msg };
+        this.hooks.onError?.(got.error);
+        return { ok: false, error: got.error };
       }
     } else {
       // Old PCs point at the dead transport — rebuild the mesh from the next roster.
       this._teardownPeers();
       this.hooks.onPeers?.([]);
+      // A mic track killed while we were away (phone call, OS backgrounding)
+      // must be re-captured — rejoining with an ended track broadcasts silence.
+      const t = this.stream?.getAudioTracks?.()[0];
+      if (!t || t.readyState === 'ended') {
+        const got = await this._captureMic();
+        if (!got.ok) {
+          this._failJoinCleanup(got.error);
+          return { ok: false, error: got.error };
+        }
+      }
       this.status = 'connecting';
       this._emitSelf();
       this.hooks.onInfo?.('الاتصال اتقطع — بنرجّع الصوت…');
@@ -238,20 +329,12 @@ export class VoiceChat {
       // Server refused (or timed out) — drop everything voice-related.
       const msg = (res && res.error) ||
         (isRejoin ? 'الصوت اتقطع — شغّل المايك تاني.' : 'معلش — السيرفر رفض فتح المايك. جرّب تاني.');
-      this.joined = false;
-      this._teardownPeers();
-      this._stopStream();
-      this._stopPoll();
-      this._hostMuted = false;
-      this.selfSpeaking = false;
-      this.status = 'idle';
-      this._emitSelf();
-      this.hooks.onPeers?.([]);
-      this.hooks.onError?.(msg);
+      this._failJoinCleanup(msg);
       return { ok: false, error: msg };
     }
 
     this.joined = true;
+    this._failNotified = false;
     if (!isRejoin) this._muted = this.ptt; // push-to-talk joins muted
     this.status = 'connecting';
     this._applyTracks();       // re-assert track state (host mute wins over the flag)
@@ -413,6 +496,20 @@ export class VoiceChat {
     });
   }
 
+  /**
+   * User-gesture unblock for autoplay-restricted remote audio (iOS/Safari are
+   * the strictest). Must be called from a real click/tap handler. Clears each
+   * peer's playBlocked flag as its element starts sounding.
+   */
+  resumeAudio() {
+    for (const peer of this.peers.values()) {
+      if (!peer.audio) continue;
+      peer.audio.play().then(() => {
+        if (peer.playBlocked) { peer.playBlocked = false; this._emitPeers(); }
+      }).catch(() => { /* still blocked — the button stays */ });
+    }
+  }
+
   // ── roster (server truth: who's in voice, who's muted, who's host-muted) ──
 
   _applyRoster(roster) {
@@ -500,11 +597,19 @@ export class VoiceChat {
   _settleStatus() {
     if (!this.joined || this.status !== 'connecting') return;
     if (this.peers.size === 0) { this._maybeLive(); return; }
-    const pending = [...this.peers.values()].some((p) => p.conn === 'connecting');
-    if (!pending) {
-      this.status = 'live'; // nobody left connecting — per-peer conns show the truth
-      this._emitSelf();
+    const conns = [...this.peers.values()].map((p) => p.conn);
+    if (conns.some((c) => c === 'connecting')) return;
+    if (conns.some((c) => c === 'connected')) {
+      this.status = 'live'; // at least one real link — per-peer conns show the rest
+    } else {
+      // every peer failed/closed and nothing is left connecting — say so
+      this.status = 'failed';
+      if (!this._failNotified) {
+        this._failNotified = true;
+        this.hooks.onError?.('تعذّر توصيل الصوت — الشبكة بتمنع الاتصال المباشر. جرّب تاني.');
+      }
     }
+    this._emitSelf();
   }
 
   // ── peer connections ────────────────────────────────────────────────────
@@ -523,6 +628,11 @@ export class VoiceChat {
       audio: null,
       analyser: null,
       buf: null,
+      srcNode: null,
+      playBlocked: false,     // remote audio element blocked by autoplay policy
+      iceErrors: 0,           // onicecandidateerror counter (TURN diagnostics)
+      iceWarned: false,
+      connectTimer: null,     // deadline before a never-connecting peer is rebuilt
       ignoreOffer: false,
       makingOffer: false,
       polite: String(this.myId) < String(pid), // deterministic tie-break — no glare
@@ -542,6 +652,36 @@ export class VoiceChat {
     pc.onicecandidate = (e) => {
       if (e.candidate) this._signal(pid, { candidate: e.candidate.toJSON() });
     };
+
+    // Repeated candidate errors while never reaching 'connected' almost always
+    // mean the TURN relay is unreachable — surface it instead of hanging mute.
+    pc.onicecandidateerror = () => {
+      if (peer.conn === 'connected') return;   // cosmetic errors on a live link
+      peer.iceErrors++;
+      if (peer.iceErrors >= ICE_ERROR_WARN && !peer.iceWarned) {
+        peer.iceWarned = true;
+        this.hooks.onInfo?.('صعب الوصول لخادم ترحيل الصوت — ممكن الصوت ميشتغلش بين شبكات مختلفة.');
+      }
+    };
+
+    // Don't leave the UI spinning forever when a handshake stalls silently
+    // (DTLS hang, blocked relay port): past the deadline, rebuild once —
+    // then surface the dead state instead of retrying forever.
+    peer.connectTimer = setTimeout(() => {
+      peer.connectTimer = null;
+      const cur = this.peers.get(pid);
+      if (cur !== peer || !this.joined) return;
+      const st = peer.pc.connectionState;
+      if (st === 'connected' || st === 'closed' || st === 'failed') return;
+      if (!this._rebuildTried.has(pid)) {
+        this._rebuildTried.set(pid, true);
+        this._closePeer(pid, peer);
+        this._createPeer(pid);
+        this._emitPeers();
+      } else {
+        try { peer.pc.close(); } catch {}      // 'closed' → the UI shows the truth
+      }
+    }, CONNECT_TIMEOUT_MS);
 
     pc.ontrack = (e) => this._attachRemote(peer, e.streams[0]);
 
@@ -574,18 +714,27 @@ export class VoiceChat {
       this._emitPeers();
     }
     if (st === 'connected') {
-      // Healthy again — restore the recovery budget.
+      // Healthy again — restore the recovery budget and cancel the deadline.
+      this._clearConnectTimer(peer);
       this._rebuildTried.delete(peer.pid);
       this._clearRecoveryTimer(peer);
       peer.restartTried = false;
-      if (this.status === 'connecting') {
+      if (this.status === 'connecting' || this.status === 'failed') {
         this.status = 'live';
+        this._failNotified = false;
         this._emitSelf();
       }
     } else if (st === 'failed') {
       this._recoverFailedPeer(peer);
     } else if (this.status === 'connecting') {
       this._settleStatus();
+    }
+  }
+
+  _clearConnectTimer(peer) {
+    if (peer.connectTimer) {
+      clearTimeout(peer.connectTimer);
+      peer.connectTimer = null;
     }
   }
 
@@ -719,12 +868,24 @@ export class VoiceChat {
     const pref = this._pref(peer.pid);
     audio.muted = !!pref.mutedLocal; // local listening mute only
     audio.volume = pref.volume;
-    audio.play().catch(() => {});    // join happened after a gesture; ignore stragglers
+    // An autoplay-policy rejection must be visible, not swallowed: surface it
+    // so the UI can offer a real-gesture resume via resumeAudio().
+    audio.play().then(() => {
+      if (peer.playBlocked) { peer.playBlocked = false; this._emitPeers(); }
+    }).catch(() => {
+      if (!peer.playBlocked) {
+        peer.playBlocked = true;
+        this.hooks.onInfo?.('المتصفح منع تشغيل الصوت — افتح لوحة الصوت ودوس زر التشغيل.');
+        this._emitPeers();
+      }
+    });
     this._watchPeer(peer, stream);   // speaking detection for this stream
   }
 
   _closePeer(pid, peer) {
     this._clearRecoveryTimer(peer);
+    this._clearConnectTimer(peer);
+    try { peer.srcNode?.disconnect(); } catch {}
     try { peer.pc.close(); } catch {}
     if (peer.audio) {
       try { peer.audio.srcObject = null; } catch {}
@@ -751,6 +912,8 @@ export class VoiceChat {
       for (const t of this.stream.getTracks()) t.stop();
       this.stream = null;
     }
+    try { this.selfSrcNode?.disconnect(); } catch {}
+    this.selfSrcNode = null;
     this.selfAnalyser = null;
   }
 
@@ -773,14 +936,16 @@ export class VoiceChat {
     const an = ac.createAnalyser();
     an.fftSize = 512;
     src.connect(an); // analysis only — never routed to the destination
-    return { analyser: an, buf: new Float32Array(an.fftSize) };
+    return { analyser: an, buf: new Float32Array(an.fftSize), src };
   }
 
   _watchSelf() {
     if (!this.stream) return;
     if (!this.selfAnalyser) {
       try {
-        this.selfAnalyser = this._makeAnalyser(this.stream);
+        const made = this._makeAnalyser(this.stream);
+        this.selfAnalyser = { analyser: made.analyser, buf: made.buf };
+        this.selfSrcNode = made.src;
       } catch { return; }
     }
     this._startPoll();
@@ -788,9 +953,17 @@ export class VoiceChat {
 
   _watchPeer(peer, stream) {
     try {
-      const { analyser, buf } = this._makeAnalyser(stream);
+      // A renegotiated/restarted peer can fire ontrack again — drop the old
+      // graph first or the MediaStreamSourceNodes pile up in the AudioContext.
+      if (peer.srcNode) {
+        try { peer.srcNode.disconnect(); } catch {}
+        peer.srcNode = null;
+        peer.analyser = null;
+      }
+      const { analyser, buf, src } = this._makeAnalyser(stream);
       peer.analyser = analyser;
       peer.buf = buf;
+      peer.srcNode = src;
     } catch { return; }
     this._startPoll();
   }
@@ -892,6 +1065,7 @@ export class VoiceChat {
         mutedLocal: !!pref.mutedLocal,
         volume: pref.volume,
         conn: peer.conn,
+        playBlocked: !!peer.playBlocked,
         me: false,
       });
     }
