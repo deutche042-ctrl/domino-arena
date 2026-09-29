@@ -417,6 +417,8 @@ function initLobby() {
   spawnFallingTiles('lobbyHeroTiles');
   $('btnCopyCode').onclick = () => copyText(roomCode, 'تم نسخ الكود!');
   $('btnCopyLink').onclick = () => copyText(location.origin + '?room=' + roomCode, 'تم نسخ رابط الدعوة!');
+  const btnRules = $('btnRules');
+  if (btnRules) btnRules.onclick = () => { $('modalRules')?.classList.remove('hidden'); sfx.click(); };
   $('btnReady').onclick = () => {
     askNotifyPermission();
     const cur = $('btnReady').textContent === 'لست جاهزاً';
@@ -734,6 +736,16 @@ function renderScoreCard() {
   for (const pid of ranked) _scorePrev.set(pid, view.scores[pid] || 0);
   // Drop stale keys so the map cannot grow across many rooms.
   for (const pid of [..._scorePrev.keys()]) if (!ranked.includes(pid)) _scorePrev.delete(pid);
+  // Room code under the scores — the only code display on the game screen,
+  // so players can share/copy it mid-match. Tap copies it.
+  if (roomCode) {
+    const codeRow = document.createElement('div');
+    codeRow.className = 'sc-code';
+    codeRow.title = 'انسخ كود الغرفة';
+    codeRow.innerHTML = `🚪 غرفة <b>${esc(roomCode)}</b> 📋`;
+    codeRow.onclick = () => { copyText(roomCode, 'تم نسخ الكود!'); sfx.click(); };
+    card.appendChild(codeRow);
+  }
 }
 
 function setBanner(text, cls) {

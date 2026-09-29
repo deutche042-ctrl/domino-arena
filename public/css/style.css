@@ -571,6 +571,20 @@ input:focus, select:focus { border-color: var(--accent); }
 }
 .sc-row.me .sc-name { color: #93c5fd; }
 .sc-pts { flex-shrink: 0; font-weight: 800; color: #f6ad55; font-feature-settings: "tnum"; }
+/* room code row under the live scores (game screen) — tap to copy */
+.sc-code {
+  pointer-events: auto;
+  cursor: pointer;
+  margin-top: 4px;
+  padding-top: 5px;
+  border-top: 1px dashed rgba(247,179,43,.3);
+  font-size: 11.5px;
+  color: var(--muted);
+  text-align: center;
+  white-space: nowrap;
+}
+.sc-code b { color: var(--accent); font-family: monospace; letter-spacing: 2px; }
+.sc-code:hover { color: var(--text); }
 
 /* ── LEAVE CONFIRM MODAL ── */
 .leave-warn { color: var(--muted); font-size: 14px; text-align: center; margin-top: 10px; line-height: 1.6; }
