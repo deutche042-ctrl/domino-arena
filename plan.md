@@ -533,6 +533,89 @@ mic UI («تعذّر توصيل الصوت»), and tappable to retry.
 - Real-device manual matrix (two phones across carrier NAT, iOS autoplay, incoming-call recovery) —
   requires hardware; the automated suites above cover the protocol and unit surfaces.
 
+---
+
+## K. Improvement plan (Sept 2026 audit) — opponents, server, client
+
+Three parallel audit passes (bot opponents, gameplay/server, client UX) produced the findings below.
+Everything in K.1–K.3 is implemented and verified in this section; K.4 lists the deliberately
+deferred bets. User-facing strings stay Egyptian Arabic; engine stays pure.
+
+### K.1 Opponents (`engine/bot.js`) — the main focus
+
+| # | Severity | Finding | Fix implemented |
+|---|----------|---------|-----------------|
+| B1 | critical | **expert cheated**: `pickExpert` evaluated the opponent's reply with `evaluateMove`, which reads that player's private hand (shed-pips + `myFlexibility`) and counts unseen tiles from the *opponent's* perspective — a direct anti-cheat violation | `evaluateMove` gained an `observer` mode (public-only): hand-reading terms skipped, unseen-tile terms computed from the observing bot's knowledge. Reply candidates are now enumerated from the observer's *unseen tiles* (injected into a scratch clone), never from the opponent's true `legalMoves` |
+| B2 | high | No test pinned "decisions don't change when hidden info changes" | New invariance test: permuting opponent hands + boneyard order must not change any level × profile action for the same rng |
+| B3 | high | `easy` played a fully random legal tile — could miss its own winning move | easy always spots a move that ends the hand with the win (or scores out the match); All-Fives score-notice probability raised 0.35 → 0.5 |
+| B4 | high | `medium` could pass up dominoing to shed a heavier tile | medium probes for the hand-winning/match-winning move first, then runs the greedy heuristic |
+| B5 | medium | `dangerForNextPlayer` pip math was wrong (`pips % 5` filter) — counted tiles that can't actually score and missed ones that can | danger now simulates the real attachment: `endsTotalWith` mirrors the engine's dedup rules and tests the true post-attach `endsTotal % 5 === 0` |
+| B6 | medium | Blocking term counted boneyard tiles as opponent threats (inflated early in draw/allfives) | playable-unseen is probability-weighted by `opponentHandTiles / unseenTotal` (both public via viewFor) |
+| B7 | medium | Bots never used pass information; engine threw it away | engine records `passLog` (pid + open-end match values, kind pass/draw) per hand — public info, exposed in `viewFor`; bots gain a "trap" term that rewards leaving ends whose values opponents are demonstrably out of |
+| B8 | medium | Static weights regardless of match position | score-adaptive weights: leading boosts defense/denial, trailing boosts aggression |
+| B9 | low | All bots felt identical (same delay, chat before the move was visible) | per-level think delays (easy 400–700ms → expert 1100–2000ms), consecutive bot draws compressed to ~250ms, chat emitted 400–1000ms *after* the broadcast |
+| B10 | low | `game:hint` always answered at medium quality | hint runs at the strongest seated bot level (hard when no bots) |
+
+Deferred (K.4): spinner-arm-control term, 3-ply expectimax, blocked-hand pip-parity play.
+
+### K.2 Engine + server
+
+| # | Severity | Finding | Fix implemented |
+|---|----------|---------|-----------------|
+| S1 | critical | handSize 9 × 4 players = 37 tiles from a 28-tile deck (reachable from the shipped lobby UI) | `rooms.startGame` clamps handSize to `⌊28/players⌋`; the engine also validates in the constructor as a backstop |
+| S2 | high | All-Fives engine defaults (250/200) were dead code — `config.targetScore` defaulted to 100, so `opt.targetScore \|\| default` never fell through | `createRoom` config `targetScore: null` → engine default per variant/player-count; lobby gains a "تلقائي" option |
+| S3 | high | AFK player in Draw stalled the table ~7 min (one auto-draw per 30s timeout) | `handleTurnTimeout` now loop-draws until a playable tile arrives or the boneyard is dry, then auto-passes, in a single tick |
+| S4 | high | Turn timer didn't re-validate the pid it was armed for (docs claimed it did) | `handleTurnTimeout` captures `turnTimerPid` and aborts if the turn moved on |
+| S5 | high | AFK host froze the table at handEnd (nextHand host-only, votes advisory) | `game:nextHandVote` is now binding, unanimous-minus-host (mirrors rematch); host voting executes immediately |
+| S6 | medium | Kicked socket stayed in the Socket.IO room (kept receiving lobby/chat/voice events) | kick now `sessions.delete`s and `socket.leave`s the kicked socket |
+| S7 | medium | No process error handlers — one listener throw kills the process and every room | `uncaughtException`/`unhandledRejection` logged, process stays up (matches the embedded-launcher no-exit design) |
+| S8 | medium | One client could squat all 50 `MAX_ROOMS` | per-socket room-create cap (3) |
+| S9 | low | `lobby:ready`/vote handlers re-broadcast unthrottled; duplicate votes rebroadcast | per-socket 400ms broadcast throttle + duplicate-vote dedupe |
+| S10 | low | Late joiners were permanently spectators — `state` never returned to `'lobby'` | new host-only `game:backToLobby` after matchEnd resets the room to a lobby (`lobby:reopened` to clients) so seats reopen |
+| S11 | low | Spectators invisible in lobby state | `lobbyState` carries the spectator list |
+| S12 | low | Reconnect "prefer fresh view" path was dead (`view.playerId` never set) | `gameView` sets `playerId` |
+| S13 | low | `_endMatch` no-op self-assignment branch | removed |
+
+### K.3 Client
+
+| # | Finding | Fix implemented |
+|---|---------|-----------------|
+| C1 | No persistent trace of the opponent's last move | 3D board keeps an emissive highlight on the last-placed tile plus a name tag; 2D fallback gets the same via a CSS class |
+| C2 | Camera fought the player (auto-fit lerp erased manual orbit/zoom every frame) | `controls 'start'` cancels the goal; a recenter HUD button restores auto-fit; new hands re-fit |
+| C3 | Mis-taps on pass/draw were instant and irreversible | "confirm moves" setting (off by default): pass/draw require a second tap within 1.5s |
+| C4 | Invite sharing was clipboard-only | native share sheet first (`navigator.share`), clipboard fallback |
+| C5 | Lobby ran two stacked animated backdrops | 2D falling tiles only spawn when the 3D lobby backdrop failed (matches home behaviour) |
+| C6 | Settings scattered; no volume, no force-2D | settings modal: master volume (sfx `setVolume`), force-2D, confirm-moves, vibration — persisted |
+| C7 | No rules/onboarding screen | rules modal with the three variants (Arabic) from home + lobby |
+| C8 | Turn alert set the tab title once; no blink | interval blink while the turn alert is active |
+| C9 | `#turnTimer` not safe-area lifted (sat under notches) | safe-area inset applied |
+| C10 | Confetti / countdown pulse / hero tiles ignored `prefers-reduced-motion` | gated |
+| C11 | `sw.js` cache grew forever (`SW_VER` never bumped) | `SW_VER` bumped + non-current `?v=` entries pruned on activate |
+| C12 | Lobby showed no spectator presence | "N متفرج" chip from `lobbyState.spectators` |
+
+Cache tags bumped per convention (`app.js?v=49`, `board3d.js?v=23`, `domboard.js?v=2`, `sfx.js?v=16`, `style.css?v=45`, `sw.js` v2) in index.html and every importer; APK assets regenerated with `mobile/sync`.
+
+### K.4 Deliberately deferred (bigger bets, not fixes)
+
+- **2v2 team play** (partners across, partner tile visibility, team scoring) — largest missing
+  feature; needs an engine seating/partner model first (L).
+- **i18n / language toggle** — all strings are hardcoded Egyptian Arabic; needs a string table (L).
+- **Server-side stats / match history / leaderboard** — stats are per-device localStorage by design;
+  needs persistence decisions (M/L).
+- **Password-protected rooms** — join brute-force guard is per-socket only (M).
+- **Spinner-arm-control bot term, 3-ply expectimax over unseen tiles, blocked-hand pip-parity play**
+  — evaluator extensions that need dedicated tuning time (M/L each).
+- **plan.md v1 drift** (protocol.js validation layer, rules-*.js split, separate handEnd/matchEnd
+  events, 1000-game fuzz) — documented as superseded by the shipped design; not "fixed".
+
+### K.5 Verification
+
+1. `node --check` on every edited JS file.
+2. `npm test` — engine + bot suites including the new anti-cheat invariance test.
+3. `npm run e2e 3100` + `npm run e2e:voice 3100` against a live server.
+4. `cd mobile && npm run sync` to regenerate APK assets.
+5. Cache-tag consistency checked across index.html + importers.
+
 
 
 
