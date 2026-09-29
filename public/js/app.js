@@ -50,6 +50,7 @@ let lastTimerKey = null, lastTickSec = null;
 let clockOffset = 0; // server clock minus client clock, captured per state
 let autoPlayTimer = null;
 let spectating = false; // true when riding along without a seat
+let myReady = false;    // my authoritative ready flag (mirrored from lobby:state, never sniffed from button text)
 
 // ── F3.3 performance overlay (toggle with the P key) ──
 // Deliberately dependency-free: it reads three.js's own renderer.info plus a few
@@ -253,10 +254,15 @@ function getName() {
 function homeError(msg) { $('homeError').textContent = msg || ''; }
 
 function afterJoin(res, name) {
-  myId = res.playerId; myToken = res.token; myName = name; roomCode = res.code;
+  myId = res.playerId || null; myToken = res.token || null; myName = name; roomCode = res.code;
+  myReady = false;
   voice?.setSelf(myId);
-  sessionStorage.setItem('domino_token_' + roomCode, myToken);
-  localStorage.setItem('domino_token_' + roomCode, myToken);
+  // Spectator joins carry no token — never persist "undefined" as a token or
+  // the next auto-rejoin sends a garbage token string.
+  if (myToken) {
+    sessionStorage.setItem('domino_token_' + roomCode, myToken);
+    localStorage.setItem('domino_token_' + roomCode, myToken);
+  }
   localStorage.setItem('domino_last_code', roomCode);
   history.replaceState(null, '', '?room=' + roomCode);
   $('lobbyCode').textContent = roomCode;
@@ -347,27 +353,20 @@ function renderLobby(st) {
   // spectators hold no seat — no mic for them (the server rejects it anyway)
   $('btnLobbyMic')?.classList.toggle('hidden', spectating);
   const btnReady = $('btnReady');
-  btnReady.classList.toggle('hidden', isHost || spectating && st.state !== 'lobby');
+  btnReady.classList.toggle('hidden', isHost || (spectating && st.state !== 'lobby'));
   if (spectating) {
     // ride-along: the ready button becomes "take a free seat"
     btnReady.textContent = 'اقعد والعب 🪑';
     btnReady.disabled = (st.players || []).length >= (st.config?.maxPlayers ?? 4);
-    btnReady.onclick = () => {
-      const name = myName || 'لاعب';
-      const code = roomCode;
-      emit('room:leave').catch(() => {});
-      emit('room:join', { code, name }).then(res => {
-        if (!res.ok) return lobbyError(res.error || 'مفيش مكان فاضي.');
-        spectating = false;
-        afterJoin(res, name);
-        showScreen(res.state === 'playing' ? 'game' : 'lobby');
-        sfx.click();
-      });
-    };
+    btnReady.onclick = takeSeat;
   } else {
     btnReady.disabled = false;
     const me = (st.players || []).find(p => p.id === myId);
-    btnReady.textContent = me?.ready ? 'لست جاهزاً' : 'أنا جاهز';
+    myReady = !!me?.ready;
+    paintReadyBtn();
+    // Re-assign every render: a past spectator render overwrote this handler
+    // with takeSeat, and nothing restored it after taking a seat.
+    btnReady.onclick = toggleReady;
   }
 
   // host can only start if >=2 players and non-hosts are ready
@@ -419,12 +418,7 @@ function initLobby() {
   $('btnCopyLink').onclick = () => copyText(location.origin + '?room=' + roomCode, 'تم نسخ رابط الدعوة!');
   const btnRules = $('btnRules');
   if (btnRules) btnRules.onclick = () => { $('modalRules')?.classList.remove('hidden'); sfx.click(); };
-  $('btnReady').onclick = () => {
-    askNotifyPermission();
-    const cur = $('btnReady').textContent === 'لست جاهزاً';
-    socket.emit('lobby:ready', { ready: !cur });
-    sfx.click();
-  };
+  $('btnReady').onclick = toggleReady;
   $('btnStart').onclick = () => {
     askNotifyPermission();
     emit('game:start').then(res => {
@@ -472,6 +466,40 @@ function initLobby() {
 }
 function lobbyError(msg) { $('lobbyError').textContent = msg || ''; }
 
+// ── ready toggle (authoritative, not text-sniffed) ──
+// The ack carries the server's stored ready value, so even if the throttled
+// lobby:state echo is delayed, the button shows the truth immediately.
+function paintReadyBtn() {
+  const b = $('btnReady');
+  if (b) b.textContent = myReady ? 'لست جاهزاً' : 'أنا جاهز';
+}
+function toggleReady() {
+  askNotifyPermission();
+  myReady = !myReady;
+  paintReadyBtn();
+  sfx.click();
+  socket.emit('lobby:ready', { ready: myReady }, (res) => {
+    if (res && typeof res.ready === 'boolean') {
+      myReady = res.ready;
+      paintReadyBtn();
+    }
+    if (res && !res.ok) lobbyError(res.error);
+  });
+}
+// spectator "take a free seat" — leaves the ride-along seat, then joins as a player
+function takeSeat() {
+  const name = myName || 'لاعب';
+  const code = roomCode;
+  emit('room:leave').catch(() => {});
+  emit('room:join', { code, name }).then(res => {
+    if (!res.ok) return lobbyError(res.error || 'مفيش مكان فاضي.');
+    spectating = false;
+    afterJoin(res, name);
+    showScreen(res.state === 'playing' ? 'game' : 'lobby');
+    sfx.click();
+  });
+}
+
 // ── leaving the room (lobby button or in-game exit) ──
 function leaveRoom() {
   // Stop auto-rejoin BEFORE telling the server, so a fast reconnect can't pull us back in.
@@ -482,6 +510,7 @@ function leaveRoom() {
   localStorage.removeItem('domino_last_code');
   emit('room:leave').catch(() => {});
   myId = myToken = roomCode = null;
+  myReady = false;
   voice?.setSelf(null);
   isHost = false;
   lastLobbyState = null;

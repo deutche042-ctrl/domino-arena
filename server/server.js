@@ -66,6 +66,12 @@ const manager = new RoomManager();
 // socket.id -> { roomCode, playerId }
 const sessions = new Map();
 
+// K2.S7: a throw inside a socket listener propagates synchronously and would
+// kill the process — and every room on it. Log and stay up (the embedded
+// mobile launcher likewise never exits).
+process.on('uncaughtException', (err) => console.error('[domino] uncaughtException:', err));
+process.on('unhandledRejection', (err) => console.error('[domino] unhandledRejection:', err));
+
 function broadcastLobby(room) {
   room.lastActivityAt = Date.now();
   io.to(room.code).emit('lobby:state', manager.lobbyState(room));
@@ -119,10 +125,12 @@ function armTurnTimer(room) {
 }
 
 function handleTurnTimeout(room) {
+  const armedPid = room.turnTimerPid;   // K2.S4: re-validate the pid we armed for
   clearTurnTimer(room);
   if (manager.getRoom(room.code) !== room) return;
   const game = room.game;
   if (!game || game.status !== 'playing') return;
+  if (game.turn !== armedPid) return;   // turn moved on between arm and fire
   const pid = game.turn;
   const p = room.players.find(x => x.id === pid);
   const name = p ? p.name : 'لاعب';
@@ -132,8 +140,21 @@ function handleTurnTimeout(room) {
       game.forceSkip(pid);
       msg = `⏰ انتهى وقت ${name} — تم تخطي دوره`;
     } else if (game.canDraw(pid)) {
-      game.draw(pid);
-      msg = `⏰ انتهى وقت ${name} — تم سحب كارت ليه تلقائياً`;
+      // K2.S3: drain the boneyard in one tick — one tile per timeout left a
+      // Draw hand with an AFK player stalling the table for ~7 minutes.
+      let drew = 0;
+      while (game.canDraw(pid)) {
+        game.draw(pid);
+        drew++;
+        if (game.forcedDrawTileId) break;   // playable tile — their turn continues
+      }
+      msg = drew > 1
+        ? `⏰ انتهى وقت ${name} — اتسحب ${drew} كرت تلقائياً`
+        : `⏰ انتهى وقت ${name} — تم سحب كارت ليه تلقائياً`;
+      if (!game.forcedDrawTileId && game.canPass(pid)) {
+        game.pass(pid);
+        msg = `⏰ انتهى وقت ${name} — سحب ومرر تلقائياً`;
+      }
     } else if (game.canPass(pid)) {
       game.pass(pid);
       msg = `⏰ انتهى وقت ${name} — تم تمرير دوره تلقائياً`;
@@ -186,6 +207,10 @@ function currentCtx(socket) {
 // same hygiene as the turn timer above.
 
 const BOT_NAMES = ['بوت حسن', 'بوت نور', 'بوت كريم', 'بوت سلمى', 'بوت زيكو', 'بوت ميرا'];
+// K1.B9: per-level think spans — stronger bots visibly "think" longer.
+const BOT_DELAY_SPANS = {
+  easy: [400, 700], medium: [600, 1100], hard: [900, 1600], expert: [1100, 2000],
+};
 // Contextual bot chatter (Egyptian Arabic) — pools picked by what just happened
 const BOT_LINES = {
   play: ['خد دي بقى 😏', 'اللعب عليا', 'تمام كده', 'شايف الطاولة؟ 👀', 'دبل من القلب'],
@@ -203,7 +228,12 @@ function scheduleBotTurn(room) {
   const bot = room.players.find(p => p.id === game.turn);
   if (!bot || !bot.isBot) return;
   const captured = { game, turn: game.turn };
-  const delay = room.botDelayMs || 600 + Math.floor(Math.random() * 800);
+  const [lo, hi] = BOT_DELAY_SPANS[bot.botLevel] || BOT_DELAY_SPANS.medium;
+  // K1.B9: consecutive draws in a chain compress to ~250ms — a full "think"
+  // per drained tile visibly stalled the table.
+  const delay = room.botDelayMs
+    || (bot._chainDraw ? 250 + Math.floor(Math.random() * 150)
+      : lo + Math.floor(Math.random() * (hi - lo)));
   room.botTimer = setTimeout(() => {
     room.botTimer = null;
     if (manager.getRoom(room.code) !== room) return;
@@ -231,14 +261,13 @@ function botAct(room, pid) {
     if (!(e instanceof IllegalMove)) throw e;
     return; // stale read — the next broadcast re-schedules safely
   }
-  botChatter(room, bot, action);
+  bot._chainDraw = action.type === 'draw' && !game.forcedDrawTileId;
   broadcastGame(room);   // re-broadcasts and chains to the next bot turn/draw
+  botChatter(room, bot, action);   // K1.B9: after the move is visible
 }
 
 function botChatter(room, bot, action) {
   if (Math.random() >= 0.12) return;
-  const now = Date.now();
-  if (bot.lastChatAt && now - bot.lastChatAt < 8000) return;
   const game = room.game;
   // pick a pool by context: hand win > scored play > the bare action
   let pool = BOT_LINES.neutral;
@@ -248,13 +277,22 @@ function botChatter(room, bot, action) {
   else if (game.lastAction?.scored) pool = BOT_LINES.scored;
   else if (action.type === 'play') pool = BOT_LINES.play;
   const line = pool[Math.floor(Math.random() * pool.length)];
-  bot.lastChatAt = now;
-  io.to(room.code).emit('chat:msg', { from: bot.name, pid: bot.id, at: now, text: line });
+  // Emit on a short delay so the line lands after the state it reacts to.
+  setTimeout(() => {
+    if (manager.getRoom(room.code) !== room) return;
+    const now = Date.now();
+    if (bot.lastChatAt && now - bot.lastChatAt < 8000) return;
+    bot.lastChatAt = now;
+    io.to(room.code).emit('chat:msg', { from: bot.name, pid: bot.id, at: now, text: line });
+  }, 400 + Math.floor(Math.random() * 600));
 }
 
-function deleteRoom(room) {
+function deleteRoom(room, reason = 'اتقفلت الغرفة.') {
   clearTurnTimer(room);
   if (room.botTimer) { clearTimeout(room.botTimer); room.botTimer = null; }
+  // K2.S10 note: spectators have no player entry — without this they'd never
+  // learn the room died.
+  io.to(room.code).emit('lobby:closed', { reason });
   manager.rooms.delete(room.code);
 }
 
@@ -268,14 +306,15 @@ setInterval(() => {
   for (const room of [...manager.rooms.values()]) {
     if (room.state !== 'lobby') continue;
     if (now - (room.lastActivityAt || room.createdAt) < LOBBY_TTL_MS) continue;
-    io.to(room.code).emit('lobby:closed', { reason: 'اتقفلت الغرفة بسبب الخمول الطويل' });
-    deleteRoom(room);
+    deleteRoom(room, 'اتقفلت الغرفة بسبب الخمول الطويل');
   }
 }, Math.min(60000, Math.max(1000, LOBBY_TTL_MS / 4))).unref();
 
 io.on('connection', (socket) => {
   // failed room:join timestamps for the per-socket brute-force guard above
   let joinFails = [];
+  // K2.S9: per-socket broadcast throttle for the noisy ready toggle
+  let lastReadyBroadcast = 0;
 
   // ---- lobby ----
 
@@ -285,7 +324,16 @@ io.on('connection', (socket) => {
       cb?.({ ok: false, error: 'الغرف كتير أوي على الخادم — جرب كمان شوية' });
       return;
     }
+    // K2.S8: one socket holding sessions open could squat all MAX_ROOMS slots —
+    // cap live rooms per creating socket (a scan, so nothing to clean up).
+    let mine = 0;
+    for (const r of manager.rooms.values()) if (r.createdBy === socket.id) mine++;
+    if (mine >= 3) {
+      cb?.({ ok: false, error: 'عندك ٣ غرف مفتوحة من الجهاز ده — اقفل واحدة الأول.' });
+      return;
+    }
     const { room, player } = manager.createRoom(name);
+    room.createdBy = socket.id;
     player.socketId = socket.id;
     socket.join(room.code);
     sessions.set(socket.id, { roomCode: room.code, playerId: player.id });
@@ -434,11 +482,33 @@ io.on('connection', (socket) => {
     broadcastLobby(room);
   });
 
-  socket.on('lobby:ready', ({ ready } = {}) => {
+  socket.on('lobby:ready', ({ ready } = {}, cb) => {
     const { room, playerId } = currentCtx(socket);
-    if (!room) return;
+    if (!room) return cb?.({ ok: false, error: 'لازم تكون جوه غرفة.' });
+    if (room.state !== 'lobby') return cb?.({ ok: false, error: 'الاستعداد متاح في غرفة الانتظار بس.' });
     const p = room.players.find(p => p.id === playerId);
-    if (p) p.ready = !!ready;
+    if (!p || p.isBot) return cb?.({ ok: false, error: 'لازم تكون قاعد في الغرفة عشان تستعد.' });
+    p.ready = !!ready;
+    cb?.({ ok: true, ready: p.ready });
+    // K2.S9: ready toggles can be spammed — throttle the full-room
+    // re-broadcast, but NEVER drop the final state (a dropped echo used to
+    // leave every client showing a stale ready flag forever, with no later
+    // broadcast to heal it). Throttled updates coalesce into one trailing
+    // broadcast at the end of the window.
+    const now = Date.now();
+    if (now - lastReadyBroadcast < 400) {
+      if (!room._readyPending) {
+        room._readyPending = true;
+        setTimeout(() => {
+          room._readyPending = false;
+          if (manager.getRoom(room.code) !== room) return;
+          lastReadyBroadcast = Date.now();
+          broadcastLobby(room);
+        }, 400 - (now - lastReadyBroadcast));
+      }
+      return;
+    }
+    lastReadyBroadcast = now;
     broadcastLobby(room);
   });
 
@@ -495,11 +565,11 @@ io.on('connection', (socket) => {
   // ---- gameplay ----
 
   const doAction = (fn) => {
-    const { room, playerId } = currentCtx(socket);
-    if (!room?.game) return;
-    if (currentCtx(socket).spectating) return; // spectators hold no seat — silent no-op
+    const ctx = currentCtx(socket);
+    if (!ctx.room?.game) return;
+    if (ctx.spectating) return; // spectators hold no seat — silent no-op
     try {
-      fn(room.game, playerId);
+      fn(ctx.room.game, ctx.playerId);
     } catch (e) {
       if (e instanceof IllegalMove) {
         socket.emit('error', { code: 'illegal', message: e.message });
@@ -507,7 +577,7 @@ io.on('connection', (socket) => {
       }
       throw e;
     }
-    broadcastGame(room);
+    broadcastGame(ctx.room);
   };
 
   socket.on('game:play', ({ tileId, end } = {}) => {
@@ -531,21 +601,27 @@ io.on('connection', (socket) => {
     cb?.({ ok: true });
     if (res.empty) return;
     if (res.kicked?.socketId) {
-      io.to(res.kicked.socketId).emit('room:kicked');
+      // K2.S6: fully detach the kicked socket — it used to keep receiving
+      // lobby/chat/voice events until it disconnected on its own.
+      const ks = res.kicked.socketId;
+      sessions.delete(ks);
+      io.sockets.sockets.get(ks)?.leave(room.code);
+      io.to(ks).emit('room:kicked');
     }
     broadcastLobby(room);
   });
 
   // ── continue-votes ──
-  // nextHand/rematch stay host-executed, but any seated player can vote for it.
-  // Votes are advisory only: they surface in the views so the host's button
-  // shows "زملك عايزين يكملوا (n/m)" and a toast nudges the host.
+  // nextHand/rematch stay host-executable, but any seated human can force them
+  // by unanimous-minus-host vote (K2.S5 — an AFK host no longer freezes the
+  // table at handEnd). Votes are idempotent and surface in the views.
   function castContinueVote(room, playerId, kind) {
     const p = room.players.find(x => x.id === playerId);
     if (!p || p.isBot) return;
     if (room.players.length < 2) return;
     room.continueVotes = room.continueVotes || {};
     const set = room.continueVotes[kind] || new Set();
+    if (set.has(playerId)) return;   // K2.S9: duplicate votes don't rebroadcast
     set.add(playerId);
     room.continueVotes[kind] = set;
     const host = room.players.find(x => x.id === room.hostId);
@@ -558,10 +634,31 @@ io.on('connection', (socket) => {
     broadcastGame(room);
   }
 
+  function doNextHand(room) {
+    room.continueVotes = null;
+    room.nextHandVotes = null;
+    manager.nextHand(room);
+    broadcastGame(room);
+  }
+
   socket.on('game:nextHandVote', () => {
     const { room, playerId } = currentCtx(socket);
     if (!room?.game || room.game.status !== 'handEnd') return;
-    castContinueVote(room, playerId, 'nextHand');
+    const me = room.players.find(p => p.id === playerId);
+    if (!me || me.isBot) return;
+    if (playerId === room.hostId) return doNextHand(room);   // host acts alone
+    castContinueVote(room, playerId, 'nextHand');            // view counter + host nudge
+    const humans = room.players.filter(p => !p.isBot);
+    room.nextHandVotes = room.nextHandVotes || new Set();
+    if (room.nextHandVotes.has(playerId)) return;            // binding vote is idempotent
+    room.nextHandVotes.add(playerId);
+    io.to(room.code).emit('chat:msg', {
+      from: 'النظام',
+      text: `${me.name} عايز الجولة التالية (${room.nextHandVotes.size}/${humans.length})`,
+    });
+    // Unanimous minus the host (who can always act alone anyway).
+    if (room.nextHandVotes.size >= humans.length - 1) doNextHand(room);
+    else broadcastGame(room);
   });
 
   socket.on('game:rematchVote', () => {
@@ -574,21 +671,45 @@ io.on('connection', (socket) => {
     const { room, playerId } = currentCtx(socket);
     if (!room?.game || room.game.status !== 'handEnd') return;
     if (playerId !== room.hostId) return;
+    doNextHand(room);
+  });
+
+  // K2.S10: back to lobby after a match — reopens the seats so late joiners
+  // and spectators can claim one (room.state used to stay 'playing' forever).
+  socket.on('game:backToLobby', (_, cb) => {
+    const { room, playerId } = currentCtx(socket);
+    if (!room) return cb?.({ ok: false, error: 'لازم تكون جوه غرفة.' });
+    if (playerId !== room.hostId) return cb?.({ ok: false, error: 'فقط المضيف يمكنه الرجوع لغرفة الانتظار.' });
+    if (!room.game || room.game.status !== 'matchEnd') {
+      return cb?.({ ok: false, error: 'الرجوع لغرفة الانتظار متاح بعد نهاية المباراة بس.' });
+    }
+    room.game = null;
+    room.state = 'lobby';
     room.continueVotes = null;
-    manager.nextHand(room);
-    broadcastGame(room);
-  });  // ── hint (F1.5) ──
+    room.nextHandVotes = null;
+    room.rematchVotes = null;
+    room.players.forEach(p => { p.ready = false; });
+    cb?.({ ok: true });
+    io.to(room.code).emit('lobby:reopened');
+    broadcastLobby(room);
+  });
+  // ── hint (F1.5, K1.B10) ──
   // The bot brain needs cloneGame()/real engine methods, so this runs server-side
   // (decision AD-2). We reply with ONLY the chosen action — tileId + end, both of
   // which the asking player can already derive from their own view.legalMoves.
   // No opponent hand, no boneyard order, ever leaves the server.
+  // Quality: run at the strongest bot level seated at the table (hard if none).
   socket.on('game:hint', (_, cb) => {
     const { room, playerId } = currentCtx(socket);
     if (!room?.game || room.game.status !== 'playing' || room.game.turn !== playerId) {
       return cb?.({ ok: false });
     }
+    const RANK = { easy: 0, medium: 1, hard: 2, expert: 3 };
+    const lvl = room.players.filter(p => p.isBot && p.botLevel)
+      .map(p => p.botLevel)
+      .sort((a, b) => RANK[b] - RANK[a])[0] || 'hard';
     try {
-      const action = chooseAction(room.game, playerId, { level: 'medium' });
+      const action = chooseAction(room.game, playerId, { level: lvl });
       // Sanity gate: never hand back an illegal suggestion.
       if (action?.type === 'play') {
         const legal = room.game.legalMoves(playerId).some(m => m.tileId === action.tileId && m.end === action.end);
