@@ -400,12 +400,17 @@ input:focus, select:focus { border-color: var(--accent); }
   color: var(--accent); font-family: monospace; white-space: nowrap; line-height: 1.1;
   text-shadow: 0 0 18px rgba(247,179,43,.45);
   animation: codeGlow 2.6s ease-in-out infinite;
+  /* the code is Latin in an RTL page — pin LTR so bidi/letter-spacing can't
+     push it out of the centered pill, and never collapse when empty */
+  direction: ltr; unicode-bidi: isolate;
+  min-height: 1.2em;
+  user-select: all; -webkit-user-select: all; cursor: pointer;
 }
 @keyframes codeGlow {
   0%,100% { text-shadow: 0 0 14px rgba(247,179,43,.35); }
   50% { text-shadow: 0 0 26px rgba(247,179,43,.7); }
 }
-.code-actions { display: flex; gap: 8px; width: 100%; justify-content: center; }
+.code-actions { display: flex; gap: 8px; width: 100%; justify-content: center; flex-wrap: wrap; }
 .code-actions .btn { flex: 1; white-space: nowrap; text-align: center; padding: 8px 12px; font-size: 13px; }
 
 .players-title {

@@ -1,9 +1,9 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=22';
-import { DomBoard, webglAvailable } from './domboard.js?v=1';
+import { Board3D } from './board3d.js?v=23';
+import { DomBoard, webglAvailable } from './domboard.js?v=2';
 import { Home3D } from './home3d.js?v=2';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=13';
-import { sfx } from './sfx.js?v=15';
+import { sfx } from './sfx.js?v=16';
 import { VoiceChat, setIceConfig } from './voice.js?v=5';
 
 const $ = id => document.getElementById(id);
@@ -89,12 +89,16 @@ function applyTheme(name) {
 }
 
 // F4.5: build the game table, degrading to a 2D DOM board when WebGL is
-// unavailable (old GPUs, blocklisted drivers, VMs, GPU process crashes). The 3D
-// renderer can throw from its constructor, so both the probe and the construct
-// are guarded — a failed table must never take the whole game down with it.
+// unavailable (old GPUs, blocklisted drivers, VMs, GPU process crashes) — or
+// when the user forced 2D in settings (K3.C6). The 3D renderer can throw from
+// its constructor, so both the probe and the construct are guarded — a failed
+// table must never take the whole game down with it.
+function force2d() {
+  try { return localStorage.getItem('domino_force2d') === '1'; } catch { return false; }
+}
 function createBoard(canvas, cbs) {
   try {
-    if (webglAvailable()) return new Board3D(canvas, cbs);
+    if (!force2d() && webglAvailable()) return new Board3D(canvas, cbs);
   } catch (err) {
     console.warn('[domino] 3D board unavailable, falling back to 2D:', err?.message || err);
   }
@@ -153,21 +157,28 @@ function spawnFallingTiles(containerId) {
 }
 
 function initHome() {
-  try {
-    home3d = new Home3D($('home3d'));
-    home3d.setActive(true);
-  } catch (err) {
-    console.warn('home3d unavailable — using 2D falling tiles', err);
-    home3d = null;
-    spawnFallingTiles('heroTiles');
+  // K3.C6: force-2D also skips the 3D backdrops (battery/weak-GPU setting).
+  const want3d = !force2d();
+  if (want3d) {
+    try {
+      home3d = new Home3D($('home3d'));
+      home3d.setActive(true);
+    } catch (err) {
+      console.warn('home3d unavailable — using 2D falling tiles', err);
+      home3d = null;
+    }
   }
-  try {
-    lobby3d = new Home3D($('lobby3d'));
-  } catch (err) {
-    console.warn('lobby3d unavailable — using 2D falling tiles', err);
-    lobby3d = null;
-    spawnFallingTiles('lobbyHeroTiles');
+  if (!home3d) spawnFallingTiles('heroTiles');
+  if (want3d) {
+    try {
+      lobby3d = new Home3D($('lobby3d'));
+    } catch (err) {
+      console.warn('lobby3d unavailable — using 2D falling tiles', err);
+      lobby3d = null;
+    }
   }
+  // K3.C5: the 2D lobby tiles spawn ONLY when the 3D lobby backdrop is dead —
+  // they used to run stacked on top of it (23 blurred images + a canvas rAF).
   $('inpName').value = localStorage.getItem('domino_name') || '';
   const params = new URLSearchParams(location.search);
   if (params.get('room')) {
@@ -258,14 +269,17 @@ function afterJoin(res, name) {
   myReady = false;
   voice?.setSelf(myId);
   // Spectator joins carry no token — never persist "undefined" as a token or
-  // the next auto-rejoin sends a garbage token string.
-  if (myToken) {
-    sessionStorage.setItem('domino_token_' + roomCode, myToken);
-    localStorage.setItem('domino_token_' + roomCode, myToken);
-  }
-  localStorage.setItem('domino_last_code', roomCode);
-  history.replaceState(null, '', '?room=' + roomCode);
-  $('lobbyCode').textContent = roomCode;
+  // the next auto-rejoin sends a garbage token string. Storage can also throw
+  // (blocked cookies/private mode) — it must never stop the lobby painting.
+  try {
+    if (myToken) {
+      sessionStorage.setItem('domino_token_' + roomCode, myToken);
+      localStorage.setItem('domino_token_' + roomCode, myToken);
+    }
+    localStorage.setItem('domino_last_code', roomCode);
+  } catch { /* the room still works for this tab */ }
+  try { history.replaceState(null, '', '?room=' + roomCode); } catch { /* sandboxed */ }
+  $('lobbyCode').textContent = roomCode || '----';
   const chip = $('chatRoomChip');
   if (chip) chip.textContent = 'غرفة ' + roomCode;
   if (res.lobby) {
@@ -280,9 +294,16 @@ function renderLobby(st) {
   if (!st) return;
   lastLobbyState = st;
   isHost = st.hostId === myId;
-  $('lobbyCode').textContent = st.code;
+  $('lobbyCode').textContent = st.code || roomCode || '----';
   const countEl = $('playerCount');
   if (countEl) countEl.textContent = `${(st.players || []).length}/${st.config?.maxPlayers ?? 4}`;
+  // K2.S11/K3.C12: make spectators visible in the lobby.
+  const specEl = $('specCount');
+  if (specEl) {
+    const n = (st.spectators || []).length;
+    specEl.textContent = n ? `👁 ${n} متفرج` : '';
+    specEl.classList.toggle('hidden', !n);
+  }
   const list = $('lobbyPlayers');
   list.innerHTML = '';
   for (const p of (st.players || [])) {
@@ -378,7 +399,8 @@ function renderLobby(st) {
   // house rules the host picked, and a late-joining host sees the current state.
   if (st.config) {
     if (st.config.variant) $('selVariant').value = st.config.variant;
-    if (st.config.targetScore) $('selTarget').value = st.config.targetScore;
+    // K2.S2: null = "auto" (engine default per variant/player-count).
+    $('selTarget').value = st.config.targetScore == null ? '' : String(st.config.targetScore);
     if (st.config.maxPlayers) $('selMax').value = st.config.maxPlayers;
     // turnMs 0 is a real choice ("no timer") — must not be swallowed by a truthy check.
     $('selTurnMs').value = String(st.config.turnMs ?? 30000);
@@ -413,9 +435,22 @@ function initLobby() {
   if (btnAddBot) {
     btnAddBot.onclick = () => { socket.emit('lobby:addBot', { level: botLevel, profile: botProfile }); sfx.click(); };
   }
-  spawnFallingTiles('lobbyHeroTiles');
+  if (!lobby3d) spawnFallingTiles('lobbyHeroTiles');   // K3.C5: fallback only
   $('btnCopyCode').onclick = () => copyText(roomCode, 'تم نسخ الكود!');
-  $('btnCopyLink').onclick = () => copyText(location.origin + '?room=' + roomCode, 'تم نسخ رابط الدعوة!');
+  // The code itself is a big tap target — copies on tap (same as نسخ الكود).
+  $('lobbyCode').onclick = () => {
+    const c = roomCode || $('lobbyCode').textContent;
+    if (c && c !== '----') copyText(c, 'تم نسخ الكود!');
+  };
+  // K3.C4: native share sheet first on phones, clipboard as fallback.
+  $('btnCopyLink').onclick = () => {
+    const url = location.origin + '?room=' + roomCode;
+    if (navigator.share) {
+      navigator.share({ title: 'دومينو أرينا', text: `ادخل غرفتي بالكود ${roomCode}`, url }).catch(() => {});
+    } else {
+      copyText(url, 'تم نسخ رابط الدعوة!');
+    }
+  };
   const btnRules = $('btnRules');
   if (btnRules) btnRules.onclick = () => { $('modalRules')?.classList.remove('hidden'); sfx.click(); };
   $('btnReady').onclick = toggleReady;
@@ -450,9 +485,10 @@ function initLobby() {
   bindPttHold($('btnLobbyMic'));
   // F2.1: push the whole rule set on every change. The server's allowlist
   // (sanitizeConfig) is the authority — we just send what the host picked.
+  // K2.S2: an empty target select means "auto" (engine default) → null.
   const pushConfig = () => emit('lobby:config', {
     variant: $('selVariant').value,
-    targetScore: +$('selTarget').value,
+    targetScore: $('selTarget').value === '' ? null : +$('selTarget').value,
     maxPlayers: +$('selMax').value,
     turnMs: +$('selTurnMs').value,
     handSize: $('selHandSize').value === '' ? null : +$('selHandSize').value,
@@ -860,11 +896,26 @@ function updatePerfText() {
 // ── "your turn" attention: flashing tab title + vibration + optional notification ──
 const BASE_TITLE = document.title;
 let turnAlertOn = false;
+let turnAlertTimer = null;
+function vibrationOn() {
+  try { return localStorage.getItem('domino_vibrate') !== '0'; } catch { return true; }
+}
 function startTurnAlert() {
   if (turnAlertOn) return;
   turnAlertOn = true;
   document.title = '🔔 دورك — دومينو أرينا';
-  try { navigator.vibrate?.([180, 80, 180]); } catch (e) { /* unsupported */ }
+  // K3.C8: actually blink the title while the tab is hidden (it used to be set
+  // once and never flashed), until the player returns or acts.
+  clearInterval(turnAlertTimer);
+  turnAlertTimer = setInterval(() => {
+    document.title = document.title.startsWith('🔔🔔')
+      ? '🔔 دورك — دومينو أرينا'
+      : '🔔🔔 دورك! — دومينو أرينا';
+  }, 1200);
+  // K3.C6: vibration respects the settings toggle.
+  if (vibrationOn()) {
+    try { navigator.vibrate?.([180, 80, 180]); } catch (e) { /* unsupported */ }
+  }
   if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
     try {
       new Notification('🔔 دورك!', { body: `دورك في غرفة ${roomCode || ''} — افتح اللعبة واتحرك` });
@@ -874,6 +925,8 @@ function startTurnAlert() {
 function stopTurnAlert() {
   if (!turnAlertOn) return;
   turnAlertOn = false;
+  clearInterval(turnAlertTimer);
+  turnAlertTimer = null;
   document.title = BASE_TITLE;
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) stopTurnAlert(); });
@@ -1378,13 +1431,42 @@ function onBoardMiss() {
   // Do not deselect on accidental miss so touch users aren't frustrated
 }
 
+// ── K3.C3: mis-tap protection ──
+// With "confirm moves" on, draw/pass need a second tap within 1.5s (the button
+// shows "متأكد؟"). Placement stays instant — selecting an end is already a
+// deliberate two-step gesture.
+function confirmEnabled() {
+  try { return localStorage.getItem('domino_confirm') === '1'; } catch { return false; }
+}
+const confirmTimers = new Map();
+function withConfirm(btn, fn) {
+  if (!confirmEnabled()) { fn(); return; }
+  if (btn.dataset.armed === '1') {
+    clearTimeout(confirmTimers.get(btn.id));
+    confirmTimers.delete(btn.id);
+    delete btn.dataset.armed;
+    btn.classList.remove('armed');
+    fn();
+    return;
+  }
+  btn.dataset.armed = '1';
+  btn.classList.add('armed');
+  confirmTimers.set(btn.id, setTimeout(() => {
+    delete btn.dataset.armed;
+    btn.classList.remove('armed');
+  }, 1500));
+}
+
 function initGameUI() {
-  $('btnDraw').onclick = () => { socket.emit('game:draw'); sfx.click(); };
-  $('btnPass').onclick = () => { socket.emit('game:pass'); sfx.click(); };
+  $('btnDraw').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:draw'); sfx.click(); }); };
+  $('btnPass').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:pass'); sfx.click(); }); };
   $('btnHint').onclick = requestHint;
   $('btnSort').onclick = cycleSort;
   $('btnSort').textContent = SORT_LABELS[sortMode];
   $('btnSort').title = 'ترتيب اليد: ' + SORT_LABELS[sortMode];
+  // K3.C2: hand the camera back to auto-fit (no-op on the 2D board).
+  $('btnRecenter').onclick = () => { board?.recenter?.(); sfx.click(); };
+  $('btnSettings').onclick = () => { openSettings(); sfx.click(); };
   $('btnNextHand').onclick = () => socket.emit('game:nextHand');
   $('btnRematch').onclick = () => socket.emit('game:rematch');
   $('btnNextHandVote').onclick = () => { socket.emit('game:nextHandVote'); sfx.click(); };
@@ -1507,9 +1589,68 @@ function initGameUI() {
   $('modalLeave').addEventListener('click', (e) => {
     if (e.target === $('modalLeave')) { sfx.click(); closeLeaveConfirm(); }
   });
+  // K3.C7: rules modal (home + lobby) — close on ✕ or backdrop tap.
+  for (const id of ['btnRulesHome', 'btnRulesClose']) {
+    const b = $(id);
+    if (b) b.onclick = () => { $('modalRules')?.classList.add('hidden'); sfx.click(); };
+  }
+  $('modalRules')?.addEventListener('click', (e) => {
+    if (e.target === $('modalRules')) { sfx.click(); $('modalRules').classList.add('hidden'); }
+  });
+  initSettingsModal();
   ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach(ev => {
     document.addEventListener(ev, updateFullscreenState);
   });
+}
+
+// ── K3.C6: settings modal — master volume, force-2D, confirm-moves, vibration ──
+function openSettings() {
+  const modal = $('modalSettings');
+  if (!modal) return;
+  const rng = $('rngVolume');
+  if (rng) rng.value = String(Math.round((sfx.getVolume?.() ?? 1) * 100));
+  const f2 = $('chkForce2d');
+  if (f2) f2.checked = force2d();
+  const cf = $('chkConfirm');
+  if (cf) cf.checked = confirmEnabled();
+  const vb = $('chkVibrate');
+  if (vb) vb.checked = (() => { try { return localStorage.getItem('domino_vibrate') !== '0'; } catch { return true; } })();
+  modal.classList.remove('hidden');
+}
+function initSettingsModal() {
+  const modal = $('modalSettings');
+  if (!modal) return;
+  $('btnSettingsClose').onclick = () => { modal.classList.add('hidden'); sfx.click(); };
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) { sfx.click(); modal.classList.add('hidden'); }
+  });
+  const rng = $('rngVolume');
+  if (rng) {
+    rng.oninput = () => { sfx.setVolume?.(Number(rng.value) / 100); };
+    rng.onchange = () => sfx.click();
+  }
+  const f2 = $('chkForce2d');
+  if (f2) {
+    f2.onchange = () => {
+      try { localStorage.setItem('domino_force2d', f2.checked ? '1' : '0'); } catch { /* no storage */ }
+      location.reload();   // boards/backdrops are built at boot — rebuild fresh
+    };
+  }
+  const cf = $('chkConfirm');
+  if (cf) {
+    cf.onchange = () => {
+      try { localStorage.setItem('domino_confirm', cf.checked ? '1' : '0'); } catch { /* no storage */ }
+      sfx.click();
+    };
+  }
+  const vb = $('chkVibrate');
+  if (vb) {
+    vb.onchange = () => {
+      try { localStorage.setItem('domino_vibrate', vb.checked ? '1' : '0'); } catch { /* no storage */ }
+      if (vb.checked) { try { navigator.vibrate?.(60); } catch { /* unsupported */ } }
+      sfx.click();
+    };
+  }
 }
 
 function toggleFullscreen() {
@@ -2243,6 +2384,7 @@ function floatText(txt, isEmoji = false) {
 
 let confettiRAF = null;
 function startConfetti() {
+  if (prefersReducedMotion()) return;   // F4.4/K3.C10: no confetti under reduced motion
   const c = $('confetti');
   const ctx = c.getContext('2d');
   c.width = c.clientWidth || 400;
@@ -2427,6 +2569,21 @@ function startSocket(base) {
     // the server swept this idle lobby — back home with a note
     leaveRoom();
     homeError('اتقفلت الغرفة بسبب الخمول الطويل.');
+  });
+  socket.on('lobby:reopened', () => {
+    // K2.S10: the host pulled the table back to a lobby after a match —
+    // follow along so seats/ready/config are editable again.
+    view = null;
+    selectedTile = null;
+    newlyDrawnTileId = null;
+    lastActionKey = '';
+    prevTurnKey = null;
+    stopTurnAlert();
+    board?.clearMarkers();
+    closeChat();
+    closeVoicePanel();
+    sfx.ambient(false);
+    showScreen('lobby');
   });
   socket.on('room:kicked', () => {
     // the host removed us; clear stored tokens so auto-rejoin can't pull us back
