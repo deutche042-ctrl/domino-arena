@@ -60,15 +60,11 @@ export class Board3D {
 
     // F4.4: respect the OS reduced-motion preference — flattens the arc/drop
     // flourishes to instant placement (accessibility, and kinder on weak GPUs).
-    // Must be set BEFORE _buildTurnRing(), which reads it.
     this._reducedMotion = typeof matchMedia === 'function'
       ? matchMedia('(prefers-reduced-motion: reduce)').matches : false;
     this._myTurn = false;
-    this._turnRing = null;
-    this._turnRingMat = null;
 
     this._buildTable();
-    this._buildTurnRing();
 
     // K3.C1: persistent "last move" glow pad + player-name label. Tile meshes
     // share pooled materials, so the highlight is its own mesh parked just
@@ -183,37 +179,9 @@ export class Board3D {
     this.scene.add(floor);
   }
 
-  // ── F4.4: centre turn pulse ──
-  // A thin ring sitting just above the felt at the table centre. It is invisible
-  // unless it is MY turn, and then it breathes (scale + opacity) at ~1 Hz so the
-  // player's eye is drawn back to the board. Built once, like the table itself,
-  // and animated in _loop() — never re-created per turn, so it cannot leak.
-  _buildTurnRing() {
-    const geo = new THREE.RingGeometry(1.55, 1.95, 64);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0x63e6ff, transparent: true, opacity: 0,
-      side: THREE.DoubleSide, depthWrite: false,
-    });
-    const ring = new THREE.Mesh(geo, mat);
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = -TILE_H / 2 + 0.04;   // just clear of the felt
-    ring.renderOrder = 1;
-    ring.visible = false;
-    ring.userData.isTurnRing = true;
-    this._turnRing = ring;
-    this._turnRingMat = mat;
-    this.scene.add(ring);
-  }
-
-  /** F4.4: show/hide the centre pulse ring (it is this player's turn to act). */
+  // ── turn state ──
   setMyTurn(on) {
-    const on2 = !!on;
-    if (on2 === this._myTurn) return;
-    this._myTurn = on2;
-    if (this._turnRing) {
-      this._turnRing.visible = on2 && !this._reducedMotion;
-      if (!this._turnRing.visible && this._turnRingMat) this._turnRingMat.opacity = 0;
-    }
+    this._myTurn = !!on;
   }
 
   // ── tile meshes ──
@@ -1128,15 +1096,6 @@ export class Board3D {
       this.boneLight.intensity = 3.5 + Math.sin(t * 6) * 1.8;
     }
 
-    // F4.4: breathe the centre turn ring while it is my move (skipped entirely
-    // for reduced-motion users — the ring is hidden in setMyTurn() for them).
-    if (this._turnRing && this._turnRing.visible && this._turnRingMat) {
-      const s = 0.5 + 0.5 * Math.sin(t * 3.4);          // 0..1
-      const k = 1 + s * 0.16;                            // gentle outward puff
-      this._turnRing.scale.set(k, k, 1);
-      this._turnRingMat.opacity = 0.10 + s * 0.26;
-    }
-
     // process active animations
     this._anims = this._anims.filter(a => {
       a.t += dt;
@@ -1264,10 +1223,6 @@ export class Board3D {
     this._hitBoxGeo = null;
     this._hitMatC?.dispose?.();
     this._hitMatC = null;
-    this._turnRing?.geometry?.dispose?.();
-    this._turnRingMat?.dispose?.();
-    this._turnRing = null;
-    this._turnRingMat = null;
     this._lastGlow?.geometry?.dispose?.();
     this._lastGlow?.material?.dispose?.();
     this._lastGlow = null;

@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=24';
+import { Board3D } from './board3d.js?v=25';
 import { DomBoard, webglAvailable } from './domboard.js?v=3';
 import { Home3D } from './home3d.js?v=2';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=13';
