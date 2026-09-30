@@ -66,6 +66,11 @@ const manager = new RoomManager();
 // socket.id -> { roomCode, playerId }
 const sessions = new Map();
 
+// S9 (audit): failed room:join attempts keyed by client IP, not socket — a
+// per-socket counter reset on every reconnect and made the 4-letter code space
+// scannable. Swept by the idle-lobby interval below.
+const joinFailsByIp = new Map();   // ip -> failed-join timestamps[]
+
 // K2.S7: a throw inside a socket listener propagates synchronously and would
 // kill the process — and every room on it. Log and stay up (the embedded
 // mobile launcher likewise never exits).
@@ -296,6 +301,64 @@ function deleteRoom(room, reason = 'اتقفلت الغرفة.') {
   manager.rooms.delete(room.code);
 }
 
+// S2+S3 (audit): a socket that joins/creates while still attached somewhere else
+// used to leak its old presence — a seated player stayed connected:true with a
+// stale socketId (immortalizing a playing room, double broadcasts), or a
+// spectator entry kept the socketId and slowly exhausted the spectator cap.
+// Detach the socket from whatever it holds BEFORE attaching it to something new.
+// Same semantics as room:leave, minus the client ack.
+function detachCurrentRoom(socket) {
+  const s = sessions.get(socket.id);
+  if (!s) return;
+  sessions.delete(socket.id);
+  socket.leave(s.roomCode);
+  const room = manager.getRoom(s.roomCode);
+  if (!room) return;
+  if (s.spectating) {
+    manager.removeSpectator(room, s.spectatorId);
+    broadcastLobby(room);
+    return;
+  }
+  const p = room.players.find(x => x.id === s.playerId);
+  if (!p) return;
+  const hadVoice = !!p.voice;
+  p.voice = false;
+  p.voiceMuted = false;
+  p.hostMuted = false;
+  p.chatMuted = false; // detaching is a full cleanup
+  if (room.state === 'lobby') {
+    const res = manager.removePlayer(room, p.id);
+    if (!res.empty) broadcastLobby(room);
+  } else {
+    p.connected = false;
+    p.socketId = null;
+    if (room.hostId === p.id) {
+      const next = room.players.find(x => x.connected && !x.isBot);
+      if (next) room.hostId = next.id;
+    }
+    const humans = room.players.filter(x => x.connected && !x.isBot);
+    if (humans.length === 0) {
+      deleteRoom(room);
+    } else {
+      if (humans.length === 1 && !room.players.some(x => x.isBot) &&
+          room.game && room.game.status === 'playing') {
+        room.game._endMatch(humans[0].id);
+        io.to(room.code).emit('chat:msg', { from: 'النظام', text: `غادر ${p.name} اللعبة. فوز بالانسحاب!` });
+      } else if (room.game && room.game.status === 'playing' && room.game.turn === p.id) {
+        let nextPid = p.id;
+        for (let i = 0; i < room.players.length; i++) {
+          room.game._advanceTurn(nextPid);
+          nextPid = room.game.turn;
+          const nextP = room.players.find(x => x.id === nextPid);
+          if (nextP && nextP.connected) break;
+        }
+      }
+      broadcastGame(room);
+    }
+  }
+  if (hadVoice && manager.getRoom(room.code) === room) broadcastVoice(room);
+}
+
 // ---- idle lobby sweeper ----
 // A lobby nobody touches forever pins memory (matters on the APK host phone).
 // Sweep lobbies with no lobby activity (config/ready/chat/join) for LOBBY_TTL_MS.
@@ -303,6 +366,12 @@ function deleteRoom(room, reason = 'اتقفلت الغرفة.') {
 const LOBBY_TTL_MS = Math.max(5000, Number(process.env.LOBBY_TTL_MS) || 30 * 60 * 1000);
 setInterval(() => {
   const now = Date.now();
+  // S9: prune stale brute-force counters (entries with no recent failures).
+  for (const [ip, ts] of joinFailsByIp) {
+    const fresh = ts.filter(t => now - t < 10000);
+    if (fresh.length) joinFailsByIp.set(ip, fresh);
+    else joinFailsByIp.delete(ip);
+  }
   for (const room of [...manager.rooms.values()]) {
     if (room.state !== 'lobby') continue;
     if (now - (room.lastActivityAt || room.createdAt) < LOBBY_TTL_MS) continue;
@@ -316,12 +385,13 @@ io.on('connection', (socket) => {
   // `socket.emit('game:play', null)` used to destructure null inside the
   // callback and take the whole process down. Normalize once, here, for all
   // handlers; type checks stay in the handlers themselves.
-  socket.use(([event, ...args], next) => {
-    if (args[0] === null) args[0] = {};
+  socket.use((event, next) => {
+    // `event` is the live [name, ...payload] array the handler receives —
+    // mutate it in place; a rest-copy would not propagate.
+    if (event[1] === null) event[1] = {};
     next();
   });
-  // failed room:join timestamps for the per-socket brute-force guard above
-  let joinFails = [];
+  // S9 (audit): see joinFailsByIp at module scope.
   // K2.S9: per-socket broadcast throttle for the noisy ready toggle
   let lastReadyBroadcast = 0;
 
@@ -341,6 +411,8 @@ io.on('connection', (socket) => {
       cb?.({ ok: false, error: 'عندك ٣ غرف مفتوحة من الجهاز ده — اقفل واحدة الأول.' });
       return;
     }
+    // S3: creating while seated/spectating elsewhere must not leak the old seat.
+    detachCurrentRoom(socket);
     const { room, player } = manager.createRoom(name);
     room.createdBy = socket.id;
     player.socketId = socket.id;
@@ -371,19 +443,21 @@ io.on('connection', (socket) => {
   });
 
   socket.on('room:join', ({ code, name, token } = {}, cb) => {
-    // 4-char room codes are brute-forceable — cap failed attempts per socket
+    // 4-char room codes are brute-forceable — cap failed attempts per IP
     // (5 failures / 10 s rolling window; success resets the counter).
     const now = Date.now();
-    joinFails = joinFails.filter(t => now - t < 10000);
-    if (joinFails.length >= 5) {
+    const ip = socket.handshake?.address || '?';
+    const fails = (joinFailsByIp.get(ip) || []).filter(t => now - t < 10000);
+    if (fails.length >= 5) {
       return cb?.({ ok: false, error: 'محاولات كتير أوي — استنى شوية وجرب تاني.' });
     }
     const res = manager.joinRoom(code, name, token, { allowSpectate: true });
     if (res.error) {
-      joinFails.push(now);
+      fails.push(now);
+      joinFailsByIp.set(ip, fails);
       return cb?.({ ok: false, error: res.error });
     }
-    joinFails = [];
+    joinFailsByIp.delete(ip);
     if (res.spectating) {
       // Room full or mid-match: ride along as a spectator (no seat, no voice,
       // gameplay handlers no-op because this id is not in room.players).
@@ -425,59 +499,11 @@ io.on('connection', (socket) => {
     if (room.state === 'playing') broadcastGame(room);
   });
 
-  // Leave the room entirely (lobby: remove player; in-game: mark disconnected)
+  // Leave the room entirely (lobby: remove player; in-game: mark disconnected).
+  // detachCurrentRoom is the shared S2/S3 helper — room:create/room:join call it
+  // before attaching the socket elsewhere so no phantom seat/spectator leaks.
   socket.on('room:leave', (_, cb) => {
-    const s = sessions.get(socket.id);
-    if (!s) return cb?.({ ok: true });
-    sessions.delete(socket.id);
-    const room = manager.getRoom(s.roomCode);
-    socket.leave(s.roomCode);
-    if (!room) return cb?.({ ok: true });
-    if (s.spectating) {
-      manager.removeSpectator(room, s.spectatorId);
-      return cb?.({ ok: true });
-    }
-    const p = room.players.find(p => p.id === s.playerId);
-    if (p) {
-      const hadVoice = !!p.voice;
-      p.voice = false;
-      p.voiceMuted = false;
-      p.hostMuted = false;
-      p.chatMuted = false; // leaving is a full cleanup
-      if (room.state === 'lobby') {
-        const res = manager.removePlayer(room, p.id);
-        if (!res.empty) broadcastLobby(room);
-      } else {
-        p.connected = false;
-        p.socketId = null;
-        if (room.hostId === p.id) {
-          const next = room.players.find(x => x.connected && !x.isBot);
-          if (next) room.hostId = next.id;
-        }
-
-        const humans = room.players.filter(x => x.connected && !x.isBot);
-        if (humans.length === 0) {
-          // No humans left — bots can't keep a room (or a match) alive.
-          deleteRoom(room);
-        } else {
-          if (humans.length === 1 && !room.players.some(x => x.isBot) &&
-              room.game && room.game.status === 'playing') {
-            room.game._endMatch(humans[0].id);
-            io.to(room.code).emit('chat:msg', { from: 'النظام', text: `غادر ${p.name} اللعبة. فوز بالانسحاب!` });
-          } else if (room.game && room.game.status === 'playing' && room.game.turn === p.id) {
-            let nextPid = p.id;
-            for (let i = 0; i < room.players.length; i++) {
-              room.game._advanceTurn(nextPid);
-              nextPid = room.game.turn;
-              const nextP = room.players.find(x => x.id === nextPid);
-              if (nextP && nextP.connected) break;
-            }
-          }
-          broadcastGame(room);
-        }
-      }
-      if (hadVoice && manager.getRoom(room.code) === room) broadcastVoice(room);
-    }
+    detachCurrentRoom(socket);
     cb?.({ ok: true });
   });
 
