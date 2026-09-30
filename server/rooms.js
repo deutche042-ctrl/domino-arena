@@ -22,6 +22,17 @@ function makeCode() {
   return c;
 }
 
+// S1 (audit): socket payloads are attacker-controlled. A crafted `null`/number
+// for a code or name used to throw right here (`.toUpperCase`/`.slice` on a
+// non-string) inside a socket listener — a remote DoS. Coerce types at the door.
+function normCode(code) {
+  return (typeof code === 'string' ? code : '').toUpperCase().trim();
+}
+function displayName(name, fallback) {
+  const s = typeof name === 'string' ? name : '';
+  return (s || fallback).slice(0, 16);
+}
+
 export class RoomManager {
   constructor() {
     this.rooms = new Map(); // code -> room
@@ -56,14 +67,14 @@ export class RoomManager {
   }
 
   joinRoom(code, name, token, opts = {}) {
-    const room = this.rooms.get((code || '').toUpperCase().trim());
+    const room = this.rooms.get(normCode(code));
     if (!room) return { error: 'الغرفة غير موجودة. تأكد من صحة الكود.' };
     // Reconnect by token?
-    if (token) {
+    if (typeof token === 'string' && token) {
       if (this.isKicked(room, token)) return { error: 'تم طردك من هذه الغرفة.' };
       const existing = room.players.find(p => p.token === token);
       if (existing) {
-        if (name && name !== existing.name) existing.name = name.slice(0, 16);
+        if (typeof name === 'string' && name && name !== existing.name) existing.name = name.slice(0, 16);
         return { room, player: existing, reconnected: true };
       }
     }
@@ -117,7 +128,7 @@ export class RoomManager {
     if (room.spectators.length >= 8) return { error: 'الغرفة وصلت لأقصى عدد متفرجين.' };
     const spectator = {
       id: randomUUID(),
-      name: (name || 'متفرج').slice(0, 16),
+      name: displayName(name, 'متفرج'),
       socketId: null,
     };
     room.spectators.push(spectator);
@@ -129,7 +140,7 @@ export class RoomManager {
     room.spectators = room.spectators.filter(s => s.id !== spectatorId);
   }
 
-  getRoom(code) { return this.rooms.get((code || '').toUpperCase().trim()); }
+  getRoom(code) { return this.rooms.get(normCode(code)); }
 
   /** Seat a bot player (lobby only). Bots are always ready and never own a
    *  token, so the token-reconnect path can never attach a socket to them.
@@ -140,7 +151,7 @@ export class RoomManager {
     const bot = {
       id: randomUUID(),
       token: null,
-      name: (name || 'بوت').slice(0, 16),
+      name: displayName(name, 'بوت'),
       ready: true,
       connected: true,
       socketId: null,
@@ -193,6 +204,7 @@ export class RoomManager {
 
   /** Sanitized config for lobby:config — every value clamped to a known-good choice. */
   sanitizeConfig(cfg = {}) {
+    if (!cfg || typeof cfg !== 'object') cfg = {};   // S1: a crafted null payload must not throw
     const out = {};
     if (cfg.variant) out.variant = String(cfg.variant);
     // K2.S2: explicit null clears the override back to the engine default.
@@ -296,7 +308,7 @@ export class RoomManager {
     return {
       id,
       token: randomUUID(),
-      name: (name || 'Player').slice(0, 16),
+      name: displayName(name, 'Player'),
       ready: false,
       connected: true,
       socketId: null,
