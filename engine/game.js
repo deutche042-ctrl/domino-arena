@@ -93,8 +93,6 @@ export class DominoGame {
         return a <= b ? `${a}-${b}` : `${b}-${a}`;
       };
       const all = new Map(buildDeck().map(t => [t.id, t]));
-      for (const pid of this.playerIds)
-        this.hands[pid] = opt.deal.hands[pid].map(id => ({ ...all.get(norm(id)) }));
       const used = new Set();
       const take = (id, where) => {
         if (typeof id !== 'string') throw new Error(`deal hook: tile id must be a string, got ${typeof id}`);
@@ -140,6 +138,11 @@ export class DominoGame {
       this.turn = this._lastHandWinner;
       this.leadForcedTile = null;       // hand winner may lead any tile
     }
+    // E3: a fresh hand must invalidate the derived-ends cache — the revision
+    // counter only moves on mutations, and `_deal` replaces the whole state, so
+    // the first attachableEnds() after nextHand() used to cache-hit the
+    // PREVIOUS hand's ends.
+    this._invalidateEnds();
   }
 
   // ---------- queries ----------
@@ -390,7 +393,12 @@ export class DominoGame {
       legalMoves: this.turn === pid && this.status === 'playing' ? this.legalMoves(pid) : [],
       canDraw: this.turn === pid && this.canDraw(pid),
       canPass: this.turn === pid && this.canPass(pid),
-      lastAction: this.lastAction,
+      // E1: which tile another player drew from the boneyard is private — the
+      // boneyard order is otherwise never exposed. Keep tileId only for the
+      // drawer's own view (the client uses it to flag the newly-drawn tile).
+      lastAction: this.lastAction && this.lastAction.type === 'draw' && this.lastAction.pid !== pid
+        ? { type: 'draw', pid: this.lastAction.pid, count: this.lastAction.count ?? 1 }
+        : this.lastAction,
       handResult: this.handResult,
       matchWinnerId: this.matchWinnerId,
     };
@@ -415,9 +423,12 @@ export class DominoGame {
     }
     this._lastHandWinner = winnerId || null;
 
-    // Guard against an un-winnable match: in Block, repeated blocked hands that
-    // tie on pips (winnerId null, 0 points) can stall the scoreboard forever.
-    if (!winnerId && points === 0) this._scorelessHands = (this._scorelessHands || 0) + 1;
+    // Guard against an un-winnable match: any hand that awards 0 points must
+    // advance the counter — a WON hand can also score 0 (All Fives: opponents
+    // hold ≤2 pips; blocked hand: the only remaining tile is the 0-0), and
+    // letting those reset the streak let a pathological match dodge the guard
+    // forever (E5).
+    if (points === 0) this._scorelessHands = (this._scorelessHands || 0) + 1;
     else this._scorelessHands = 0;
 
     this.handResult = {
