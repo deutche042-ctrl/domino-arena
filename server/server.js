@@ -311,6 +311,15 @@ setInterval(() => {
 }, Math.min(60000, Math.max(1000, LOBBY_TTL_MS / 4))).unref();
 
 io.on('connection', (socket) => {
+  // Protocol hardening: every handler destructures its payload (`({ a, b } = {})`),
+  // and JS default params do NOT cover an explicitly-sent `null` — a single
+  // `socket.emit('game:play', null)` used to destructure null inside the
+  // callback and take the whole process down. Normalize once, here, for all
+  // handlers; type checks stay in the handlers themselves.
+  socket.use(([event, ...args], next) => {
+    if (args[0] === null) args[0] = {};
+    next();
+  });
   // failed room:join timestamps for the per-socket brute-force guard above
   let joinFails = [];
   // K2.S9: per-socket broadcast throttle for the noisy ready toggle
