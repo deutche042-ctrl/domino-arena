@@ -44,15 +44,6 @@ app.get('/host-info', (req, res) => {
   res.json({ port: Number(PORT), ips, rooms, players });
 });
 
-// Voice ICE config: lets a self-hosted TURN (coturn) be injected via env vars
-// without touching the client — TURN_URLS is comma-separated. With nothing set
-// the client keeps its built-in defaults (Google STUN + OpenRelay TURN).
-app.get('/voice-config', (req, res) => {
-  const urls = (process.env.TURN_URLS || '').split(',').map(s => s.trim()).filter(Boolean);
-  if (!urls.length) return res.json({ iceServers: null });
-  res.json({ iceServers: [{ urls, username: process.env.TURN_USER || '', credential: process.env.TURN_PASS || '' }] });
-});
-
 const http = createServer(app);
 const io = new Server(http, {
   // long-polling fallback keeps the game working through any tunnel/proxy;
@@ -171,30 +162,6 @@ function handleTurnTimeout(room) {
   }
   io.to(room.code).emit('chat:msg', { from: 'النظام', text: msg });
   broadcastGame(room);
-}
-
-// ---- voice chat (WebRTC signaling) ----
-// The server only relays SDP/ICE between players and tracks who is in voice —
-// the audio itself flows peer-to-peer. Voice state lives on the player object
-// (p.voice / p.voiceMuted / p.hostMuted), is room-scoped so it survives
-// lobby→game, and is dropped on leave/disconnect. p.hostMuted is the
-// host-enforced mute: set/cleared only by the host via voice:hostMute, it can't
-// be lifted by the target's own voice:mute, and it resets on leave/disconnect
-// so a rejoining player starts clean. Bots never join voice.
-
-function voiceRoster(room) {
-  return room.players
-    .filter(p => p.voice && !p.isBot)
-    .map(p => ({
-      id: p.id,
-      name: p.name,
-      muted: !!(p.voiceMuted || p.hostMuted), // effective mute
-      hostMuted: !!p.hostMuted,
-    }));
-}
-
-function broadcastVoice(room) {
-  io.to(room.code).emit('voice:state', voiceRoster(room));
 }
 
 function currentCtx(socket) {
@@ -321,10 +288,6 @@ function detachCurrentRoom(socket) {
   }
   const p = room.players.find(x => x.id === s.playerId);
   if (!p) return;
-  const hadVoice = !!p.voice;
-  p.voice = false;
-  p.voiceMuted = false;
-  p.hostMuted = false;
   p.chatMuted = false; // detaching is a full cleanup
   if (room.state === 'lobby') {
     const res = manager.removePlayer(room, p.id);
@@ -356,7 +319,6 @@ function detachCurrentRoom(socket) {
       broadcastGame(room);
     }
   }
-  if (hadVoice && manager.getRoom(room.code) === room) broadcastVoice(room);
 }
 
 // ---- idle lobby sweeper ----
@@ -435,8 +397,6 @@ io.on('connection', (socket) => {
       ok: true, code: room.code, playerId: player.id, token: player.token,
       state: room.state, lobby: manager.lobbyState(room),
     });
-    // Freshly loaded page: unicast the current voice roster (empty for a new room).
-    socket.emit('voice:state', voiceRoster(room));
     if (vsBots) {
       io.to(room.code).emit('game:started');
       broadcastGame(room);
@@ -473,7 +433,7 @@ io.on('connection', (socket) => {
     }
     joinFailsByIp.delete(ip);
     if (res.spectating) {
-      // Room full or mid-match: ride along as a spectator (no seat, no voice,
+      // Room full or mid-match: ride along as a spectator (no seat;
       // gameplay handlers no-op because this id is not in room.players).
       // S2: drop any previous attachment first so the old spectator entry
       // (or a seated player) can't leak behind the new one.
@@ -504,14 +464,9 @@ io.on('connection', (socket) => {
       const oldSocketId = player.socketId;
       sessions.delete(oldSocketId);
       io.sockets.sockets.get(oldSocketId)?.leave(room.code);
-      // S8: the seat moved to a newer live socket — tell the old tab (it used
-      // to silently no-op forever) and reset the voice flags that rode along.
+      // S8: the seat moved to a newer live socket — tell the old tab
+      // (it used to silently no-op forever).
       io.to(oldSocketId).emit('room:superseded');
-      const hadVoice = !!player.voice;
-      player.voice = false;
-      player.voiceMuted = false;
-      player.hostMuted = false;
-      if (hadVoice) broadcastVoice(room);
     }
     player.socketId = socket.id;
     player.connected = true;
@@ -525,8 +480,6 @@ io.on('connection', (socket) => {
       youAreUp: room.state === 'playing' && room.game?.status === 'playing' && room.game.turn === player.id,
       lobby: manager.lobbyState(room),
     });
-    // Freshly loaded / reconnected page: unicast who is already in voice.
-    socket.emit('voice:state', voiceRoster(room));
     broadcastLobby(room);
     if (room.state === 'playing') broadcastGame(room);
   });
@@ -679,17 +632,13 @@ io.on('connection', (socket) => {
     if (res.empty) return;
     if (res.kicked?.socketId) {
       // K2.S6: fully detach the kicked socket — it used to keep receiving
-      // lobby/chat/voice events until it disconnected on its own.
+      // lobby/chat events until it disconnected on its own.
       const ks = res.kicked.socketId;
       sessions.delete(ks);
       io.sockets.sockets.get(ks)?.leave(room.code);
       io.to(ks).emit('room:kicked');
     }
     broadcastLobby(room);
-    // S7: the roster only changes on a voice broadcast — without this, other
-    // clients kept showing the kicked player "in voice" until an unrelated
-    // voice event happened to fire.
-    broadcastVoice(room);
   });
 
   // ── continue-votes ──
@@ -871,96 +820,6 @@ io.on('connection', (socket) => {
     io.to(room.code).emit('chat:msg', msg);
   });
 
-  // ---- voice ----
-
-  socket.on('voice:join', (_, cb) => {
-    const ctx = currentCtx(socket);
-    const { room, playerId } = ctx;
-    if (!room) return cb?.({ ok: false, error: 'لازم تكون جوه غرفة عشان تفتح المايك.' });
-    if (ctx.spectating) return cb?.({ ok: false, error: 'المتفرج مش بيفتح مايك — اقعد في الغرفة الأول.' });
-    const p = room.players.find(p => p.id === playerId);
-    if (!p) return cb?.({ ok: false, error: 'مش لاقي لاعبك في الغرفة — جرّب تدخل من جديد.' });
-    if (p.isBot) return cb?.({ ok: false, error: 'البوتات ملهاش مايك.' });
-    p.voice = true;
-    p.voiceMuted = false;
-    // p.hostMuted is intentionally NOT cleared here: a host-muted player who
-    // re-opens their mic stays muted until the host lifts it.
-    cb?.({ ok: true });
-    broadcastVoice(room);
-  });
-
-  socket.on('voice:leave', () => {
-    const { room, playerId } = currentCtx(socket);
-    if (!room) return;
-    const p = room.players.find(p => p.id === playerId);
-    if (!p) return;
-    // Leaving voice is a full cleanup: it also lifts any host-enforced mute.
-    const wasInVoice = !!p.voice;
-    p.voice = false;
-    p.voiceMuted = false;
-    p.hostMuted = false;
-    if (wasInVoice) broadcastVoice(room);
-  });
-
-  socket.on('voice:mute', ({ muted } = {}) => {
-    const { room, playerId } = currentCtx(socket);
-    if (!room) return;
-    const p = room.players.find(p => p.id === playerId);
-    if (!p || !p.voice) return;
-    const want = !!muted;
-    // A host-enforced mute can't be lifted by the target — ignore silently.
-    if (p.hostMuted && !want) return;
-    if (p.voiceMuted === want) return; // nothing changed — skip the rebroadcast
-    p.voiceMuted = want;
-    broadcastVoice(room);
-  });
-
-  // Host-enforced mute ("mute for everyone"): only the room host (never a bot)
-  // can set or clear p.hostMuted. `all` hits every voice participant except the
-  // host himself; `pid` can target anyone in the room — including players not
-  // currently in voice, so they join muted later.
-  socket.on('voice:hostMute', ({ pid, all, muted } = {}, cb) => {
-    const { room, playerId } = currentCtx(socket);
-    if (!room) return cb?.({ ok: false, error: 'لازم تكون جوه غرفة عشان تكتم اللاعبين.' });
-    const host = room.players.find(p => p.id === playerId);
-    if (playerId !== room.hostId || !host || host.isBot) {
-      return cb?.({ ok: false, error: 'المضيف بس اللي يقدر يكتم اللاعبين.' });
-    }
-    const want = !!muted;
-    if (all) {
-      for (const p of room.players) {
-        if (p.isBot || !p.voice || p.id === room.hostId) continue;
-        p.hostMuted = want;
-      }
-    } else if (typeof pid === 'string') {
-      const target = room.players.find(p => p.id === pid);
-      if (!target) return cb?.({ ok: false, error: 'اللاعب مش موجود في الغرفة.' });
-      // S10: bots have no mic — the pid branch used to skip the isBot check the
-      // `all` branch has, letting a host "mute" a bot into the roster's void.
-      if (target.isBot) return cb?.({ ok: false, error: 'البوتات ملهاش مايك أصلاً.' });
-      target.hostMuted = want;
-    } else {
-      return cb?.({ ok: false, error: 'لازم تحدد لاعب أو تختار كتم الكل.' });
-    }
-    cb?.({ ok: true });
-    broadcastVoice(room);
-  });
-
-  // Relay a WebRTC offer/answer/ICE candidate to one specific player.
-  socket.on('voice:signal', ({ to, data } = {}) => {
-    const { room, playerId } = currentCtx(socket);
-    if (!room || typeof to !== 'string' || !data) return;
-    // Payload cap: real SDP/ICE messages are a few KB; anything larger is abuse.
-    let size = 0;
-    try { size = JSON.stringify(data).length; } catch { return; }
-    if (size > 16384) return;
-    const from = room.players.find(p => p.id === playerId);
-    const target = room.players.find(p => p.id === to);
-    // Both ends must be voice participants — no signaling to outsiders.
-    if (!from?.voice || !target?.voice || !target.socketId) return;
-    io.to(target.socketId).emit('voice:signal', { from: playerId, data });
-  });
-
   // ---- disconnect ----
 
   socket.on('disconnect', () => {
@@ -974,15 +833,7 @@ io.on('connection', (socket) => {
     if (!p) return;
     p.connected = false;
     p.socketId = null;
-    // Voice is tied to the live socket — drop it now; a reconnected client
-    // re-announces itself with voice:join and the mesh rebuilds. Disconnect is
-    // a full cleanup: voiceMuted and hostMuted both reset (clean slate).
-    const hadVoice = !!p.voice;
-    p.voice = false;
-    p.voiceMuted = false;
-    p.hostMuted = false;
     p.chatMuted = false; // disconnect is a full cleanup — rejoiners start clean
-    if (hadVoice) broadcastVoice(room);
 
     // In lobby: remove the player after grace period (allows quick page refresh)
     if (room.state === 'lobby') {

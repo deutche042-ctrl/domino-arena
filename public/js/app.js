@@ -3,8 +3,6 @@ import { Board3D } from './board3d.js?v=24';
 import { DomBoard, webglAvailable } from './domboard.js?v=3';
 import { Home3D } from './home3d.js?v=2';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=13';
-import { sfx } from './sfx.js?v=16';
-import { VoiceChat, setIceConfig } from './voice.js?v=5';
 
 const $ = id => document.getElementById(id);
 const VARIANT_DESC = {
@@ -23,12 +21,6 @@ let board = null;
 let home3d = null, lobby3d = null;
 let lastActionKey = '';
 let chatOpen = false, unread = 0, emojiPopOpen = false;
-let voice = null;                                  // VoiceChat, created in boot()
-let voiceSelf = { joined: false, muted: false, speaking: false };
-let voicePeers = [];                               // roster for the voice panel
-let voicePanelOpen = false;
-let voiceUnsupported = false;                      // mic unavailable (unsupported/insecure) — buttons disabled in boot()
-const speakingSet = new Set();                     // pids currently lit as speaking
 
 // ── chat content ──
 const CHAT_PHRASES = [
@@ -212,8 +204,7 @@ function initHome() {
     ch.onclick = () => {
       botLevel = ch.dataset.level;
       document.querySelectorAll('#diffRow .diff-chip').forEach(c => c.classList.toggle('active', c === ch));
-      sfx.click();
-    };
+      };
   });
   // F4.2: bot personality (same evaluator, different weights)
   const syncProfileChips = () => document.querySelectorAll('#profileRow .diff-chip')
@@ -223,13 +214,12 @@ function initHome() {
       botProfile = ch.dataset.profile;
       try { localStorage.setItem('domino_bot_profile', botProfile); } catch { /* no storage */ }
       syncProfileChips();
-      sfx.click();
-    };
+      };
   });
   syncProfileChips();
   // F4.3: tile theme picker
   document.querySelectorAll('#themeRow .diff-chip').forEach(ch => {
-    ch.onclick = () => { applyTheme(ch.dataset.theme); sfx.click(); };
+    ch.onclick = () => { applyTheme(ch.dataset.theme); };
   });
   applyTheme(tileTheme);   // reflect the persisted choice on first paint
   $('btnBots').onclick = () => {
@@ -271,7 +261,6 @@ function homeError(msg) { $('homeError').textContent = msg || ''; }
 function afterJoin(res, name) {
   myId = res.playerId || null; myToken = res.token || null; myName = name; roomCode = res.code;
   myReady = false;
-  voice?.setSelf(myId);
   // Spectator joins carry no token — never persist "undefined" as a token or
   // the next auto-rejoin sends a garbage token string. Storage can also throw
   // (blocked cookies/private mode) — it must never stop the lobby painting.
@@ -337,7 +326,7 @@ function renderLobby(st) {
       rm.className = 'bot-remove';
       rm.textContent = '✕';
       rm.title = 'حذف البوت';
-      rm.onclick = () => { socket.emit('lobby:removeBot', { playerId: p.id }); sfx.click(); };
+      rm.onclick = () => { socket.emit('lobby:removeBot', { playerId: p.id }); };
       li.appendChild(rm);
     }
     // host-only chat mute for human players (not himself)
@@ -352,7 +341,6 @@ function renderLobby(st) {
         try {
           const res = await emit('lobby:chatMute', { pid: p.id, muted: !p.chatMuted });
           if (res && !res.ok) lobbyError(res.error);
-          else sfx.click();
         } finally { cm.disabled = false; }
       };
       li.appendChild(cm);
@@ -367,7 +355,6 @@ function renderLobby(st) {
         try {
           const res = await emit('lobby:kick', { pid: p.id });
           if (res && !res.ok) lobbyError(res.error);
-          else sfx.score();
         } finally { kick.disabled = false; }
       };
       li.appendChild(kick);
@@ -384,8 +371,6 @@ function renderLobby(st) {
 
   $('hostConfig').classList.toggle('hidden', !isHost || spectating);
   $('btnStart').classList.toggle('hidden', !isHost || spectating);
-  // spectators hold no seat — no mic for them (the server rejects it anyway)
-  $('btnLobbyMic')?.classList.toggle('hidden', spectating);
   const btnReady = $('btnReady');
   btnReady.classList.toggle('hidden', isHost || (spectating && st.state !== 'lobby'));
   if (spectating) {
@@ -446,7 +431,7 @@ function renderRulesSummary(cfg) {
 function initLobby() {
   const btnAddBot = $('btnAddBot');
   if (btnAddBot) {
-    btnAddBot.onclick = () => { socket.emit('lobby:addBot', { level: botLevel, profile: botProfile }); sfx.click(); };
+    btnAddBot.onclick = () => { socket.emit('lobby:addBot', { level: botLevel, profile: botProfile }); };
   }
   if (!lobby3d) spawnFallingTiles('lobbyHeroTiles');   // K3.C5: fallback only
   $('btnCopyCode').onclick = () => copyText(roomCode, 'تم نسخ الكود!');
@@ -465,7 +450,7 @@ function initLobby() {
     }
   };
   const btnRules = $('btnRules');
-  if (btnRules) btnRules.onclick = () => { $('modalRules')?.classList.remove('hidden'); sfx.click(); };
+  if (btnRules) btnRules.onclick = () => { $('modalRules')?.classList.remove('hidden'); };
   $('btnReady').onclick = toggleReady;
   $('btnStart').onclick = () => {
     askNotifyPermission();
@@ -478,24 +463,19 @@ function initLobby() {
     chkAuto.checked = localStorage.getItem('domino_autoplay') === '1';
     chkAuto.onchange = () => {
       localStorage.setItem('domino_autoplay', chkAuto.checked ? '1' : '0');
-      sfx.click();
-    };
+      };
   }
   $('btnQr').onclick = () => {
     const pop = $('qrPop');
     if (!pop) return;
     if (!pop.classList.contains('hidden')) {
       pop.classList.add('hidden');
-      sfx.click();
       return;
     }
     renderQr(location.origin + '?room=' + (roomCode || ''), $('qrCanvas'));
     pop.classList.remove('hidden');
-    sfx.click();
-  };
+    };
   $('btnLeave').onclick = leaveRoom;
-  $('btnLobbyMic').onclick = () => toggleMic();
-  bindPttHold($('btnLobbyMic'));
   // F2.1: push the whole rule set on every change. The server's allowlist
   // (sanitizeConfig) is the authority — we just send what the host picked.
   // K2.S2: an empty target select means "auto" (engine default) → null.
@@ -526,7 +506,6 @@ function toggleReady() {
   askNotifyPermission();
   myReady = !myReady;
   paintReadyBtn();
-  sfx.click();
   socket.emit('lobby:ready', { ready: myReady }, (res) => {
     if (res && typeof res.ready === 'boolean') {
       myReady = res.ready;
@@ -545,8 +524,7 @@ function takeSeat() {
     spectating = false;
     afterJoin(res, name);
     showScreen(res.state === 'playing' ? 'game' : 'lobby');
-    sfx.click();
-  });
+    });
 }
 
 // ── leaving the room (lobby button or in-game exit) ──
@@ -560,7 +538,6 @@ function leaveRoom() {
   emit('room:leave').catch(() => {});
   myId = myToken = roomCode = null;
   myReady = false;
-  voice?.setSelf(null);
   isHost = false;
   lastLobbyState = null;
   view = null;
@@ -570,20 +547,15 @@ function leaveRoom() {
   stopTurnAlert();
   board?.clearMarkers();
   closeChat();
-  voice?.leave();
-  closeVoicePanel();
-  speakingSet.clear();
   unread = 0;
   updateBadge();
   const msgs = $('chatMsgs');
   if (msgs) msgs.innerHTML = '';
-  sfx.ambient(false);
   closeLeaveConfirm();
   history.replaceState(null, '', location.pathname);
   homeError('');
   showScreen('home');
-  sfx.click();
-}
+  }
 function openLeaveConfirm() { $('modalLeave').classList.remove('hidden'); }
 function closeLeaveConfirm() { $('modalLeave').classList.add('hidden'); }
 
@@ -710,7 +682,6 @@ function cycleSort() {
   try { localStorage.setItem('domino_sort', sortMode); } catch { /* no storage */ }
   const btn = $('btnSort');
   if (btn) { btn.textContent = SORT_LABELS[sortMode]; btn.title = 'ترتيب اليد: ' + SORT_LABELS[sortMode]; }
-  sfx.click();
   renderHand();
 }
 
@@ -793,7 +764,7 @@ function renderScoreCard() {
   card.innerHTML = '';
   ranked.forEach((pid, i) => {
     const row = document.createElement('div');
-    row.className = 'sc-row' + (pid === myId ? ' me' : '') + (speakingSet.has(pid) ? ' speaking' : '');
+    row.className = 'sc-row' + (pid === myId ? ' me' : '');
     row.innerHTML = `
       <span class="sc-rank">${['🥇', '🥈', '🥉', '4.'][i] || (i + 1) + '.'}</span>
       <span class="sc-name" title="${esc(view.names[pid] || 'لاعب')}">${view.isBot?.[pid] ? '🤖 ' : ''}${esc(view.names[pid] || 'لاعب')}</span>
@@ -821,7 +792,7 @@ function renderScoreCard() {
     codeRow.className = 'sc-code';
     codeRow.title = 'انسخ كود الغرفة';
     codeRow.innerHTML = `🚪 غرفة <b>${esc(roomCode)}</b> 📋`;
-    codeRow.onclick = () => { copyText(roomCode, 'تم نسخ الكود!'); sfx.click(); };
+    codeRow.onclick = () => { copyText(roomCode, 'تم نسخ الكود!'); };
     card.appendChild(codeRow);
   }
 }
@@ -1066,8 +1037,6 @@ function updateTurnTimer() {
   $('turnTimerSecs').textContent = secs;
   if (view.turn === myId && secs !== lastTickSec) {
     lastTickSec = secs;
-    if (secs <= 5) sfx.alarm();
-    else if (secs <= 10) sfx.tick();
   }
 }
 
@@ -1258,9 +1227,8 @@ function playActionSounds() {
   if (key === lastActionKey) return;
   const wasMyTurn = prevTurnKey === myId;
   lastActionKey = key;
-  if (la.type === 'place') { sfx.place(); if (la.scored) { sfx.score(); floatText(`+${la.scored}`); } }
+  if (la.type === 'place') { if (la.scored) floatText(`+${la.scored}`); }
   else if (la.type === 'draw') {
-    sfx.draw();
     const isMe = la.pid === myId;
     let drawnTile = null;
     if (isMe) {
@@ -1280,15 +1248,12 @@ function playActionSounds() {
     }
     board?.animateDraw(drawnTile, isMe);
   }
-  else if (la.type === 'pass') { sfx.pass(); if (la.pid !== myId) floatText(`${view.names[la.pid] || 'لاعب'}: باص`); }
+  else if (la.type === 'pass') { if (la.pid !== myId) floatText(`${view.names[la.pid] || 'لاعب'}: باص`); }
   else if (la.type === 'skip') {
-    sfx.pass();
     floatText(la.pid === myId ? '⏰ انتهى وقتك!' : `⏰ ${view.names[la.pid] || 'لاعب'}: انتهى وقته`);
   }
-  else if (la.type === 'handEnd') sfx.handWin();
-  else if (la.type === 'matchEnd') sfx.matchWin();
   if (view.status === 'playing' && view.turn === myId) {
-    if (!wasMyTurn) { sfx.yourTurn(); startTurnAlert(); }
+    if (!wasMyTurn) startTurnAlert();
   } else {
     stopTurnAlert();
   }
@@ -1306,7 +1271,6 @@ async function requestHint() {
   hintPending = true;
   const btn = $('btnHint');
   btn.disabled = true;
-  sfx.click();
   try {
     const res = await emit('game:hint');
     if (!res?.ok || res.type !== 'play') {
@@ -1321,8 +1285,7 @@ async function requestHint() {
       if (ends.length) board.showMarkers(ends);
     }
     renderHand();
-    sfx.select();
-  } finally {
+    } finally {
     hintPending = false;
     btn.disabled = false;
   }
@@ -1331,8 +1294,7 @@ async function requestHint() {
 function onBoneyardDraw(targetMesh) {
   if (!view || view.status !== 'playing' || view.turn !== myId || !view.canDraw) return;
   socket.emit('game:draw');
-  sfx.click();
-}
+  }
 function onTileClick(tile, el) {
   if (!view || view.status !== 'playing' || view.turn !== myId) {
     el.classList.add('shake'); setTimeout(() => el.classList.remove('shake'), 300);
@@ -1343,7 +1305,6 @@ function onTileClick(tile, el) {
     el.classList.add('shake'); setTimeout(() => el.classList.remove('shake'), 300);
     return;
   }
-  sfx.select();
   if (moves[0].end === null) {                    // lead move — play immediately
     socket.emit('game:play', { tileId: tile.id, end: null });
     selectedTile = null;
@@ -1474,8 +1435,8 @@ function withConfirm(btn, fn) {
 }
 
 function initGameUI() {
-  $('btnDraw').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:draw'); sfx.click(); }); };
-  $('btnPass').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:pass'); sfx.click(); }); };
+  $('btnDraw').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:draw'); }); };
+  $('btnPass').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:pass'); }); };
   $('btnHint').onclick = requestHint;
   $('btnSort').onclick = cycleSort;
   $('btnSort').textContent = SORT_LABELS[sortMode];
@@ -1483,57 +1444,24 @@ function initGameUI() {
   // btnSettings markup is not shipped yet — guard so a missing
   // element can never abort initGameUI and orphan every handler after it.
   const btnSettings = $('btnSettings');
-  if (btnSettings) btnSettings.onclick = () => { openSettings(); sfx.click(); };
+  if (btnSettings) btnSettings.onclick = () => { openSettings(); };
   $('btnNextHand').onclick = () => socket.emit('game:nextHand');
   $('btnRematch').onclick = () => socket.emit('game:rematch');
-  $('btnNextHandVote').onclick = () => { socket.emit('game:nextHandVote'); sfx.click(); };
-  $('btnRematchVote').onclick = () => { socket.emit('game:rematchVote'); sfx.click(); };
+  $('btnNextHandVote').onclick = () => { socket.emit('game:nextHandVote'); };
+  $('btnRematchVote').onclick = () => { socket.emit('game:rematchVote'); };
   $('btnChat').onclick = (e) => {
     e.stopPropagation();
     chatOpen ? closeChat() : openChat();
   };
-  $('btnMic').onclick = (e) => {
-    e.stopPropagation();
-    toggleMic();
-  };
-  bindPttHold($('btnMic'));
   $('chatClose').onclick = (e) => {
     e.stopPropagation();
     closeChat();
-  };
-  $('btnVoice').onclick = (e) => {
-    e.stopPropagation();
-    voicePanelOpen ? closeVoicePanel() : openVoicePanel();
-  };
-  $('voiceClose').onclick = (e) => {
-    e.stopPropagation();
-    closeVoicePanel();
-  };
-  $('btnVoiceSelfMute').onclick = () => toggleMic();
-  $('btnVoiceLeave').onclick = () => {
-    voice?.leave();
-    closeVoicePanel();
-    sfx.micOff();
-  };
-  // host-only: mute (or unmute) everyone except the host, server-enforced
-  $('btnVoiceMuteAll').onclick = async () => {
-    const btn = $('btnVoiceMuteAll');
-    if (!voice) return;
-    const anyHostMuted = voicePeers.some(p => p.hostMuted);
-    btn.disabled = true;
-    sfx.click();
-    try {
-      const res = await voice.hostMute({ all: true, muted: !anyHostMuted });
-      if (res && !res.ok) showVoiceError(res.error);
-    } finally { btn.disabled = false; }
   };
   document.addEventListener('click', (e) => {
     if (chatOpen && !$('chatDrawer').contains(e.target) && !$('btnChat').contains(e.target)) {
       closeChat();
     } else if (emojiPopOpen && !$('emojiPop').contains(e.target) && !$('btnEmoji').contains(e.target)) {
       closeEmojiPop();
-    } else if (voicePanelOpen && !$('voicePanel').contains(e.target) && !$('btnVoice').contains(e.target)) {
-      closeVoicePanel();
     }
   });
   document.addEventListener('keydown', (e) => {
@@ -1547,12 +1475,9 @@ function initGameUI() {
     }
     if (e.key === 'Escape') {
       if (!$('modalLeave').classList.contains('hidden')) {
-        sfx.click();
         closeLeaveConfirm();
       } else if (emojiPopOpen) {
         closeEmojiPop();
-      } else if (voicePanelOpen) {
-        closeVoicePanel();
       } else if (chatOpen) {
         closeChat();
       }
@@ -1571,20 +1496,6 @@ function initGameUI() {
   if (btnFs) {
     btnFs.onclick = toggleFullscreen;
   }
-  const btnSound = $('btnSound');
-  if (btnSound) {
-    const syncSoundBtn = () => {
-      btnSound.classList.toggle('is-muted', sfx.isMuted());
-      btnSound.title = sfx.isMuted() ? 'تشغيل الصوت' : 'كتم الصوت';
-      btnSound.setAttribute('aria-label', btnSound.title);
-    };
-    btnSound.onclick = () => {
-      sfx.setMuted(!sfx.isMuted());
-      syncSoundBtn();
-      if (!sfx.isMuted()) sfx.click();
-    };
-    syncSoundBtn();
-  }
   renderHomeStats();
   const resetStats = $('btnResetStats');
   if (resetStats) {
@@ -1592,27 +1503,26 @@ function initGameUI() {
       if (!confirm('تمسح إحصائياتك المحلية؟')) return;
       localStorage.removeItem('domino_stats');
       renderHomeStats();
-      sfx.click();
-    };
+      };
   }
   // PWA: register the offline app-shell worker on secure contexts only
   if ('serviceWorker' in navigator &&
       (location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname))) {
     navigator.serviceWorker.register('sw.js').catch(() => { /* offline shell is best-effort */ });
   }
-  $('btnExit').onclick = () => { sfx.click(); openLeaveConfirm(); };
-  $('btnLeaveCancel').onclick = () => { sfx.click(); closeLeaveConfirm(); };
+  $('btnExit').onclick = () => { openLeaveConfirm(); };
+  $('btnLeaveCancel').onclick = () => { closeLeaveConfirm(); };
   $('btnLeaveConfirm').onclick = leaveRoom;
   $('modalLeave').addEventListener('click', (e) => {
-    if (e.target === $('modalLeave')) { sfx.click(); closeLeaveConfirm(); }
+    if (e.target === $('modalLeave')) { closeLeaveConfirm(); }
   });
   // K3.C7: rules modal (home + lobby) — close on ✕ or backdrop tap.
   for (const id of ['btnRulesHome', 'btnRulesClose']) {
     const b = $(id);
-    if (b) b.onclick = () => { $('modalRules')?.classList.add('hidden'); sfx.click(); };
+    if (b) b.onclick = () => { $('modalRules')?.classList.add('hidden'); };
   }
   $('modalRules')?.addEventListener('click', (e) => {
-    if (e.target === $('modalRules')) { sfx.click(); $('modalRules').classList.add('hidden'); }
+    if (e.target === $('modalRules')) { $('modalRules').classList.add('hidden'); }
   });
   initSettingsModal();
   ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach(ev => {
@@ -1620,12 +1530,10 @@ function initGameUI() {
   });
 }
 
-// ── K3.C6: settings modal — master volume, force-2D, confirm-moves, vibration ──
+// ── K3.C6: settings modal — force-2D, confirm-moves, vibration ──
 function openSettings() {
   const modal = $('modalSettings');
   if (!modal) return;
-  const rng = $('rngVolume');
-  if (rng) rng.value = String(Math.round((sfx.getVolume?.() ?? 1) * 100));
   const f2 = $('chkForce2d');
   if (f2) f2.checked = force2d();
   const cf = $('chkConfirm');
@@ -1637,15 +1545,10 @@ function openSettings() {
 function initSettingsModal() {
   const modal = $('modalSettings');
   if (!modal) return;
-  $('btnSettingsClose').onclick = () => { modal.classList.add('hidden'); sfx.click(); };
+  $('btnSettingsClose').onclick = () => { modal.classList.add('hidden'); };
   modal.addEventListener('click', (e) => {
-    if (e.target === modal) { sfx.click(); modal.classList.add('hidden'); }
+    if (e.target === modal) { modal.classList.add('hidden'); }
   });
-  const rng = $('rngVolume');
-  if (rng) {
-    rng.oninput = () => { sfx.setVolume?.(Number(rng.value) / 100); };
-    rng.onchange = () => sfx.click();
-  }
   const f2 = $('chkForce2d');
   if (f2) {
     f2.onchange = () => {
@@ -1657,16 +1560,14 @@ function initSettingsModal() {
   if (cf) {
     cf.onchange = () => {
       try { localStorage.setItem('domino_confirm', cf.checked ? '1' : '0'); } catch { /* no storage */ }
-      sfx.click();
-    };
+      };
   }
   const vb = $('chkVibrate');
   if (vb) {
     vb.onchange = () => {
       try { localStorage.setItem('domino_vibrate', vb.checked ? '1' : '0'); } catch { /* no storage */ }
       if (vb.checked) { try { navigator.vibrate?.(60); } catch { /* unsupported */ } }
-      sfx.click();
-    };
+      };
   }
 }
 
@@ -1722,8 +1623,7 @@ function updateChatCount() {
 
 function sendEmoji(em) {
   socket.emit('chat:send', { emoji: em });
-  sfx.select();
-}
+  }
 
 function buildChatWidgets() {
   const quick = $('chatQuick');
@@ -1749,7 +1649,7 @@ function buildChatWidgets() {
       chip.type = 'button';
       chip.className = 'chat-chip';
       chip.textContent = phrase;
-      chip.onclick = () => { socket.emit('chat:send', { text: phrase }); sfx.select(); };
+      chip.onclick = () => { socket.emit('chat:send', { text: phrase }); };
       phrases.appendChild(chip);
     }
     pop.appendChild(phrases);
@@ -1984,7 +1884,6 @@ function showChatToast(msg) {
 function onChatMsg(msg) {
   showChatToast(msg);
   appendChatMsg(msg);
-  if (msg.pid && msg.pid !== myId) sfx.chatPop();
   if (!chatOpen) {
     unread++;
     updateBadge();
@@ -1997,395 +1896,6 @@ function updateBadge() {
   badge.textContent = unread > 9 ? '9+' : String(unread);
   badge.classList.toggle('hidden', !unread);
 }
-
-// ══════════ voice chat ══════════
-// Mic FAB cycles off → on → muted → on. The headset FAB opens a panel with
-// per-player controls: anyone can locally mute or set the volume of anyone
-// else, without affecting the rest of the room.
-
-// shared voice error routing: game → turn banner, lobby → lobbyError, else home
-function showVoiceError(msg) {
-  if (!msg) return;
-  if ($('screen-game').classList.contains('active')) setBanner('⚠ ' + msg, '');
-  else if ($('screen-lobby').classList.contains('active')) lobbyError(msg);
-  else homeError(msg);
-}
-
-// neutral transient hint (voice info, e.g. "reconnecting voice") — small toast
-// beside the mic FAB stack so it never clobbers the turn banner
-let voiceInfoTimer = null;
-function showVoiceInfo(msg) {
-  if (!msg) return;
-  document.querySelectorAll('.vp-info').forEach(el => el.remove());
-  const el = document.createElement('div');
-  el.className = 'vp-info';
-  el.textContent = '🎙 ' + msg;
-  document.body.appendChild(el);
-  clearTimeout(voiceInfoTimer);
-  voiceInfoTimer = setTimeout(() => {
-    el.classList.add('fade');
-    setTimeout(() => el.remove(), 350);
-  }, 3000);
-}
-
-function initVoice() {
-  voice = new VoiceChat(socket, {
-    onSelf: (s) => { voiceSelf = s; updateMicUI(); renderVoicePanel(); },
-    onPeers: (list) => {
-      voicePeers = list;
-      for (const p of list) {
-        if (p.speaking) speakingSet.add(p.id); else speakingSet.delete(p.id);
-      }
-      updateMicUI();
-      renderVoicePanel();
-      markSpeakingRows();
-    },
-    onSpeaking: (pid, on) => {
-      if (!pid) return;
-      if (on) speakingSet.add(pid); else speakingSet.delete(pid);
-      markSpeakingRows();
-      updateMicUI();
-    },
-    onError: (msg) => showVoiceError(msg),
-    onInfo: (msg) => showVoiceInfo(msg),
-  });
-  if (myId) voice.setSelf(myId);
-  try { voice.setPtt(localStorage.getItem('domino_ptt') === '1'); } catch { /* no storage */ }
-}
-
-async function toggleMic() {
-  if (!voice || !voice.supported) return;
-  if (voiceSelf.status === 'failed') {
-    // every peer failed last time — tear down and try a fresh join
-    voice.leave();
-    voiceSelf = { joined: false, muted: false, speaking: false, status: 'idle' };
-    updateMicUI();
-  }
-  if (!voiceSelf.joined) {
-    sfx.click();
-    const res = await voice.join();
-    if (res?.ok) sfx.micOn();
-    else {
-      // join failed — force the buttons back to .off even if voice.js
-      // didn't broadcast an idle onSelf after the error
-      voiceSelf = { ...voiceSelf, joined: false, status: 'idle' };
-      updateMicUI();
-    }
-  } else if (!voice.ptt) {
-    // in push-to-talk mode the mic button is a hold key — no toggle on tap
-    voice.toggleMute();
-    voiceSelf.muted ? sfx.micOff() : sfx.micOn();
-  }
-}
-
-// hold-to-talk wiring: while PTT is on, holding a mic button opens the mic
-function bindPttHold(el) {
-  if (!el) return;
-  const down = (e) => {
-    if (!voice?.ptt || !voiceSelf.joined) return; // tap path joins/toggles normally
-    e.preventDefault();
-    voice.setTalking(true);
-    updateMicUI();
-  };
-  const up = () => {
-    if (!voice?.ptt) return;
-    voice.setTalking(false);
-    updateMicUI();
-  };
-  el.addEventListener('pointerdown', down);
-  el.addEventListener('pointerup', up);
-  el.addEventListener('pointercancel', up);
-  el.addEventListener('pointerleave', up);
-}
-
-function updateMicUI() {
-  const waiting = voiceSelf.status === 'requesting' || voiceSelf.status === 'connecting';
-  const failed = voiceSelf.status === 'failed';
-  const hostMuted = !!voiceSelf.hostMuted;
-  const muted = !!voiceSelf.muted || hostMuted;
-  const waitTitle = voiceSelf.status === 'connecting' ? 'بنوصل بالصوت…' : 'بنطلب إذن المايك…';
-  const btn = $('btnMic');
-  if (btn && !voiceUnsupported) {
-    btn.classList.toggle('waiting', waiting);
-    btn.classList.toggle('off', (!voiceSelf.joined && !waiting) || failed);
-    btn.classList.toggle('on', voiceSelf.joined && !failed && !muted);
-    btn.classList.toggle('muted', voiceSelf.joined && !failed && muted);
-    btn.classList.toggle('talking', voiceSelf.joined && !failed && !muted && voiceSelf.speaking);
-    btn.title = waiting ? waitTitle
-      : failed ? 'تعذّر توصيل الصوت — دوس للمحاولة تاني'
-      : voiceSelf.joined && hostMuted ? 'المضيف كتّمك'
-      : !voiceSelf.joined ? 'فتح المايك'
-      : voice.ptt ? 'اضغط واستمر بالضغط للكلام'
-      : muted ? 'فك كتم المايك' : 'كتم المايك';
-    btn.setAttribute('aria-label', btn.title);
-  }
-  const lb = $('btnLobbyMic');
-  if (lb && !voiceUnsupported) {
-    lb.classList.toggle('waiting', waiting);
-    lb.classList.toggle('active', voiceSelf.joined && !failed && !muted);
-    lb.classList.toggle('muted', voiceSelf.joined && !failed && muted);
-    lb.textContent = waiting ? (voiceSelf.status === 'connecting' ? '🎤 بنوصل بالصوت…' : '🎤 بنطلب إذن المايك…')
-      : failed ? '🎤 تعذّر توصيل الصوت — حاول تاني'
-      : !voiceSelf.joined ? '🎤 فتح المايك'
-      : hostMuted ? '🔇 المضيف كتّمك'
-      : voice.ptt ? '🖐 اضغط واستمر للكلام'
-      : muted ? '🔇 المايك مكتوم — اضغط للكلام' : '🎙 المايك شغال — اضغط للكتم';
-    const lbTitle = waiting ? waitTitle : (voiceSelf.joined && hostMuted ? 'المضيف كتّمك' : '');
-    if (lbTitle) lb.title = lbTitle;
-    else lb.removeAttribute('title');
-  }
-  const badge = $('voiceBadge');
-  if (badge) {
-    const n = voicePeers.length + (voiceSelf.joined ? 1 : 0);
-    badge.textContent = String(n);
-    badge.classList.toggle('hidden', !n);
-  }
-}
-
-function openVoicePanel() {
-  voicePanelOpen = true;
-  $('voicePanel')?.classList.remove('hidden');
-  renderVoicePanel();
-  sfx.click();
-}
-
-function closeVoicePanel() {
-  voicePanelOpen = false;
-  $('voicePanel')?.classList.add('hidden');
-}
-
-// diff-render state for the voice panel: rows are created once and updated in
-// place. Rebuilding the whole panel on every speaking flicker destroyed active
-// volume-slider drags and burned DOM churn at up to ~6 updates/sec.
-const VP_SVG_SPK = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>';
-const VP_SVG_MUTED = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>';
-const vpCache = { pttBtn: null, playRow: null, empty: null, selfRow: null, selfState: null, rows: new Map() };
-
-function renderVoicePanel() {
-  const list = $('voiceList');
-  if (!list || !voice) return;
-  // cache detached from the DOM (panel cleared elsewhere / voice recreated)
-  if (vpCache.pttBtn && !list.contains(vpCache.pttBtn)) {
-    vpCache.pttBtn = null; vpCache.playRow = null; vpCache.empty = null;
-    vpCache.selfRow = null; vpCache.selfState = null; vpCache.rows.clear();
-  }
-
-  // push-to-talk mode toggle (persisted in localStorage) — one stable row
-  if (!vpCache.pttBtn) {
-    const pttRow = document.createElement('div');
-    pttRow.className = 'vp-ptt-row';
-    const pttBtn = document.createElement('button');
-    pttBtn.className = 'vp-ptt';
-    pttBtn.onclick = () => {
-      const on = !voice.ptt;
-      voice.setPtt(on);
-      try { localStorage.setItem('domino_ptt', on ? '1' : '0'); } catch {}
-      updateMicUI();
-      renderVoicePanel();
-      sfx.click();
-    };
-    pttRow.appendChild(pttBtn);
-    list.appendChild(pttRow);
-    vpCache.pttBtn = pttBtn;
-  }
-  vpCache.pttBtn.className = 'vp-ptt' + (voice.ptt ? ' on' : '');
-  vpCache.pttBtn.title = voice.ptt ? 'اضغط على زرار المايك واستمر ضاغط عشان تتكلم' : 'شغّل الوضع ده عشان المايك يفتح وأنت ضاغط بس';
-  vpCache.pttBtn.textContent = voice.ptt ? '🖐 اضغط وكلم: مفعّل' : '🖐 اضغط وكلم: مقفول';
-  vpCache.pttBtn.setAttribute('aria-pressed', String(!!voice.ptt));
-
-  // autoplay policy blocked the remote audio elements — one actionable row
-  const anyBlocked = voicePeers.some(p => p.playBlocked);
-  if (anyBlocked && !vpCache.playRow) {
-    const row = document.createElement('div');
-    row.className = 'vp-play-row';
-    const btn = document.createElement('button');
-    btn.className = 'btn small';
-    btn.textContent = '▶ تشغيل صوت اللاعبين';
-    btn.title = 'المتصفح منع التشغيل التلقائي — دوس هنا واسمح بالصوت';
-    btn.onclick = () => { voice.resumeAudio(); sfx.click(); };
-    row.appendChild(btn);
-    list.appendChild(row);
-    vpCache.playRow = row;
-  }
-  if (vpCache.playRow) vpCache.playRow.classList.toggle('hidden', !anyBlocked);
-
-  const showEmpty = !voiceSelf.joined && !voicePeers.length;
-  if (showEmpty && !vpCache.empty) {
-    const empty = document.createElement('div');
-    empty.className = 'vp-empty';
-    empty.textContent = 'لسه محدش فاتح المايك. دوس زرار المايك وابدأ الكلام 🎙';
-    list.appendChild(empty);
-    vpCache.empty = empty;
-  }
-  if (vpCache.empty) vpCache.empty.classList.toggle('hidden', !showEmpty);
-
-  // self row — updated in place
-  const hostMuted = !!voiceSelf.hostMuted;
-  const selfMuted = !!voiceSelf.muted || hostMuted;
-  if (voiceSelf.joined && !vpCache.selfRow) {
-    const row = document.createElement('div');
-    row.className = 'vp-row me';
-    row.innerHTML = `
-      <span class="vp-dot" aria-hidden="true"></span>
-      <span class="vp-name">${esc(myName || 'أنت')} <span class="vp-you">(أنت)</span></span>
-      <span class="vp-state"></span>`;
-    list.appendChild(row);
-    vpCache.selfRow = row;
-    vpCache.selfState = row.querySelector('.vp-state');
-  }
-  if (vpCache.selfRow) {
-    vpCache.selfRow.classList.toggle('hidden', !voiceSelf.joined);
-    vpCache.selfRow.classList.toggle('speaking', voiceSelf.joined && !selfMuted && voiceSelf.speaking);
-    vpCache.selfState.textContent = hostMuted ? 'مكتوم من المضيف' : selfMuted ? 'مكتوم' : voiceSelf.speaking ? 'بتتكلم' : '';
-  }
-
-  // peer rows: create missing ones, update the rest in place, drop the gone
-  const seen = new Set();
-  for (const p of voicePeers) {
-    const key = String(p.id);
-    seen.add(key);
-    let rec = vpCache.rows.get(key);
-    if (!rec) {
-      const row = document.createElement('div');
-      row.className = 'vp-row';
-      row.dataset.pid = p.id;
-
-      const dot = document.createElement('span');
-      dot.className = 'vp-dot';
-      row.appendChild(dot);
-
-      const name = document.createElement('span');
-      name.className = 'vp-name';
-      row.appendChild(name);
-
-      const st = document.createElement('span');
-      st.className = 'vp-state';
-      row.appendChild(st);
-
-      const muteBtn = document.createElement('button');
-      muteBtn.className = 'vp-mute';
-      muteBtn.onclick = () => {
-        const cur = voicePeers.find(x => String(x.id) === key);
-        if (cur) voice.setPeerMuted(cur.id, !cur.mutedLocal);
-        sfx.click();
-      };
-      row.appendChild(muteBtn);
-
-      // host-only: mute this player for EVERYONE (server-enforced)
-      let hm = null;
-      if (isHost) {
-        hm = document.createElement('button');
-        hm.className = 'vp-hostmute';
-        hm.onclick = async () => {
-          const cur = voicePeers.find(x => String(x.id) === key);
-          if (!cur) return;
-          hm.disabled = true;
-          try {
-            const res = await voice.hostMute({ pid: cur.id, muted: !cur.hostMuted });
-            if (res && !res.ok) showVoiceError(res.error);
-          } finally { hm.disabled = false; }
-        };
-        row.appendChild(hm);
-      }
-
-      const vol = document.createElement('input');
-      vol.type = 'range';
-      vol.className = 'vp-vol';
-      vol.min = '0'; vol.max = '100';
-      vol.oninput = () => voice.setPeerVolume(p.id, Number(vol.value) / 100);
-      row.appendChild(vol);
-
-      list.appendChild(row);
-      rec = { row, dot, name, st, muteBtn, hm, vol };
-      vpCache.rows.set(key, rec);
-    }
-    rec.row.classList.toggle('speaking', !!p.speaking);
-    rec.dot.className = 'vp-dot' + (p.conn === 'connected' ? ' connected'
-      : p.conn === 'connecting' ? ' connecting'
-      : p.conn === 'failed' ? ' failed' : '');
-    rec.name.textContent = p.name;
-    rec.st.textContent = p.hostMuted ? 'مكتوم من المضيف'
-      : p.muted ? 'مكتوم نفسه'
-      : p.speaking ? 'بتتكلم' : '';
-    rec.muteBtn.className = 'vp-mute' + (p.mutedLocal ? ' muted' : '');
-    rec.muteBtn.title = p.mutedLocal ? 'فك الكتم عنه' : 'اكتموا عندي بس';
-    rec.muteBtn.setAttribute('aria-label', rec.muteBtn.title);
-    rec.muteBtn.innerHTML = p.mutedLocal ? VP_SVG_MUTED : VP_SVG_SPK;
-    if (rec.hm) {
-      rec.hm.className = 'vp-hostmute' + (p.hostMuted ? ' muted' : '');
-      rec.hm.title = p.hostMuted ? 'فك الكتم عنه (للجميع)' : 'كتمه عن الجميع';
-      rec.hm.setAttribute('aria-label', rec.hm.title);
-      rec.hm.innerHTML = VP_SVG_MUTED;
-    }
-    const val = String(Math.round((p.volume ?? 1) * 100));
-    if (document.activeElement !== rec.vol) rec.vol.value = val; // never fight an active drag
-    rec.vol.title = 'صوت ' + p.name;
-    rec.vol.setAttribute('aria-label', rec.vol.title);
-  }
-  for (const [key, rec] of [...vpCache.rows]) {
-    if (!seen.has(key)) {
-      rec.row.remove();
-      vpCache.rows.delete(key);
-    }
-  }
-
-  // order pass: MOVE existing nodes into place — skipped when already ordered,
-  // so a slider drag never gets interrupted by a mere speaking flicker
-  const wantOrder = [];
-  if (vpCache.pttBtn) wantOrder.push(vpCache.pttBtn.parentElement);
-  if (vpCache.playRow) wantOrder.push(vpCache.playRow);
-  if (vpCache.empty) wantOrder.push(vpCache.empty);
-  if (vpCache.selfRow) wantOrder.push(vpCache.selfRow);
-  for (const rec of vpCache.rows.values()) wantOrder.push(rec.row);
-  const curOrder = [...list.children];
-  if (wantOrder.length !== curOrder.length || wantOrder.some((el, i) => curOrder[i] !== el)) {
-    for (const el of wantOrder) list.appendChild(el);
-  }
-
-  const selfMuteBtn = $('btnVoiceSelfMute');
-  if (selfMuteBtn) {
-    selfMuteBtn.disabled = !voiceSelf.joined || !!voiceSelf.hostMuted;
-    selfMuteBtn.textContent = voiceSelf.hostMuted ? 'المضيف كتّمك'
-      : voiceSelf.muted ? 'فك كتم نفسي' : 'كتم نفسي';
-  }
-  // host-only mute-all toggle in the panel header
-  const muteAll = $('btnVoiceMuteAll');
-  if (muteAll) {
-    muteAll.classList.toggle('hidden', !(isHost && voiceSelf.joined));
-    const anyHostMuted = voicePeers.some(p => p.hostMuted);
-    muteAll.textContent = anyHostMuted ? 'فك الكل' : 'كتم الكل';
-    muteAll.title = anyHostMuted ? 'فك الكتم عن الجميع (ما عداك)' : 'كتم الجميع (ما عداك)';
-  }
-  const sub = $('voiceSub');
-  if (sub) {
-    const n = voicePeers.length + (voiceSelf.joined ? 1 : 0);
-    sub.textContent = n ? `${n} في المكالمة` : 'المكالمة داخل الغرفة دي بس';
-  }
-}
-
-// light up speaking players on the scoreboard + voice panel
-function markSpeakingRows() {
-  const card = $('scoreCard');
-  if (card && view) {
-    card.querySelectorAll('.sc-row').forEach((row, i) => {
-      const ranked = [...view.players].sort((a, b) => (view.scores[b] || 0) - (view.scores[a] || 0));
-      row.classList.toggle('speaking', speakingSet.has(ranked[i]));
-    });
-  }
-  $('voiceList')?.querySelectorAll('.vp-row[data-pid]').forEach(row => {
-    const pid = row.dataset.pid;
-    row.classList.toggle('speaking', speakingSet.has(pid));
-    // keep the row's state text in sync between roster re-renders
-    const p = voicePeers.find(x => x.id === pid);
-    const st = row.querySelector('.vp-state');
-    if (p && st) {
-      st.textContent = p.hostMuted ? 'مكتوم من المضيف'
-        : p.muted ? 'مكتوم نفسه'
-        : speakingSet.has(pid) ? 'بتتكلم' : '';
-    }
-  });
-}
-
 
 // ══════════ effects ══════════
 function floatText(txt, isEmoji = false) {
@@ -2479,24 +1989,6 @@ function emit(event, payload) {
   return new Promise(resolve => socket.emit(event, payload, resolve));
 }
 
-// mic unavailable (unsupported browser / insecure context): disable the mic
-// buttons with an explanation but never block the rest of the UI
-function applyVoiceSupport() {
-  voiceUnsupported = !!(voice && (!voice.supported || !voice.secure));
-  if (!voiceUnsupported) return;
-  const msg = 'المايك مش متاح هنا — افتح اللعبة في كروم أو إيدج بدل المتصفح جوه التطبيقات.';
-  for (const id of ['btnMic', 'btnLobbyMic']) {
-    const b = $(id);
-    if (!b) continue;
-    b.disabled = true;
-    b.classList.add('off');
-    b.title = msg;
-    b.setAttribute('aria-label', msg);
-  }
-  const lb = $('btnLobbyMic');
-  if (lb) lb.textContent = '🎤 المايك مش متاح';
-}
-
 // ══════════ boot ══════════
 // Web mode: same-origin (browser / Cloudflare Tunnel) — today's behaviour, untouched.
 // APK mode: every phone runs its own game server; the launcher discovers nearby
@@ -2504,27 +1996,8 @@ function applyVoiceSupport() {
 const IN_APP = typeof window.Capacitor !== 'undefined';
 const STATUS_URL = 'http://127.0.0.1:3001';
 
-function isLanUrl(u) {
-  try { return /^(192\.168\.|127\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(new URL(u).hostname); }
-  catch { return false; }
-}
-
 function startSocket(base) {
   socket = io(base || undefined, { transports: ['websocket', 'polling'] });
-  if (base && isLanUrl(base)) {
-    // Offline LAN: peers share a subnet, so plain host candidates connect — the
-    // internet STUN/TURN relays are unreachable and would only add timeouts.
-    setIceConfig({ iceServers: [] });
-  } else {
-    // Server-injected ICE config (self-hosted coturn via TURN_URLS etc.).
-    // Fails silently into the client's built-in defaults.
-    const cfgUrl = (base ? base.replace(/\/+$/, '') : '') + '/voice-config';
-    fetch(cfgUrl).then(r => (r.ok ? r.json() : null)).then(cfg => {
-      if (cfg && cfg.iceServers) setIceConfig(cfg);
-    }).catch(() => { /* defaults stay */ });
-  }
-  initVoice();
-  applyVoiceSupport();
 
   socket.on('connect', () => {
     $('connPill').className = 'ok';
@@ -2537,8 +2010,6 @@ function startSocket(base) {
       emit('room:join', { code: targetCode, name, token }).then(res => {
         if (res?.ok) {
           afterJoin(res, name);
-          // was in voice before the drop? announce again — the mesh rebuilds
-          if (voiceSelf.joined) voice.rejoin();
           showScreen(res.state === 'playing' ? 'game' : 'lobby');
           // F1.4: we may be returning from a locked screen / slept device. We
           // cannot trust the incremental render cursor after rAF stalls, so force
@@ -2551,15 +2022,6 @@ function startSocket(base) {
             setBanner(myTurnNow ? 'اتصلت من جديد — دورك الآن' : 'اتصلت من جديد', myTurnNow ? 'mine' : '');
             if (myTurnNow) startTurnAlert();
           }
-        } else if (roomCode) {
-          // We thought we were still in a room, but the server disagrees (it
-          // was swept/deleted while we were offline). Any voice state is dead
-          // — drop it instead of showing a live mic over nothing.
-          voice?.leave();
-          voiceSelf = { joined: false, muted: false, speaking: false, status: 'idle' };
-          speakingSet.clear();
-          closeVoicePanel();
-          updateMicUI();
         }
       });
     }
@@ -2573,8 +2035,6 @@ function startSocket(base) {
     lastActionKey = '';
     prevTurnKey = null;
     showScreen('game');
-    sfx.start();
-    sfx.ambient(true);
   });
   socket.on('game:state', (st) => {
     perfMsgs++;                                     // F3.3: messages/sec counter
@@ -2598,8 +2058,6 @@ function startSocket(base) {
     stopTurnAlert();
     board?.clearMarkers();
     closeChat();
-    closeVoicePanel();
-    sfx.ambient(false);
     showScreen('lobby');
   });
   socket.on('room:kicked', () => {
@@ -2671,7 +2129,7 @@ async function tickLan() {
       const li = document.createElement('li');
       li.className = 'lan-peer self';
       li.textContent = '🏠 جهازك (مضيفك أنت)';
-      li.onclick = () => { sfx.click(); connectToBase(LOCAL_BASE, '📡 رجعت لجهازك — أنت المضيف'); };
+      li.onclick = () => { connectToBase(LOCAL_BASE, '📡 رجعت لجهازك — أنت المضيف'); };
       ul.appendChild(li);
     }
     for (const p of p_list(peers)) {
@@ -2679,7 +2137,6 @@ async function tickLan() {
       li.className = 'lan-peer' + (activeBase === `http://${p.ip}:${p.port}` ? ' active' : '');
       li.textContent = '📱 ' + p.label;
       li.onclick = () => {
-        sfx.click();
         connectToBase(`http://${p.ip}:${p.port}`, '🔌 اتصلت بـ ' + p.label);
       };
       ul.appendChild(li);
@@ -2719,20 +2176,17 @@ function initAppNetUI() {
   if (!toggle || !IN_APP) return;
   toggle.classList.remove('hidden');
   toggle.onclick = () => {
-    sfx.click();
     $('advPanel').classList.toggle('hidden');
   };
   const inp = $('inpManualServer');
   inp.value = localStorage.getItem('domino_manual_server') || '';
   $('btnSaveServer').onclick = () => {
-    sfx.click();
     const v = inp.value.trim().replace(/^https?:\/\//, '');
     if (v) localStorage.setItem('domino_manual_server', v);
     else localStorage.removeItem('domino_manual_server');
     location.reload();
   };
   $('btnClearServer').onclick = () => {
-    sfx.click();
     localStorage.removeItem('domino_manual_server');
     location.reload();
   };
@@ -2742,8 +2196,8 @@ function boot() {
   if (IN_APP) startAppNet(); else startSocket('');
   initHome(); initLobby(); initGameUI(); initAppNetUI();
   // F1.3: skip the countdown tick entirely while the tab is hidden — it is pure
-  // DOM work nobody can see, and it keeps SFX (alarm/tick) from firing in a
-  // background tab. The state render on return catches the clock up instantly.
+  // DOM work nobody can see. The state render on return catches the clock up
+  // instantly.
   setInterval(() => { if (!document.hidden) updateTurnTimer(); }, 200);
 }
 
