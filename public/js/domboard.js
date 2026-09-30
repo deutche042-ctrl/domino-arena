@@ -119,10 +119,12 @@ export class DomBoard {
         nodes.push(el);
       }
       this.chainEl.replaceChildren(...nodes);
-      // Newest tile in view.
+      // Newest tile in view: a short pop + a persistent K3.C1 "last move" marker
+      // (the pop fades, the marker stays until the next move replaces it).
       const last = this.chainEl.lastElementChild;
+      this.chainEl.querySelectorAll('.b2-tile.last').forEach(el => el.classList.remove('last'));
       if (last) {
-        last.classList.add('new');
+        last.classList.add('new', 'last');
         setTimeout(() => last.classList.remove('new'), 500);
       }
       // Scroll the newest tile into view along the strip.
@@ -156,6 +158,7 @@ export class DomBoard {
   }
   invalidate() { /* no incremental cursor to invalidate in 2D */ }
   resize() { /* DOM reflows itself */ }
+  recenter() { /* K3.C2: the 2D board has no camera; API parity with Board3D */ }
   stats() {
     return {
       calls: 0, tris: 0, geos: 0, texs: 0, programs: 0,

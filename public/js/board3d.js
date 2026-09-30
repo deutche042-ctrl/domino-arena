@@ -38,6 +38,10 @@ export class Board3D {
     this.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
     // one finger rotate / pinch zoom on touch
     this.controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+    // K3.C2: once the user grabs the camera, auto-fit stops fighting them —
+    // the fit goal is applied again only via recenter() (HUD button) or a new hand.
+    this._userCam = false;
+    this.controls.addEventListener('start', () => { this._userCam = true; });
 
     // lights
     this.scene.add(new THREE.AmbientLight(0xbfd0ff, 0.55));
@@ -71,6 +75,19 @@ export class Board3D {
     this._buildTable();
     this._buildTurnRing();
 
+    // K3.C1: persistent "last move" glow pad + player-name label. Tile meshes
+    // share pooled materials, so the highlight is its own mesh parked just
+    // above the felt under the most recently placed tile.
+    this._lastGlow = new THREE.Mesh(
+      new THREE.PlaneGeometry(TILE_W * 1.55, TILE_L * 1.5),
+      new THREE.MeshBasicMaterial({ color: 0x2ee6a8, transparent: true, opacity: 0.22, depthWrite: false })
+    );
+    this._lastGlow.rotation.order = 'YXZ';
+    this._lastGlow.rotation.x = -Math.PI / 2;
+    this._lastGlow.visible = false;
+    this._lastLabel = null;
+    this.scene.add(this._lastGlow);
+
     // groups
     this.chainGroup = new THREE.Group();
     this.markerGroup = new THREE.Group();
@@ -80,6 +97,7 @@ export class Board3D {
     this._texCache = new Map();
     this._matCache = new Map();    // F3.1: pooled face materials, keyed `f:a-b`
     this._scoreMats = new Map();   // "+N" All-Fives preview badge sprites
+    this._labelMats = new Map();   // K3.C1: last-move "who played" label sprites
     this._theme = getTheme();      // F4.3: active tile skin (keys the texture cache)
     // SHARED geometry for every tile mesh in the scene. NEVER dispose it
     // per-mesh — disposing it once would blank out every tile that uses it.
@@ -693,7 +711,58 @@ export class Board3D {
 
     this._syncBoneyard(view.boneyardCount);
     const allSpots = st.spots;   // full spot list, prefix + appended
+    this._showLastMoveHint(moves, allSpots, view);
     this._fitCamera(allSpots.length ? allSpots : addedSpots);
+  }
+
+  /** K3.C1: park the glow pad + name label on the most recently placed tile. */
+  _showLastMoveHint(moves, spots, view) {
+    const last = moves[moves.length - 1];
+    const spot = spots[spots.length - 1];
+    if (!last || !spot) {
+      this._lastGlow.visible = false;
+      if (this._lastLabel) this._lastLabel.visible = false;
+      return;
+    }
+    this._lastGlow.position.set(spot.x, 0.021, spot.z);
+    this._lastGlow.rotation.y = spot.rotY;
+    this._lastGlow.visible = true;
+    const name = view?.names?.[last.p];
+    if (!name) {
+      if (this._lastLabel) this._lastLabel.visible = false;
+      return;
+    }
+    if (!this._lastLabel) {
+      this._lastLabel = new THREE.Sprite();
+      this._lastLabel.scale.set(2.6, 0.72, 1);
+      this.scene.add(this._lastLabel);
+    }
+    this._lastLabel.material = this._nameLabelMat(name);
+    this._lastLabel.position.set(spot.x, 1.55, spot.z);
+    this._lastLabel.visible = true;
+  }
+
+  /** Cached canvas label sprite material per player name (bounded by table size). */
+  _nameLabelMat(name) {
+    if (this._labelMats.has(name)) return this._labelMats.get(name);
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 72;
+    const g = c.getContext('2d');
+    g.fillStyle = 'rgba(8,12,24,0.88)';
+    g.beginPath();
+    if (g.roundRect) g.roundRect(6, 6, 244, 60, 20); else g.rect(6, 6, 244, 60);
+    g.fill();
+    g.lineWidth = 3;
+    g.strokeStyle = 'rgba(46,230,168,0.9)';
+    g.stroke();
+    g.fillStyle = '#e8fff5';
+    g.font = '700 34px system-ui, sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(name.slice(0, 14), 128, 38);
+    const mat = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false });
+    this._labelMats.set(name, mat);
+    return mat;
   }
 
   /** Full rebuild — used when the chain is not a pure extension of the last one. */
@@ -738,7 +807,11 @@ export class Board3D {
     this._layoutIsAllFives = isAllFives;
     this._endSpots = this._endSpotsFor(st);
 
+    // A fresh hand (board wiped) hands camera control back to auto-fit.
+    if (moves.length <= 1) this._userCam = false;
+
     this._syncBoneyard(view.boneyardCount);
+    this._showLastMoveHint(moves, st.spots, view);
     this._fitCamera(st.spots);
   }
 
@@ -833,6 +906,7 @@ export class Board3D {
   }
 
   _fitCamera(spots) {
+    if (this._userCam) return;   // K3.C2: the user owns the camera until recenter()
     if (!spots.length) {
       this.controls.target.set(0, 0, 0);
       this._camGoal = { x: 0, y: 16, z: 11 };
@@ -848,6 +922,13 @@ export class Board3D {
     this.controls.target.set(cx, 0, cz);
     const dist = Math.min(Math.max(span, 13), 42);
     this._camGoal = { x: cx, y: dist * 0.78, z: cz + dist * 0.62 };
+  }
+
+  /** K3.C2: HUD recenter — hand the camera back to auto-fit. */
+  recenter() {
+    this._userCam = false;
+    const spots = this._layoutState?.spots;
+    this._fitCamera(spots?.length ? spots : []);
   }
 
   // ── markers ──
@@ -1203,6 +1284,12 @@ export class Board3D {
     this._turnRingMat?.dispose?.();
     this._turnRing = null;
     this._turnRingMat = null;
+    this._lastGlow?.geometry?.dispose?.();
+    this._lastGlow?.material?.dispose?.();
+    this._lastGlow = null;
+    if (this._lastLabel) { this.scene.remove(this._lastLabel); this._lastLabel = null; }
+    for (const mat of this._labelMats.values()) mat.dispose?.();
+    this._labelMats.clear();
     this.renderer?.dispose?.();
   }
 }

@@ -22,11 +22,18 @@ const _irCache = new Map();
 let muted = false;
 try { muted = localStorage.getItem('domino_sfx_muted') === '1'; } catch (e) { /* no storage */ }
 
+// K3.C6: master volume (0..1), persisted; the mute toggle sits on top of it.
+let vol = 1;
+try {
+  const v = parseFloat(localStorage.getItem('domino_volume'));
+  if (!Number.isNaN(v) && v >= 0 && v <= 1) vol = v;
+} catch (e) { /* no storage */ }
+
 function ac() {
   if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
   if (!master) {
     master = ctx.createGain();
-    master.gain.value = 0.95;
+    master.gain.value = 0.95 * vol;
     // No DynamicsCompressor here: Chromium's implementation applies large gain
     // reduction even to quiet signals in OfflineAudioContext renders (params are
     // read back correctly but the DSP ignores them), and voice gains are already
@@ -193,6 +200,14 @@ export const sfx = {
     muted = !!m;
     try { localStorage.setItem('domino_sfx_muted', muted ? '1' : '0'); } catch (e) { /* no storage */ }
     if (muted) this.ambient(false);
+  },
+
+  // K3.C6: settings-modal master volume slider
+  getVolume() { return vol; },
+  setVolume(v) {
+    vol = Math.max(0, Math.min(1, Number(v) || 0));
+    try { localStorage.setItem('domino_volume', String(vol)); } catch (e) { /* no storage */ }
+    if (master) master.gain.value = 0.95 * vol;
   },
 
   click() {
