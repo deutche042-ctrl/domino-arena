@@ -95,7 +95,23 @@ export class DominoGame {
       const all = new Map(buildDeck().map(t => [t.id, t]));
       for (const pid of this.playerIds)
         this.hands[pid] = opt.deal.hands[pid].map(id => ({ ...all.get(norm(id)) }));
-      boneyard = opt.deal.boneyard.map(id => ({ ...all.get(norm(id)) }));
+      const used = new Set();
+      const take = (id, where) => {
+        if (typeof id !== 'string') throw new Error(`deal hook: tile id must be a string, got ${typeof id}`);
+        const t = all.get(norm(id));
+        // A ghost tile ({...undefined} → {}) would poison handPips with NaN and
+        // silently corrupt the blocked-hand tiebreak — fail loudly instead.
+        if (!t) throw new Error(`deal hook: unknown tile id "${id}" (${where})`);
+        if (used.has(t.id)) throw new Error(`deal hook: duplicate tile "${id}" (${where})`);
+        used.add(t.id);
+        return { ...t };
+      };
+      for (const pid of this.playerIds) {
+        const list = opt.deal.hands[pid];
+        if (!Array.isArray(list)) throw new Error(`deal hook: hands[${pid}] must be an array`);
+        this.hands[pid] = list.map(id => take(id, `hand ${pid}`));
+      }
+      boneyard = (opt.deal.boneyard || []).map(id => take(id, 'boneyard'));
     } else {
       const rng = mulberry32(opt.seed ?? ((Math.random() * 2 ** 32) >>> 0));
       const deck = shuffle(buildDeck(), rng);
