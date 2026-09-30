@@ -38,11 +38,6 @@ export class Board3D {
     this.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
     // one finger rotate / pinch zoom on touch
     this.controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
-    // K3.C2: once the user grabs the camera, auto-fit stops fighting them —
-    // the fit goal is applied again only via recenter() (HUD button) or a new hand.
-    this._userCam = false;
-    this.controls.addEventListener('start', () => { this._userCam = true; });
-
     // lights
     this.scene.add(new THREE.AmbientLight(0xbfd0ff, 0.55));
     const key = new THREE.DirectionalLight(0xfff2dd, 1.6);
@@ -807,9 +802,6 @@ export class Board3D {
     this._layoutIsAllFives = isAllFives;
     this._endSpots = this._endSpotsFor(st);
 
-    // A fresh hand (board wiped) hands camera control back to auto-fit.
-    if (moves.length <= 1) this._userCam = false;
-
     this._syncBoneyard(view.boneyardCount);
     this._showLastMoveHint(moves, st.spots, view);
     this._fitCamera(st.spots);
@@ -906,7 +898,6 @@ export class Board3D {
   }
 
   _fitCamera(spots) {
-    if (this._userCam) return;   // K3.C2: the user owns the camera until recenter()
     if (!spots.length) {
       this.controls.target.set(0, 0, 0);
       this._camGoal = { x: 0, y: 16, z: 11 };
@@ -922,13 +913,6 @@ export class Board3D {
     this.controls.target.set(cx, 0, cz);
     const dist = Math.min(Math.max(span, 13), 42);
     this._camGoal = { x: cx, y: dist * 0.78, z: cz + dist * 0.62 };
-  }
-
-  /** K3.C2: HUD recenter — hand the camera back to auto-fit. */
-  recenter() {
-    this._userCam = false;
-    const spots = this._layoutState?.spots;
-    this._fitCamera(spots?.length ? spots : []);
   }
 
   // ── markers ──

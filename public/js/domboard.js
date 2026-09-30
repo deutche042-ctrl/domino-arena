@@ -158,7 +158,6 @@ export class DomBoard {
   }
   invalidate() { /* no incremental cursor to invalidate in 2D */ }
   resize() { /* DOM reflows itself */ }
-  recenter() { /* K3.C2: the 2D board has no camera; API parity with Board3D */ }
   stats() {
     return {
       calls: 0, tris: 0, geos: 0, texs: 0, programs: 0,
