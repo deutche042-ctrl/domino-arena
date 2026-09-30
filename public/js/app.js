@@ -3,6 +3,7 @@ import { Board3D } from './board3d.js?v=25';
 import { DomBoard, webglAvailable } from './domboard.js?v=3';
 import { Home3D } from './home3d.js?v=2';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=13';
+import { sfx } from './sfx.js?v=16';
 
 const $ = id => document.getElementById(id);
 const VARIANT_DESC = {
@@ -204,7 +205,8 @@ function initHome() {
     ch.onclick = () => {
       botLevel = ch.dataset.level;
       document.querySelectorAll('#diffRow .diff-chip').forEach(c => c.classList.toggle('active', c === ch));
-      };
+      sfx.click();
+    };
   });
   // F4.2: bot personality (same evaluator, different weights)
   const syncProfileChips = () => document.querySelectorAll('#profileRow .diff-chip')
@@ -214,12 +216,13 @@ function initHome() {
       botProfile = ch.dataset.profile;
       try { localStorage.setItem('domino_bot_profile', botProfile); } catch { /* no storage */ }
       syncProfileChips();
-      };
+      sfx.click();
+    };
   });
   syncProfileChips();
   // F4.3: tile theme picker
   document.querySelectorAll('#themeRow .diff-chip').forEach(ch => {
-    ch.onclick = () => { applyTheme(ch.dataset.theme); };
+    ch.onclick = () => { applyTheme(ch.dataset.theme); sfx.click(); };
   });
   applyTheme(tileTheme);   // reflect the persisted choice on first paint
   $('btnBots').onclick = () => {
@@ -326,7 +329,7 @@ function renderLobby(st) {
       rm.className = 'bot-remove';
       rm.textContent = '✕';
       rm.title = 'حذف البوت';
-      rm.onclick = () => { socket.emit('lobby:removeBot', { playerId: p.id }); };
+      rm.onclick = () => { socket.emit('lobby:removeBot', { playerId: p.id }); sfx.click(); };
       li.appendChild(rm);
     }
     // host-only chat mute for human players (not himself)
@@ -341,6 +344,7 @@ function renderLobby(st) {
         try {
           const res = await emit('lobby:chatMute', { pid: p.id, muted: !p.chatMuted });
           if (res && !res.ok) lobbyError(res.error);
+          else sfx.click();
         } finally { cm.disabled = false; }
       };
       li.appendChild(cm);
@@ -355,6 +359,7 @@ function renderLobby(st) {
         try {
           const res = await emit('lobby:kick', { pid: p.id });
           if (res && !res.ok) lobbyError(res.error);
+          else sfx.score();
         } finally { kick.disabled = false; }
       };
       li.appendChild(kick);
@@ -431,7 +436,7 @@ function renderRulesSummary(cfg) {
 function initLobby() {
   const btnAddBot = $('btnAddBot');
   if (btnAddBot) {
-    btnAddBot.onclick = () => { socket.emit('lobby:addBot', { level: botLevel, profile: botProfile }); };
+    btnAddBot.onclick = () => { socket.emit('lobby:addBot', { level: botLevel, profile: botProfile }); sfx.click(); };
   }
   if (!lobby3d) spawnFallingTiles('lobbyHeroTiles');   // K3.C5: fallback only
   $('btnCopyCode').onclick = () => copyText(roomCode, 'تم نسخ الكود!');
@@ -450,7 +455,7 @@ function initLobby() {
     }
   };
   const btnRules = $('btnRules');
-  if (btnRules) btnRules.onclick = () => { $('modalRules')?.classList.remove('hidden'); };
+  if (btnRules) btnRules.onclick = () => { $('modalRules')?.classList.remove('hidden'); sfx.click(); };
   $('btnReady').onclick = toggleReady;
   $('btnStart').onclick = () => {
     askNotifyPermission();
@@ -463,18 +468,21 @@ function initLobby() {
     chkAuto.checked = localStorage.getItem('domino_autoplay') === '1';
     chkAuto.onchange = () => {
       localStorage.setItem('domino_autoplay', chkAuto.checked ? '1' : '0');
-      };
+      sfx.click();
+    };
   }
   $('btnQr').onclick = () => {
     const pop = $('qrPop');
     if (!pop) return;
     if (!pop.classList.contains('hidden')) {
       pop.classList.add('hidden');
+      sfx.click();
       return;
     }
     renderQr(location.origin + '?room=' + (roomCode || ''), $('qrCanvas'));
     pop.classList.remove('hidden');
-    };
+    sfx.click();
+  };
   $('btnLeave').onclick = leaveRoom;
   // F2.1: push the whole rule set on every change. The server's allowlist
   // (sanitizeConfig) is the authority — we just send what the host picked.
@@ -506,6 +514,7 @@ function toggleReady() {
   askNotifyPermission();
   myReady = !myReady;
   paintReadyBtn();
+  sfx.click();
   socket.emit('lobby:ready', { ready: myReady }, (res) => {
     if (res && typeof res.ready === 'boolean') {
       myReady = res.ready;
@@ -524,7 +533,8 @@ function takeSeat() {
     spectating = false;
     afterJoin(res, name);
     showScreen(res.state === 'playing' ? 'game' : 'lobby');
-    });
+    sfx.click();
+  });
 }
 
 // ── leaving the room (lobby button or in-game exit) ──
@@ -551,11 +561,13 @@ function leaveRoom() {
   updateBadge();
   const msgs = $('chatMsgs');
   if (msgs) msgs.innerHTML = '';
+  sfx.ambient(false);
   closeLeaveConfirm();
   history.replaceState(null, '', location.pathname);
   homeError('');
   showScreen('home');
-  }
+  sfx.click();
+}
 function openLeaveConfirm() { $('modalLeave').classList.remove('hidden'); }
 function closeLeaveConfirm() { $('modalLeave').classList.add('hidden'); }
 
@@ -682,6 +694,7 @@ function cycleSort() {
   try { localStorage.setItem('domino_sort', sortMode); } catch { /* no storage */ }
   const btn = $('btnSort');
   if (btn) { btn.textContent = SORT_LABELS[sortMode]; btn.title = 'ترتيب اليد: ' + SORT_LABELS[sortMode]; }
+  sfx.click();
   renderHand();
 }
 
@@ -792,7 +805,7 @@ function renderScoreCard() {
     codeRow.className = 'sc-code';
     codeRow.title = 'انسخ كود الغرفة';
     codeRow.innerHTML = `🚪 غرفة <b>${esc(roomCode)}</b> 📋`;
-    codeRow.onclick = () => { copyText(roomCode, 'تم نسخ الكود!'); };
+    codeRow.onclick = () => { copyText(roomCode, 'تم نسخ الكود!'); sfx.click(); };
     card.appendChild(codeRow);
   }
 }
@@ -1037,6 +1050,8 @@ function updateTurnTimer() {
   $('turnTimerSecs').textContent = secs;
   if (view.turn === myId && secs !== lastTickSec) {
     lastTickSec = secs;
+    if (secs <= 5) sfx.alarm();
+    else if (secs <= 10) sfx.tick();
   }
 }
 
@@ -1227,8 +1242,9 @@ function playActionSounds() {
   if (key === lastActionKey) return;
   const wasMyTurn = prevTurnKey === myId;
   lastActionKey = key;
-  if (la.type === 'place') { if (la.scored) floatText(`+${la.scored}`); }
+  if (la.type === 'place') { sfx.place(); if (la.scored) { sfx.score(); floatText(`+${la.scored}`); } }
   else if (la.type === 'draw') {
+    sfx.draw();
     const isMe = la.pid === myId;
     let drawnTile = null;
     if (isMe) {
@@ -1248,12 +1264,15 @@ function playActionSounds() {
     }
     board?.animateDraw(drawnTile, isMe);
   }
-  else if (la.type === 'pass') { if (la.pid !== myId) floatText(`${view.names[la.pid] || 'لاعب'}: باص`); }
+  else if (la.type === 'pass') { sfx.pass(); if (la.pid !== myId) floatText(`${view.names[la.pid] || 'لاعب'}: باص`); }
   else if (la.type === 'skip') {
+    sfx.pass();
     floatText(la.pid === myId ? '⏰ انتهى وقتك!' : `⏰ ${view.names[la.pid] || 'لاعب'}: انتهى وقته`);
   }
+  else if (la.type === 'handEnd') sfx.handWin();
+  else if (la.type === 'matchEnd') sfx.matchWin();
   if (view.status === 'playing' && view.turn === myId) {
-    if (!wasMyTurn) startTurnAlert();
+    if (!wasMyTurn) { sfx.yourTurn(); startTurnAlert(); }
   } else {
     stopTurnAlert();
   }
@@ -1271,6 +1290,7 @@ async function requestHint() {
   hintPending = true;
   const btn = $('btnHint');
   btn.disabled = true;
+  sfx.click();
   try {
     const res = await emit('game:hint');
     if (!res?.ok || res.type !== 'play') {
@@ -1285,7 +1305,8 @@ async function requestHint() {
       if (ends.length) board.showMarkers(ends);
     }
     renderHand();
-    } finally {
+    sfx.select();
+  } finally {
     hintPending = false;
     btn.disabled = false;
   }
@@ -1294,7 +1315,8 @@ async function requestHint() {
 function onBoneyardDraw(targetMesh) {
   if (!view || view.status !== 'playing' || view.turn !== myId || !view.canDraw) return;
   socket.emit('game:draw');
-  }
+  sfx.click();
+}
 function onTileClick(tile, el) {
   if (!view || view.status !== 'playing' || view.turn !== myId) {
     el.classList.add('shake'); setTimeout(() => el.classList.remove('shake'), 300);
@@ -1305,6 +1327,7 @@ function onTileClick(tile, el) {
     el.classList.add('shake'); setTimeout(() => el.classList.remove('shake'), 300);
     return;
   }
+  sfx.select();
   if (moves[0].end === null) {                    // lead move — play immediately
     socket.emit('game:play', { tileId: tile.id, end: null });
     selectedTile = null;
@@ -1435,8 +1458,8 @@ function withConfirm(btn, fn) {
 }
 
 function initGameUI() {
-  $('btnDraw').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:draw'); }); };
-  $('btnPass').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:pass'); }); };
+  $('btnDraw').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:draw'); sfx.click(); }); };
+  $('btnPass').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:pass'); sfx.click(); }); };
   $('btnHint').onclick = requestHint;
   $('btnSort').onclick = cycleSort;
   $('btnSort').textContent = SORT_LABELS[sortMode];
@@ -1444,11 +1467,11 @@ function initGameUI() {
   // btnSettings markup is not shipped yet — guard so a missing
   // element can never abort initGameUI and orphan every handler after it.
   const btnSettings = $('btnSettings');
-  if (btnSettings) btnSettings.onclick = () => { openSettings(); };
+  if (btnSettings) btnSettings.onclick = () => { openSettings(); sfx.click(); };
   $('btnNextHand').onclick = () => socket.emit('game:nextHand');
   $('btnRematch').onclick = () => socket.emit('game:rematch');
-  $('btnNextHandVote').onclick = () => { socket.emit('game:nextHandVote'); };
-  $('btnRematchVote').onclick = () => { socket.emit('game:rematchVote'); };
+  $('btnNextHandVote').onclick = () => { socket.emit('game:nextHandVote'); sfx.click(); };
+  $('btnRematchVote').onclick = () => { socket.emit('game:rematchVote'); sfx.click(); };
   $('btnChat').onclick = (e) => {
     e.stopPropagation();
     chatOpen ? closeChat() : openChat();
@@ -1475,6 +1498,7 @@ function initGameUI() {
     }
     if (e.key === 'Escape') {
       if (!$('modalLeave').classList.contains('hidden')) {
+        sfx.click();
         closeLeaveConfirm();
       } else if (emojiPopOpen) {
         closeEmojiPop();
@@ -1496,6 +1520,20 @@ function initGameUI() {
   if (btnFs) {
     btnFs.onclick = toggleFullscreen;
   }
+  const btnSound = $('btnSound');
+  if (btnSound) {
+    const syncSoundBtn = () => {
+      btnSound.classList.toggle('is-muted', sfx.isMuted());
+      btnSound.title = sfx.isMuted() ? 'تشغيل الصوت' : 'كتم الصوت';
+      btnSound.setAttribute('aria-label', btnSound.title);
+    };
+    btnSound.onclick = () => {
+      sfx.setMuted(!sfx.isMuted());
+      syncSoundBtn();
+      if (!sfx.isMuted()) sfx.click();
+    };
+    syncSoundBtn();
+  }
   renderHomeStats();
   const resetStats = $('btnResetStats');
   if (resetStats) {
@@ -1503,26 +1541,27 @@ function initGameUI() {
       if (!confirm('تمسح إحصائياتك المحلية؟')) return;
       localStorage.removeItem('domino_stats');
       renderHomeStats();
-      };
+      sfx.click();
+    };
   }
   // PWA: register the offline app-shell worker on secure contexts only
   if ('serviceWorker' in navigator &&
       (location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname))) {
     navigator.serviceWorker.register('sw.js').catch(() => { /* offline shell is best-effort */ });
   }
-  $('btnExit').onclick = () => { openLeaveConfirm(); };
-  $('btnLeaveCancel').onclick = () => { closeLeaveConfirm(); };
+  $('btnExit').onclick = () => { sfx.click(); openLeaveConfirm(); };
+  $('btnLeaveCancel').onclick = () => { sfx.click(); closeLeaveConfirm(); };
   $('btnLeaveConfirm').onclick = leaveRoom;
   $('modalLeave').addEventListener('click', (e) => {
-    if (e.target === $('modalLeave')) { closeLeaveConfirm(); }
+    if (e.target === $('modalLeave')) { sfx.click(); closeLeaveConfirm(); }
   });
   // K3.C7: rules modal (home + lobby) — close on ✕ or backdrop tap.
   for (const id of ['btnRulesHome', 'btnRulesClose']) {
     const b = $(id);
-    if (b) b.onclick = () => { $('modalRules')?.classList.add('hidden'); };
+    if (b) b.onclick = () => { $('modalRules')?.classList.add('hidden'); sfx.click(); };
   }
   $('modalRules')?.addEventListener('click', (e) => {
-    if (e.target === $('modalRules')) { $('modalRules').classList.add('hidden'); }
+    if (e.target === $('modalRules')) { sfx.click(); $('modalRules').classList.add('hidden'); }
   });
   initSettingsModal();
   ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach(ev => {
@@ -1530,10 +1569,12 @@ function initGameUI() {
   });
 }
 
-// ── K3.C6: settings modal — force-2D, confirm-moves, vibration ──
+// ── K3.C6: settings modal — master volume, force-2D, confirm-moves, vibration ──
 function openSettings() {
   const modal = $('modalSettings');
   if (!modal) return;
+  const rng = $('rngVolume');
+  if (rng) rng.value = String(Math.round((sfx.getVolume?.() ?? 1) * 100));
   const f2 = $('chkForce2d');
   if (f2) f2.checked = force2d();
   const cf = $('chkConfirm');
@@ -1545,10 +1586,15 @@ function openSettings() {
 function initSettingsModal() {
   const modal = $('modalSettings');
   if (!modal) return;
-  $('btnSettingsClose').onclick = () => { modal.classList.add('hidden'); };
+  $('btnSettingsClose').onclick = () => { modal.classList.add('hidden'); sfx.click(); };
   modal.addEventListener('click', (e) => {
-    if (e.target === modal) { modal.classList.add('hidden'); }
+    if (e.target === modal) { sfx.click(); modal.classList.add('hidden'); }
   });
+  const rng = $('rngVolume');
+  if (rng) {
+    rng.oninput = () => { sfx.setVolume?.(Number(rng.value) / 100); };
+    rng.onchange = () => sfx.click();
+  }
   const f2 = $('chkForce2d');
   if (f2) {
     f2.onchange = () => {
@@ -1560,14 +1606,16 @@ function initSettingsModal() {
   if (cf) {
     cf.onchange = () => {
       try { localStorage.setItem('domino_confirm', cf.checked ? '1' : '0'); } catch { /* no storage */ }
-      };
+      sfx.click();
+    };
   }
   const vb = $('chkVibrate');
   if (vb) {
     vb.onchange = () => {
       try { localStorage.setItem('domino_vibrate', vb.checked ? '1' : '0'); } catch { /* no storage */ }
       if (vb.checked) { try { navigator.vibrate?.(60); } catch { /* unsupported */ } }
-      };
+      sfx.click();
+    };
   }
 }
 
@@ -1623,7 +1671,8 @@ function updateChatCount() {
 
 function sendEmoji(em) {
   socket.emit('chat:send', { emoji: em });
-  }
+  sfx.select();
+}
 
 function buildChatWidgets() {
   const quick = $('chatQuick');
@@ -1649,7 +1698,7 @@ function buildChatWidgets() {
       chip.type = 'button';
       chip.className = 'chat-chip';
       chip.textContent = phrase;
-      chip.onclick = () => { socket.emit('chat:send', { text: phrase }); };
+      chip.onclick = () => { socket.emit('chat:send', { text: phrase }); sfx.select(); };
       phrases.appendChild(chip);
     }
     pop.appendChild(phrases);
@@ -1884,6 +1933,7 @@ function showChatToast(msg) {
 function onChatMsg(msg) {
   showChatToast(msg);
   appendChatMsg(msg);
+  if (msg.pid && msg.pid !== myId) sfx.chatPop();
   if (!chatOpen) {
     unread++;
     updateBadge();
@@ -2035,6 +2085,8 @@ function startSocket(base) {
     lastActionKey = '';
     prevTurnKey = null;
     showScreen('game');
+    sfx.start();
+    sfx.ambient(true);
   });
   socket.on('game:state', (st) => {
     perfMsgs++;                                     // F3.3: messages/sec counter
@@ -2058,6 +2110,7 @@ function startSocket(base) {
     stopTurnAlert();
     board?.clearMarkers();
     closeChat();
+    sfx.ambient(false);
     showScreen('lobby');
   });
   socket.on('room:kicked', () => {
@@ -2129,7 +2182,7 @@ async function tickLan() {
       const li = document.createElement('li');
       li.className = 'lan-peer self';
       li.textContent = '🏠 جهازك (مضيفك أنت)';
-      li.onclick = () => { connectToBase(LOCAL_BASE, '📡 رجعت لجهازك — أنت المضيف'); };
+      li.onclick = () => { sfx.click(); connectToBase(LOCAL_BASE, '📡 رجعت لجهازك — أنت المضيف'); };
       ul.appendChild(li);
     }
     for (const p of p_list(peers)) {
@@ -2137,6 +2190,7 @@ async function tickLan() {
       li.className = 'lan-peer' + (activeBase === `http://${p.ip}:${p.port}` ? ' active' : '');
       li.textContent = '📱 ' + p.label;
       li.onclick = () => {
+        sfx.click();
         connectToBase(`http://${p.ip}:${p.port}`, '🔌 اتصلت بـ ' + p.label);
       };
       ul.appendChild(li);
@@ -2176,17 +2230,20 @@ function initAppNetUI() {
   if (!toggle || !IN_APP) return;
   toggle.classList.remove('hidden');
   toggle.onclick = () => {
+    sfx.click();
     $('advPanel').classList.toggle('hidden');
   };
   const inp = $('inpManualServer');
   inp.value = localStorage.getItem('domino_manual_server') || '';
   $('btnSaveServer').onclick = () => {
+    sfx.click();
     const v = inp.value.trim().replace(/^https?:\/\//, '');
     if (v) localStorage.setItem('domino_manual_server', v);
     else localStorage.removeItem('domino_manual_server');
     location.reload();
   };
   $('btnClearServer').onclick = () => {
+    sfx.click();
     localStorage.removeItem('domino_manual_server');
     location.reload();
   };
@@ -2196,8 +2253,8 @@ function boot() {
   if (IN_APP) startAppNet(); else startSocket('');
   initHome(); initLobby(); initGameUI(); initAppNetUI();
   // F1.3: skip the countdown tick entirely while the tab is hidden — it is pure
-  // DOM work nobody can see. The state render on return catches the clock up
-  // instantly.
+  // DOM work nobody can see, and it keeps SFX (alarm/tick) from firing in a
+  // background tab. The state render on return catches the clock up instantly.
   setInterval(() => { if (!document.hidden) updateTurnTimer(); }, 200);
 }
 

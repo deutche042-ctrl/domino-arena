@@ -108,6 +108,7 @@ home → lobby → game.
 - `js/domboard.js` — **F4.5 2D fallback.** When WebGL is unavailable (or `new Board3D` throws), `createBoard()` in `app.js` builds a `DomBoard` instead: same duck-typed API (`sync`/`showMarkers`/`endFromPoint`/…) so the game stays fully playable as a plain DOM table. Also exports `webglAvailable()` (never throws) and the pure `buildChain`/`chainEnds` helpers. Keep the API surface in step with `Board3D` when adding methods.
 - `js/home3d.js` — animated Three.js home-screen backdrop.
 - `js/tiles.js` — canvas-painted tile faces/backs/felt textures (data-URL cached). F4.3: a `THEMES` registry paints four skins (`classic`/`neon`/`wood`/`piano`); `setTheme(name)` clears the data-URL cache so the next paint uses the new skin. The board keys its texture cache by theme, so the pool stays bounded across switches.
+- `js/sfx.js` — WebAudio-synthesized sounds (no audio files). Game sound effects only — voice chat was removed from the project entirely (no mic, no voice UI, no voice handlers); do not reintroduce it.
 - `css/style.css` — all styling, single file. The tail holds the F4.5 `.board2d` fallback table styles.
 
 **Resource-pooling rules (F3.1) — read before touching the board.** The tile geometry (`_geo`), hit-area geometry/material (`_hitBoxGeo`/`_hitMatC`), side material, and the pooled face/back materials (`_matCache`/`_backMatC`) are **shared**. `_disposeTileMesh` deliberately skips them — disposing one would blank every tile using it. `dispose()` is the only place that may release them, and it is idempotent. The `engine/` `attachableEnds()` cache (F3.2) is a `WeakMap`-keyed revision counter so the engine stays pure and serializable.
@@ -115,7 +116,7 @@ home → lobby → game.
 **Reduced motion (F4.4).** `board3d.js` reads `prefers-reduced-motion: reduce` once at construction and flattens the arc/drop flourishes and the centre pulse; `app.js`'s `prefersReducedMotion()` makes score roll-ups snap. Keep new animation behind that gate.
 
 **Cache-busting convention:** every client asset is imported with a `?v=N` query
-(`js/app.js?v=55`, `./board3d.js?v=24`, `./domboard.js?v=3`, `./tiles.js?v=13`, `css/style.css?v=51`). When you edit a client
+(`js/app.js?v=56`, `./board3d.js?v=25`, `./domboard.js?v=3`, `./tiles.js?v=13`, `./sfx.js?v=16`, `css/style.css?v=52`). When you edit a client
 module, bump its tag in `index.html` and in every importer's `import` line — otherwise browsers keep
 running the stale module and your change appears to do nothing.
 

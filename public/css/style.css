@@ -875,6 +875,11 @@ input:focus, select:focus { border-color: var(--accent); }
 #btnFullscreen.is-fullscreen .icon-expand { display: none; }
 #btnFullscreen.is-fullscreen .icon-compress { display: block; }
 
+#btnSound .icon-sound-off { display: none; }
+#btnSound.is-muted .icon-sound-on { display: none; }
+#btnSound.is-muted .icon-sound-off { display: block; }
+#btnSound.is-muted { color: #94a3b8; }
+
 /* ── QR invite popover (lobby) ── */
 .qr-pop {
   display: flex;
