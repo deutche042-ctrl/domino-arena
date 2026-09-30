@@ -392,6 +392,8 @@ io.on('connection', (socket) => {
     next();
   });
   // S9 (audit): see joinFailsByIp at module scope.
+  // per-socket failed-join timestamps (5 / 10 s guard in room:join)
+  let joinFails = [];
   // K2.S9: per-socket broadcast throttle for the noisy ready toggle
   let lastReadyBroadcast = 0;
 
@@ -420,8 +422,9 @@ io.on('connection', (socket) => {
     sessions.set(socket.id, { roomCode: room.code, playerId: player.id });
     if (vsBots) {
       // Instant bot match: fill the table, deal, and let the scheduler drive.
+      // S10: clamp — a crafted 24h delay bricks the room's bot turns.
       const d = Number(botDelayMs);
-      room.botDelayMs = Number.isFinite(d) && d >= 25 ? d : null;
+      room.botDelayMs = Number.isFinite(d) && d >= 25 && d <= 5000 ? d : null;
       const names = [...BOT_NAMES];
       for (let i = 0; i < 3 && room.players.length < room.config.maxPlayers; i++) {
         manager.addBot(room, names.splice(Math.floor(Math.random() * names.length), 1)[0], botLevel, botProfile);
@@ -443,24 +446,38 @@ io.on('connection', (socket) => {
   });
 
   socket.on('room:join', ({ code, name, token } = {}, cb) => {
-    // 4-char room codes are brute-forceable — cap failed attempts per IP
-    // (5 failures / 10 s rolling window; success resets the counter).
+    // 4-char room codes are brute-forceable — two independent caps:
+    //   per-socket 5 failures / 10 s (the documented guard, e2e-asserted), plus
+    //   per-IP 20 failures / 60 s so dropping and reopening sockets (fresh
+    //   joinFails each time) cannot keep scanning the code space. A successful
+    //   join resets both.
     const now = Date.now();
     const ip = socket.handshake?.address || '?';
-    const fails = (joinFailsByIp.get(ip) || []).filter(t => now - t < 10000);
-    if (fails.length >= 5) {
+    // per-IP backstop: 20 failures / 60 s defeats socket-rotation scanning
+    const ipFails = (joinFailsByIp.get(ip) || []).filter(t => now - t < 60000);
+    joinFailsByIp.set(ip, ipFails);
+    if (ipFails.length >= 20) {
+      return cb?.({ ok: false, error: 'محاولات كتير أوي — استنى شوية وجرب تاني.' });
+    }
+    // per-socket: 5 failures / 10 s (the documented guard, e2e-asserted)
+    joinFails = joinFails.filter(t => now - t < 10000);
+    if (joinFails.length >= 5) {
       return cb?.({ ok: false, error: 'محاولات كتير أوي — استنى شوية وجرب تاني.' });
     }
     const res = manager.joinRoom(code, name, token, { allowSpectate: true });
     if (res.error) {
-      fails.push(now);
-      joinFailsByIp.set(ip, fails);
+      joinFails.push(now);
+      ipFails.push(now);
+      joinFailsByIp.set(ip, ipFails);
       return cb?.({ ok: false, error: res.error });
     }
     joinFailsByIp.delete(ip);
     if (res.spectating) {
       // Room full or mid-match: ride along as a spectator (no seat, no voice,
       // gameplay handlers no-op because this id is not in room.players).
+      // S2: drop any previous attachment first so the old spectator entry
+      // (or a seated player) can't leak behind the new one.
+      detachCurrentRoom(socket);
       const { room, spectator } = res;
       spectator.socketId = socket.id;
       socket.join(room.code);
@@ -476,10 +493,25 @@ io.on('connection', (socket) => {
       return;
     }
     const { room, player } = res;
+    // S2/S3: switching seats/rooms must detach the old attachment first — but a
+    // token reconnect to the exact seat we already hold is a refresh, not a move.
+    const s0 = sessions.get(socket.id);
+    const sameSeat = !!res.reconnected && !!s0 && !s0.spectating &&
+                     s0.roomCode === room.code && s0.playerId === player.id;
+    if (!sameSeat) detachCurrentRoom(socket);
     // If this player was attached to another socket (refresh), detach the old one
     if (player.socketId && player.socketId !== socket.id) {
-      sessions.delete(player.socketId);
-      io.sockets.sockets.get(player.socketId)?.leave(room.code);
+      const oldSocketId = player.socketId;
+      sessions.delete(oldSocketId);
+      io.sockets.sockets.get(oldSocketId)?.leave(room.code);
+      // S8: the seat moved to a newer live socket — tell the old tab (it used
+      // to silently no-op forever) and reset the voice flags that rode along.
+      io.to(oldSocketId).emit('room:superseded');
+      const hadVoice = !!player.voice;
+      player.voice = false;
+      player.voiceMuted = false;
+      player.hostMuted = false;
+      if (hadVoice) broadcastVoice(room);
     }
     player.socketId = socket.id;
     player.connected = true;
@@ -509,10 +541,18 @@ io.on('connection', (socket) => {
 
   socket.on('lobby:config', (config = {}, cb) => {
     const { room, playerId } = currentCtx(socket);
-    if (!room) return;
+    // S4: every early return answers its ack — the client's emit() promise
+    // (no timeout) used to hang forever when the room vanished.
+    if (!room) return cb?.({ ok: false, error: 'الغرفة قفلت أو المباراة بدأت.' });
     if (playerId !== room.hostId) return cb?.({ ok: false, error: 'فقط المضيف يمكنه تعديل الإعدادات.' });
-    if (room.state !== 'lobby') return;
-    room.config = { ...room.config, ...manager.sanitizeConfig(config) };
+    if (room.state !== 'lobby') return cb?.({ ok: false, error: 'الإعدادات متاحة في غرفة الانتظار بس.' });
+    const merged = { ...room.config, ...manager.sanitizeConfig(config) };
+    // E7: allowPass:false with no turn timer soft-locks a stuck player forever
+    // (no pass, no moves, no timeout to force-skip) — refuse the combination.
+    if (merged.allowPass === false && merged.turnMs === 0) {
+      return cb?.({ ok: false, error: 'مينفعش "بدون باص" مع "بدون مؤقّت" — اللاعب هيتعلق للأبد.' });
+    }
+    room.config = merged;
     cb?.({ ok: true });
     broadcastLobby(room);
   });
@@ -549,7 +589,7 @@ io.on('connection', (socket) => {
 
   socket.on('lobby:addBot', ({ level, profile } = {}, cb) => {
     const { room, playerId } = currentCtx(socket);
-    if (!room) return;
+    if (!room) return cb?.({ ok: false, error: 'الغرفة قفلت أو المباراة بدأت.' });
     if (playerId !== room.hostId) return cb?.({ ok: false, error: 'فقط المضيف يمكنه إضافة بوت.' });
     const res = manager.addBot(room, BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)], level, profile);
     if (res.error) return cb?.({ ok: false, error: res.error });
@@ -559,7 +599,7 @@ io.on('connection', (socket) => {
 
   socket.on('lobby:removeBot', ({ playerId: botId } = {}, cb) => {
     const { room, playerId } = currentCtx(socket);
-    if (!room) return;
+    if (!room) return cb?.({ ok: false, error: 'الغرفة قفلت أو المباراة بدأت.' });
     if (playerId !== room.hostId) return cb?.({ ok: false, error: 'فقط المضيف يمكنه حذف البوت.' });
     const removed = manager.removeBot(room, botId);
     cb?.({ ok: removed });
@@ -585,8 +625,10 @@ io.on('connection', (socket) => {
 
   socket.on('game:start', (_, cb) => {
     const { room, playerId } = currentCtx(socket);
-    if (!room) return;
+    if (!room) return cb?.({ ok: false, error: 'الغرفة قفلت أو المباراة بدأت.' });
     if (playerId !== room.hostId) return cb?.({ ok: false, error: 'فقط المضيف يمكنه بدء اللعبة.' });
+    // S5: a start (re-deal) mid-match would wipe the scores — reject it.
+    if (room.state !== 'lobby') return cb?.({ ok: false, error: 'المباراة بدأت بالفعل.' });
     if (room.players.length < 2) return cb?.({ ok: false, error: 'يلزم تواجد لاعبين على الأقل للبدء.' });
     const others = room.players.filter(p => p.id !== room.hostId);
     if (!others.every(p => p.ready && p.connected))
@@ -644,6 +686,10 @@ io.on('connection', (socket) => {
       io.to(ks).emit('room:kicked');
     }
     broadcastLobby(room);
+    // S7: the roster only changes on a voice broadcast — without this, other
+    // clients kept showing the kicked player "in voice" until an unrelated
+    // voice event happened to fire.
+    broadcastVoice(room);
   });
 
   // ── continue-votes ──
@@ -889,6 +935,9 @@ io.on('connection', (socket) => {
     } else if (typeof pid === 'string') {
       const target = room.players.find(p => p.id === pid);
       if (!target) return cb?.({ ok: false, error: 'اللاعب مش موجود في الغرفة.' });
+      // S10: bots have no mic — the pid branch used to skip the isBot check the
+      // `all` branch has, letting a host "mute" a bot into the roster's void.
+      if (target.isBot) return cb?.({ ok: false, error: 'البوتات ملهاش مايك أصلاً.' });
       target.hostMuted = want;
     } else {
       return cb?.({ ok: false, error: 'لازم تحدد لاعب أو تختار كتم الكل.' });
@@ -938,6 +987,10 @@ io.on('connection', (socket) => {
     // In lobby: remove the player after grace period (allows quick page refresh)
     if (room.state === 'lobby') {
       setTimeout(() => {
+        // S6: re-validate room identity — the room may have been deleted and its
+        // CODE recycled by a brand-new room; removePlayer deletes by code, and
+        // firing on a stale object used to kill the unrelated new room.
+        if (manager.getRoom(room.code) !== room) return;
         if (!p.connected) {
           const res = manager.removePlayer(room, p.id);
           if (res.empty) return;
