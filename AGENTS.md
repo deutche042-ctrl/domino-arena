@@ -95,6 +95,7 @@ Strict layering — dependencies point one way only: `server → engine`. Never 
 - Disconnect/reconnect: lobby removal after 5s grace, room deletion after 15s all-disconnected, host migration on leave/disconnect (never to a bot). `server.js` calls engine internals (`_endMatch`, `_advanceTurn`) for walkover/turn-skip on disconnect — keep that in sync if engine internals change. Walkover fires only in bot-free rooms; with bots seated the match continues.
 - Turn timer: one timer per room, armed on every broadcast for the current player. It deliberately does NOT restart while the same player's turn is live (disconnects/redraws can't refresh the clock). On expiry the engine is forced: `forceSkip` if they had moves, else auto-draw, else auto-pass — each is announced as a system chat message.
 - Chat: `chat:send` is rate-limited per socket to 5 messages / 3s; text is trimmed and capped at 200 chars.
+- Join guard + spectators: `room:join` counts failed joins per socket (5 per 10s) and per IP (`joinFailsByIp`, 20 per 60s backstop vs socket-rotation code scanning); a successful join resets both. Joining a full or mid-match room rides along as a **spectator** — registered in `sessions` and the socket.io room, but with no seat in `room.players`, so gameplay handlers no-op for that id.
 
 ### `public/` — client, plain ES modules loaded from index.html (no bundler)
 
@@ -104,7 +105,7 @@ reintroduce CDN URLs. No npm client deps. Screens are the three `<section class=
 home → lobby → game.
 
 - `js/app.js` — UI orchestration + socket client: screen switching, scoreboard, hand rendering, modals, chat, confetti. Talks to server only via the socket events above. Also owns the home stats (`loadStats`/`recordMatchResult`), the bot level/personality pickers, the tile-theme picker, the perf overlay (`P` key), the score roll-up (`rollNumber` + `_scorePrev`), and `createBoard()`.
-- `js/board3d.js` — Three.js board: snake layout with L/R ends plus U/D spinner arms, auto-fit camera, click targets for ends (`onMarkerClick`). Resources are pooled (see F3.1 below); `setTheme(name)` repaints in a new skin; `setMyTurn(b)`/`setCanDraw(b)` drive the centre turn ring and the boneyard spotlight; `stats()` feeds the perf overlay.
+- `js/board3d.js` — Three.js board: snake layout with L/R ends plus U/D spinner arms, auto-fit camera, click targets for ends (`onMarkerClick`). Resources are pooled (see F3.1 below); `setTheme(name)` repaints in a new skin; `setCanDraw(b)` drives the boneyard spotlight; `setMyTurn(b)` is vestigial (the centre turn ring was removed) and only feeds `stats()`, which feeds the perf overlay.
 - `js/domboard.js` — **F4.5 2D fallback.** When WebGL is unavailable (or `new Board3D` throws), `createBoard()` in `app.js` builds a `DomBoard` instead: same duck-typed API (`sync`/`showMarkers`/`endFromPoint`/…) so the game stays fully playable as a plain DOM table. Also exports `webglAvailable()` (never throws) and the pure `buildChain`/`chainEnds` helpers. Keep the API surface in step with `Board3D` when adding methods.
 - `js/home3d.js` — animated Three.js home-screen backdrop.
 - `js/tiles.js` — canvas-painted tile faces/backs/felt textures (data-URL cached). F4.3: a `THEMES` registry paints four skins (`classic`/`neon`/`wood`/`piano`); `setTheme(name)` clears the data-URL cache so the next paint uses the new skin. The board keys its texture cache by theme, so the pool stays bounded across switches.
@@ -113,10 +114,10 @@ home → lobby → game.
 
 **Resource-pooling rules (F3.1) — read before touching the board.** The tile geometry (`_geo`), hit-area geometry/material (`_hitBoxGeo`/`_hitMatC`), side material, and the pooled face/back materials (`_matCache`/`_backMatC`) are **shared**. `_disposeTileMesh` deliberately skips them — disposing one would blank every tile using it. `dispose()` is the only place that may release them, and it is idempotent. The `engine/` `attachableEnds()` cache (F3.2) is a `WeakMap`-keyed revision counter so the engine stays pure and serializable.
 
-**Reduced motion (F4.4).** `board3d.js` reads `prefers-reduced-motion: reduce` once at construction and flattens the arc/drop flourishes and the centre pulse; `app.js`'s `prefersReducedMotion()` makes score roll-ups snap. Keep new animation behind that gate.
+**Reduced motion (F4.4).** `board3d.js` reads `prefers-reduced-motion: reduce` once at construction and flattens the arc/drop flourishes; `app.js`'s `prefersReducedMotion()` makes score roll-ups snap. Keep new animation behind that gate.
 
 **Cache-busting convention:** every client asset is imported with a `?v=N` query
-(`js/app.js?v=56`, `./board3d.js?v=25`, `./domboard.js?v=3`, `./tiles.js?v=13`, `./sfx.js?v=16`, `css/style.css?v=52`). When you edit a client
+(`js/app.js?v=56`, `./board3d.js?v=25`, `./domboard.js?v=3`, `./home3d.js?v=2`, `./tiles.js?v=13`, `./sfx.js?v=16`, `css/style.css?v=52`). When you edit a client
 module, bump its tag in `index.html` and in every importer's `import` line — otherwise browsers keep
 running the stale module and your change appears to do nothing.
 
@@ -171,3 +172,7 @@ running the stale module and your change appears to do nothing.
   room identity, game object, and turn on fire — preserve that when editing `armTurnTimer`/`scheduleBotTurn`.
 - Bots are seated without a socket and are always "connected"; any new "is this player real?" check should
   test `p.isBot`, not `p.socketId` or `p.connected`.
+- **Rapid join attempts trip the tiered join lockout** (5 failed `room:join`s per socket per 10s, 20 per IP
+  per 60s — see the server section). E2e tests and manual probing that fail joins in quick succession get the
+  Arabic "too many attempts" error and look like a broken handler; space failed joins out or join successfully
+  to reset the counters. A connected-but-seatless client may also just be a spectator of a full/mid-match room.
