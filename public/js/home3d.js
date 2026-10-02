@@ -3,7 +3,13 @@
 // The caller keeps its 2D CSS tiles as a fallback if WebGL is unavailable.
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { tileFaceCanvas, tileBackCanvas } from './tiles.js?v=14';
+import { getQuality, onQualityChange, startProbe, feedFrame } from './quality.js?v=1';
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const DEEP = 0x121a3c; // mid-twilight sky tone so fog blends into the gradient
@@ -27,9 +33,17 @@ export class Home3D {
     this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
+    // B4: filmic output — matches the game board's grade
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
 
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.Fog(DEEP, 11, 24);
+
+    // B4: one-time PMREM room environment — subtle reflections on the tumbling tiles
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    pmrem.dispose();
 
     this.camera = new THREE.PerspectiveCamera(55, 1, 0.1, 60);
     this.camera.position.set(0, 0, 13);
@@ -50,8 +64,8 @@ export class Home3D {
 
     // one shared beveled tile shape; faces use the canvas art from tiles.js
     this.geo = new RoundedBoxGeometry(1, 2, 0.28, 3, 0.06);
-    this.sideMat = new THREE.MeshStandardMaterial({ color: 0xe9e1c8, roughness: 0.55, metalness: 0.05 });
-    this.backMat = new THREE.MeshStandardMaterial({ map: makeTex(tileBackCanvas()), roughness: 0.6, metalness: 0.1 });
+    this.sideMat = new THREE.MeshStandardMaterial({ color: 0xe9e1c8, roughness: 0.55, metalness: 0.05, envMapIntensity: 0.5 });
+    this.backMat = new THREE.MeshStandardMaterial({ map: makeTex(tileBackCanvas()), roughness: 0.6, metalness: 0.1, envMapIntensity: 0.3 });
 
     const count = Math.min(window.innerWidth, window.innerHeight) < 640 ? 10 : 18;
     this.tiles = [];
@@ -61,6 +75,42 @@ export class Home3D {
     window.addEventListener('resize', this.onResize);
     window.addEventListener('pointermove', this.onPointer);
     document.addEventListener('visibilitychange', this.onVis);
+
+    // B2/B4: adaptive quality — bloom composer on high tier, plain path on low
+    this._quality = getQuality();
+    this._unsubQuality = onQualityChange(q => this._applyQuality(q));
+    startProbe();
+    this._applyQuality(this._quality);
+  }
+
+  // ── B4: adaptive quality wiring ──
+  _applyQuality(q = getQuality()) {
+    this._quality = q;
+    if (q.tier === 'high') this._ensureComposer();
+    else this._teardownComposer();
+  }
+
+  /** High tier: RenderPass (transparent) → subtle bloom → OutputPass, MSAA+HDR. */
+  _ensureComposer() {
+    if (this._composer) return;
+    const size = this.renderer.getSize(new THREE.Vector2());
+    const dpr = this.renderer.getPixelRatio();
+    const rt = new THREE.WebGLRenderTarget(
+      Math.max(1, Math.floor(size.x * dpr)), Math.max(1, Math.floor(size.y * dpr)),
+      { samples: 4, type: THREE.HalfFloatType },
+    );
+    const composer = new EffectComposer(this.renderer, rt);
+    const rp = new RenderPass(this.scene, this.camera);
+    rp.clearAlpha = 0;   // keep the CSS twilight gradient visible behind the tiles
+    composer.addPass(rp);
+    composer.addPass(new UnrealBloomPass(size.clone(), 0.25, 0.5, 0.85));
+    composer.addPass(new OutputPass());
+    this._composer = composer;
+  }
+
+  _teardownComposer() {
+    this._composer?.dispose?.();
+    this._composer = null;
   }
 
   // Even horizontal coverage: pure-random x clumps at low tile counts (one
@@ -93,7 +143,7 @@ export class Home3D {
   makeTile() {
     const a = Math.floor(Math.random() * 7), b = Math.floor(Math.random() * 7);
     const faceMat = new THREE.MeshStandardMaterial({
-      map: makeTex(tileFaceCanvas(a, b)), roughness: 0.5, metalness: 0.04,
+      map: makeTex(tileFaceCanvas(a, b)), roughness: 0.5, metalness: 0.04, envMapIntensity: 0.35,
     });
     const backFacing = Math.random() < 0.15;
     const mesh = new THREE.Mesh(this.geo, [
@@ -134,6 +184,7 @@ export class Home3D {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this._composer?.setSize(w, h);
     this.spanX = this.spanY * this.camera.aspect + 1.5;
     this.buildLanes(this.tiles.length);
     if (this.reducedMotion) this.renderStatic();
@@ -202,12 +253,16 @@ export class Home3D {
     this.camera.position.y += (cy - this.camera.position.y) * 0.04;
     this.camera.lookAt(0, 0, 0);
 
-    this.renderer.render(this.scene, this.camera);
+    feedFrame(now);
+    if (this._composer) this._composer.render();
+    else this.renderer.render(this.scene, this.camera);
   };
 
   dispose() {
     this.pause();
     this.setActive(false);
+    this._unsubQuality?.();
+    this._teardownComposer();
     window.removeEventListener('resize', this.onResize);
     window.removeEventListener('pointermove', this.onPointer);
     document.removeEventListener('visibilitychange', this.onVis);
