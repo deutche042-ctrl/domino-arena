@@ -219,17 +219,25 @@ export function tileImage(a, b) {
   return dataUrlCache.get(key);
 }
 
-/** Felt texture for the table. */
+/** Felt texture for the table. B3: punchier contrast + a fine woven pattern. */
 export function feltCanvas() {
   const c = document.createElement('canvas');
   c.width = 1024; c.height = 1024;
   const ctx = c.getContext('2d');
   const g = ctx.createRadialGradient(512, 512, 80, 512, 512, 720);
-  g.addColorStop(0, '#1d6a4f');
-  g.addColorStop(.7, '#155040');
-  g.addColorStop(1, '#0e382e');
+  g.addColorStop(0, '#217a59');
+  g.addColorStop(.7, '#124a3a');
+  g.addColorStop(1, '#0a2f26');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 1024, 1024);
+  // fine felt nap — one subtle stitch direction only (a full grid moirés
+  // into diagonal bands when the texture is minified on the table cap)
+  ctx.globalAlpha = 0.028;
+  for (let i = 0; i < 1024; i += 5) {
+    ctx.fillStyle = i % 10 ? '#06231c' : '#2f8a66';
+    ctx.fillRect(0, i, 1024, 2);
+  }
+  ctx.globalAlpha = 1;
   // felt noise
   const img = ctx.getImageData(0, 0, 1024, 1024);
   for (let i = 0; i < img.data.length; i += 4) {

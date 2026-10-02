@@ -2,12 +2,20 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { tileFaceCanvas, tileBackCanvas, feltCanvas, setTheme as setTileTheme, getTheme } from './tiles.js?v=13';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { tileFaceCanvas, tileBackCanvas, feltCanvas, setTheme as setTileTheme, getTheme } from './tiles.js?v=14';
+import { getQuality, onQualityChange, startProbe, feedFrame } from './quality.js?v=1';
 
 const TILE_W = 1, TILE_L = 2, TILE_H = 0.42, GAP = 0.07;
 const MAX_X = 9.5;              // table boundary along X before turning
 const MAX_Z = 6.0;              // table boundary along Z before turning
 const adv = isDbl => (isDbl ? TILE_W : TILE_L) + GAP;
+// B3: face gloss per theme — glossy piano/neon, matte wood
+const FACE_ROUGHNESS = { classic: 0.3, neon: 0.22, wood: 0.45, piano: 0.18 };
 
 export class Board3D {
   constructor(canvas, { onMarkerClick, onBoardMiss, onBoneyardClick } = {}) {
@@ -20,12 +28,23 @@ export class Board3D {
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // B3: filmic output — ACES tone mapping over the new env-lit scene
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x070a14);
 
+    // B3: one-time PMREM room environment — subtle realistic reflections on the
+    // tiles/felt/rim (pooled materials tune their own envMapIntensity).
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    pmrem.dispose();
+
     this.camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
     this.camera.position.set(0, 20, 13);
+    this._camVel = { x: 0, y: 0, z: 0 };   // B3: critically-damped fit velocity
+    this._camUntil = 0;                    // spring active until (ms); user drag cancels
 
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enablePan = false;
@@ -38,9 +57,9 @@ export class Board3D {
     this.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
     // one finger rotate / pinch zoom on touch
     this.controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
-    // lights
-    this.scene.add(new THREE.AmbientLight(0xbfd0ff, 0.55));
-    const key = new THREE.DirectionalLight(0xfff2dd, 1.6);
+    // lights — B3: warmer key, cooler fill (env map adds the ambient bounce)
+    this.scene.add(new THREE.AmbientLight(0x9fb8ff, 0.5));
+    const key = new THREE.DirectionalLight(0xffe8cf, 1.8);
     key.position.set(6, 18, 8);
     key.castShadow = true;
     key.shadow.mapSize.set(2048, 2048);
@@ -48,7 +67,8 @@ export class Board3D {
     key.shadow.camera.top = 16; key.shadow.camera.bottom = -16;
     key.shadow.bias = -0.0004;
     this.scene.add(key);
-    const rim = new THREE.PointLight(0x4d7dff, 12, 40);
+    this._key = key;
+    const rim = new THREE.PointLight(0x4d7dff, 10, 40);
     rim.position.set(-8, 6, -6);
     this.scene.add(rim);
 
@@ -122,6 +142,7 @@ export class Board3D {
       this._downX = e.clientX;
       this._downY = e.clientY;
       this._downTime = performance.now();
+      this._camUntil = 0;   // user takes the camera — stop the auto-fit spring
     });
     canvas.addEventListener('pointerup', (e) => {
       const dist = Math.hypot(e.clientX - this._downX, e.clientY - this._downY);
@@ -151,7 +172,55 @@ export class Board3D {
       else this.resumeLoop();
     });
     this.resize();
+    // B2/B3: adaptive quality — resolve the tier, then wire composer/shadows/pixel
+    // ratio to it. The live frame-time probe (quality.js) may downgrade later.
+    this._quality = getQuality();
+    this._unsubQuality = onQualityChange(q => this._applyQuality(q));
+    startProbe();
+    this._applyQuality(this._quality);
     this._loop();
+  }
+
+  // ── B3: adaptive quality wiring ──
+  _applyQuality(q = getQuality()) {
+    const prevTier = this._quality?.tier;
+    this._quality = q;
+    const high = q.tier === 'high';
+    const downgraded = prevTier === 'high' && !high;
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio || 1, high ? 2 : 1.5));
+    // shadow budget: 2048 high / 1024 low. A live probe downgrade kills shadows
+    // entirely — the device already proved it can't hold the frame rate.
+    if (this._key) {
+      this._key.castShadow = !downgraded;
+      const size = high ? 2048 : 1024;
+      this._key.shadow.mapSize.set(size, size);
+      if (this._key.shadow.map) { this._key.shadow.map.dispose(); this._key.shadow.map = null; }
+    }
+    if (high) this._ensureComposer();
+    else this._teardownComposer();
+  }
+
+  /** High tier only: RenderPass → subtle bloom → OutputPass, MSAA + HDR target. */
+  _ensureComposer() {
+    if (this._composer) return;
+    const size = this.renderer.getSize(new THREE.Vector2());
+    const dpr = this.renderer.getPixelRatio();
+    const rt = new THREE.WebGLRenderTarget(
+      Math.max(1, Math.floor(size.x * dpr)), Math.max(1, Math.floor(size.y * dpr)),
+      { samples: 4, type: THREE.HalfFloatType },
+    );
+    const composer = new EffectComposer(this.renderer, rt);
+    composer.addPass(new RenderPass(this.scene, this.camera));
+    // low strength + high threshold: only the hottest highlights bloom
+    // (marker pads, halo lights, boneyard glow)
+    composer.addPass(new UnrealBloomPass(size.clone(), 0.32, 0.4, 0.82));
+    composer.addPass(new OutputPass());
+    this._composer = composer;
+  }
+
+  _teardownComposer() {
+    this._composer?.dispose?.();
+    this._composer = null;
   }
 
   // ── table ──
@@ -159,14 +228,15 @@ export class Board3D {
     const felt = new THREE.CanvasTexture(feltCanvas());
     const top = new THREE.Mesh(
       new THREE.CylinderGeometry(17, 17, 0.6, 64),
-      new THREE.MeshStandardMaterial({ map: felt, roughness: 0.95 })
+      new THREE.MeshStandardMaterial({ map: felt, roughness: 0.95, envMapIntensity: 0.22 })
     );
     top.position.y = -0.3 - TILE_H / 2;
     top.receiveShadow = true;
     this.scene.add(top);
     const rim = new THREE.Mesh(
       new THREE.CylinderGeometry(18.4, 18.4, 0.7, 64),
-      new THREE.MeshStandardMaterial({ color: 0x4a2f1d, roughness: 0.55, metalness: 0.1 })
+      // B3: polished rim — higher metalness + env reflections (clearcoat feel)
+      new THREE.MeshStandardMaterial({ color: 0x4a2f1d, roughness: 0.32, metalness: 0.45, envMapIntensity: 0.9 })
     );
     rim.position.y = -0.42 - TILE_H / 2;
     this.scene.add(rim);
@@ -227,7 +297,7 @@ export class Board3D {
 
   _sideMat() {
     if (!this._sideMatC) {
-      this._sideMatC = new THREE.MeshStandardMaterial({ color: 0xefe8d4, roughness: 0.35 });
+      this._sideMatC = new THREE.MeshStandardMaterial({ color: 0xefe8d4, roughness: 0.35, envMapIntensity: 0.5 });
     }
     return this._sideMatC;
   }
@@ -241,14 +311,18 @@ export class Board3D {
   _faceMat(a, b) {
     const k = `f:${this._theme}:${a}-${b}`;
     if (!this._matCache.has(k)) {
-      this._matCache.set(k, new THREE.MeshStandardMaterial({ map: this._faceTex(a, b), roughness: 0.3 }));
+      this._matCache.set(k, new THREE.MeshStandardMaterial({
+        map: this._faceTex(a, b),
+        roughness: FACE_ROUGHNESS[this._theme] ?? 0.3,
+        envMapIntensity: 0.35,
+      }));
     }
     return this._matCache.get(k);
   }
 
   _backMat() {
     if (!this._backMatC) {
-      this._backMatC = new THREE.MeshStandardMaterial({ map: this._backTex(), roughness: 0.5 });
+      this._backMatC = new THREE.MeshStandardMaterial({ map: this._backTex(), roughness: 0.5, envMapIntensity: 0.3 });
     }
     return this._backMatC;
   }
@@ -562,6 +636,8 @@ export class Board3D {
       anims: this._anims?.length ?? 0,
       myTurn: !!this._myTurn,
       reducedMotion: !!this._reducedMotion,
+      quality: this._quality?.tier ?? null,
+      composer: !!this._composer,
     };
   }
 
@@ -869,6 +945,7 @@ export class Board3D {
     if (!spots.length) {
       this.controls.target.set(0, 0, 0);
       this._camGoal = { x: 0, y: 16, z: 11 };
+      this._camUntil = performance.now() + 1200;
       return;
     }
     let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
@@ -881,6 +958,7 @@ export class Board3D {
     this.controls.target.set(cx, 0, cz);
     const dist = Math.min(Math.max(span, 13), 42);
     this._camGoal = { x: cx, y: dist * 0.78, z: cz + dist * 0.62 };
+    this._camUntil = performance.now() + 1200;
   }
 
   // ── markers ──
@@ -894,7 +972,11 @@ export class Board3D {
       if (!s) continue;
       const g = new THREE.Mesh(
         this._geo,
-        new THREE.MeshBasicMaterial({ color: 0x2ee6a8, transparent: true, opacity: 0.35, depthWrite: false })
+        // HDR tint (>1 linear) so the bloom pass picks the marker pads up on high tier
+        new THREE.MeshBasicMaterial({
+          color: new THREE.Color(0x2ee6a8).multiplyScalar(1.8),
+          transparent: true, opacity: 0.35, depthWrite: false,
+        })
       );
       g.position.set(s.x, 0.06, s.z);
       g.rotation.y = s.rotY;
@@ -1096,6 +1178,11 @@ export class Board3D {
       this.boneLight.intensity = 3.5 + Math.sin(t * 6) * 1.8;
     }
 
+    // B3: gentle breathing pulse on the last-move glow pad
+    if (this._lastGlow?.visible) {
+      this._lastGlow.material.opacity = 0.2 + Math.sin(t * 2.4) * 0.07;
+    }
+
     // process active animations
     this._anims = this._anims.filter(a => {
       a.t += dt;
@@ -1114,8 +1201,19 @@ export class Board3D {
         if (k >= 1) {
           a.mesh.position.y = 0; a.mesh.rotation.x = 0;
           if (a.arc) { a.mesh.position.x = a.toX; a.mesh.position.z = a.toZ; }
+          // B3: 2-stage settle — a short squash-and-recover after touchdown
+          if (!this._reducedMotion) this._anims.push({ mesh: a.mesh, t: 0, dur: 0.18, kind: 'settle' });
           return false;
         }
+        return true;
+      }
+
+      if (a.kind === 'settle') {
+        // squash on Y with a slight bulge on X/Z, easing back to rest
+        const k2 = Math.min(a.t / a.dur, 1);
+        const s = Math.sin(k2 * Math.PI);
+        a.mesh.scale.set(1 + s * 0.07, 1 - s * 0.14, 1 + s * 0.07);
+        if (k2 >= 1) { a.mesh.scale.set(1, 1, 1); return false; }
         return true;
       }
 
@@ -1175,16 +1273,21 @@ export class Board3D {
       return false;
     });
 
-    // camera easing toward fit
-    if (this._camGoal) {
-      const p = this.camera.position, g = this._camGoal;
-      p.x += (g.x - p.x) * 0.04;
-      p.y += (g.y - p.y) * 0.04;
-      p.z += (g.z - p.z) * 0.04;
+    // camera easing toward fit — B3: critically damped spring, active for a
+    // short window after each auto-fit (a user drag cancels it entirely)
+    if (this._camGoal && performance.now() < (this._camUntil || 0)) {
+      const w = 4.5, w2 = w * w;
+      const p = this.camera.position, v = this._camVel, g = this._camGoal;
+      v.x += (w2 * (g.x - p.x) - 2 * w * v.x) * dt;
+      v.y += (w2 * (g.y - p.y) - 2 * w * v.y) * dt;
+      v.z += (w2 * (g.z - p.z) - 2 * w * v.z) * dt;
+      p.x += v.x * dt; p.y += v.y * dt; p.z += v.z * dt;
     }
 
     this.controls.update();
-    this.renderer.render(this.scene, this.camera);
+    feedFrame(performance.now());
+    if (this._composer) this._composer.render();
+    else this.renderer.render(this.scene, this.camera);
   }
 
   resize() {
@@ -1193,6 +1296,7 @@ export class Board3D {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this._composer?.setSize(w, h);
   }
 
   /**
@@ -1203,6 +1307,8 @@ export class Board3D {
   dispose() {
     if (this._disposed) return;
     this._disposed = true;
+    this._unsubQuality?.();
+    this._teardownComposer();
     this.clearMarkers();
     for (const child of this.chainGroup.children) this._disposeTileMesh(child);
     for (const child of this.boneGroup.children) this._disposeTileMesh(child);

@@ -1698,3 +1698,14 @@ input:focus, select:focus { border-color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   .b2-tile, .b2-marker, .b2-boneyard { animation: none !important; transition: none !important; }
 }
+
+/* ── B3 vignette — pure-CSS radial overlay on the game screen (zero GPU cost);
+      the C redesign re-themes this rule. Sits right above the board canvas in
+      DOM order, below every HUD element. ── */
+#vignette {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(4, 6, 14, .55) 100%);
+}
+

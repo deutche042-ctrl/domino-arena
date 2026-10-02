@@ -3,7 +3,7 @@
 // The caller keeps its 2D CSS tiles as a fallback if WebGL is unavailable.
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { tileFaceCanvas, tileBackCanvas } from './tiles.js?v=13';
+import { tileFaceCanvas, tileBackCanvas } from './tiles.js?v=14';
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const DEEP = 0x121a3c; // mid-twilight sky tone so fog blends into the gradient

@@ -1,8 +1,8 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=25';
+import { Board3D } from './board3d.js?v=26';
 import { DomBoard, webglAvailable } from './domboard.js?v=3';
 import { Home3D } from './home3d.js?v=2';
-import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=13';
+import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=14';
 import { sfx } from './sfx.js?v=16';
 
 const $ = id => document.getElementById(id);
@@ -882,6 +882,7 @@ function updatePerfText() {
     ['syncs/s', String(perfSyncCount)],
     ['msgs/s', String(perfMsgs)],
     ['moves', String(view?.moves?.length ?? 0)],
+    ['quality', `${s.quality ?? '—'} <span class="perf-dim">bloom ${s.composer ? 'on' : 'off'}</span>`],
     ['heap', mem],
   ];
   box.innerHTML = '<div class="perf-title">📊 أداء</div>'
