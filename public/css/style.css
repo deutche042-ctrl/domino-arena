@@ -1667,9 +1667,8 @@ input:focus, select:focus { border-color: var(--gold); box-shadow: 0 0 0 4px rgb
 .b2-tile.dbl { width: 60px; height: 30px; align-self: center; }
 .b2-tile.flip { transform: rotate(180deg); }
 .b2-tile.new { animation: b2-drop .5s cubic-bezier(.22, 1.2, .36, 1); }
-/* parity with the 3D board's glow pad: the most recently placed tile
-   keeps a persistent marker until the next move replaces it */
-.b2-tile.last { outline: 2px solid rgba(46, 230, 168, .85); outline-offset: -2px; }
+/* parity with 3D board: no persistent green outline on the last tile */
+.b2-tile.last { outline: none; }
 @keyframes b2-drop {
   from { transform: translateY(-60px) scale(1.25); opacity: 0; }
   to   { transform: translateY(0) scale(1); opacity: 1; }

@@ -86,18 +86,8 @@ export class Board3D {
 
     this._buildTable();
 
-    // K3.C1: persistent "last move" glow pad + player-name label. Tile meshes
-    // share pooled materials, so the highlight is its own mesh parked just
-    // above the felt under the most recently placed tile.
-    this._lastGlow = new THREE.Mesh(
-      new THREE.PlaneGeometry(TILE_W * 1.55, TILE_L * 1.5),
-      new THREE.MeshBasicMaterial({ color: 0x2ee6a8, transparent: true, opacity: 0.22, depthWrite: false })
-    );
-    this._lastGlow.rotation.order = 'YXZ';
-    this._lastGlow.rotation.x = -Math.PI / 2;
-    this._lastGlow.visible = false;
+    // K3.C1: player-name label parked above the most recently placed tile.
     this._lastLabel = null;
-    this.scene.add(this._lastGlow);
 
     // groups
     this.chainGroup = new THREE.Group();
@@ -754,18 +744,14 @@ export class Board3D {
     this._fitCamera(allSpots.length ? allSpots : addedSpots);
   }
 
-  /** K3.C1: park the glow pad + name label on the most recently placed tile. */
+  /** K3.C1: park the name label on the most recently placed tile. */
   _showLastMoveHint(moves, spots, view) {
     const last = moves[moves.length - 1];
     const spot = spots[spots.length - 1];
     if (!last || !spot) {
-      this._lastGlow.visible = false;
       if (this._lastLabel) this._lastLabel.visible = false;
       return;
     }
-    this._lastGlow.position.set(spot.x, 0.021, spot.z);
-    this._lastGlow.rotation.y = spot.rotY;
-    this._lastGlow.visible = true;
     const name = view?.names?.[last.p];
     if (!name) {
       if (this._lastLabel) this._lastLabel.visible = false;
@@ -1178,11 +1164,6 @@ export class Board3D {
       this.boneLight.intensity = 3.5 + Math.sin(t * 6) * 1.8;
     }
 
-    // B3: gentle breathing pulse on the last-move glow pad
-    if (this._lastGlow?.visible) {
-      this._lastGlow.material.opacity = 0.2 + Math.sin(t * 2.4) * 0.07;
-    }
-
     // process active animations
     this._anims = this._anims.filter(a => {
       a.t += dt;
@@ -1329,9 +1310,6 @@ export class Board3D {
     this._hitBoxGeo = null;
     this._hitMatC?.dispose?.();
     this._hitMatC = null;
-    this._lastGlow?.geometry?.dispose?.();
-    this._lastGlow?.material?.dispose?.();
-    this._lastGlow = null;
     if (this._lastLabel) { this.scene.remove(this._lastLabel); this._lastLabel = null; }
     for (const mat of this._labelMats.values()) mat.dispose?.();
     this._labelMats.clear();
