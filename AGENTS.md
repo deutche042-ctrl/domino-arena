@@ -62,6 +62,7 @@ home → lobby → game.
 - `js/board3d.js` — Three.js board: snake layout with L/R ends plus U/D spinner arms, auto-fit camera, click targets for ends (`onMarkerClick`). Resources are pooled (see F3.1 below); `setTheme(name)` repaints in a new skin; `setCanDraw(b)` drives the boneyard spotlight; `setMyTurn(b)` is vestigial (the centre turn ring was removed) and only feeds `stats()`, which feeds the perf overlay.
 - `js/domboard.js` — **F4.5 2D fallback.** When WebGL is unavailable (or `new Board3D` throws), `createBoard()` in `app.js` builds a `DomBoard` instead: same duck-typed API (`sync`/`showMarkers`/`endFromPoint`/…) so the game stays fully playable as a plain DOM table. Also exports `webglAvailable()` (never throws) and the pure `buildChain`/`chainEnds` helpers. Keep the API surface in step with `Board3D` when adding methods.
 - `js/home3d.js` — animated Three.js home-screen backdrop.
+- `js/quality.js` — adaptive quality tier (`auto`/`high`/`low`, persisted in `localStorage('domino_quality')`); auto mode runs a ~2s frame-time probe that can downgrade once per session. `board3d.js`/`home3d.js` wire composer/shadow budgets/pixel-ratio to it; the home-screen quality chip row calls `setQuality`.
 - `js/tiles.js` — canvas-painted tile faces/backs/felt textures (data-URL cached). F4.3: a `THEMES` registry paints four skins (`classic`/`neon`/`wood`/`piano`); `setTheme(name)` clears the data-URL cache so the next paint uses the new skin. The board keys its texture cache by theme, so the pool stays bounded across switches.
 - `js/sfx.js` — WebAudio-synthesized sounds (no audio files). Game sound effects only — voice chat was removed from the project entirely (no mic, no voice UI, no voice handlers); do not reintroduce it.
 - `css/style.css` — all styling, single file. The tail holds the F4.5 `.board2d` fallback table styles.
@@ -71,7 +72,7 @@ home → lobby → game.
 **Reduced motion (F4.4).** `board3d.js` reads `prefers-reduced-motion: reduce` once at construction and flattens the arc/drop flourishes; `app.js`'s `prefersReducedMotion()` makes score roll-ups snap. Keep new animation behind that gate.
 
 **Cache-busting convention:** every client asset is imported with a `?v=N` query
-(`js/app.js?v=56`, `./board3d.js?v=25`, `./domboard.js?v=3`, `./home3d.js?v=2`, `./tiles.js?v=13`, `./sfx.js?v=16`, `css/style.css?v=52`). When you edit a client
+(`js/app.js?v=60`, `./board3d.js?v=26`, `./domboard.js?v=3`, `./home3d.js?v=3`, `./tiles.js?v=14`, `./quality.js?v=1`, `./sfx.js?v=16`, `css/style.css?v=56`). When you edit a client
 module, bump its tag in `index.html` and in every importer's `import` line — otherwise browsers keep
 running the stale module and your change appears to do nothing.
 
