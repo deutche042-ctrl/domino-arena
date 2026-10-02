@@ -3,6 +3,7 @@ import { Board3D } from './board3d.js?v=26';
 import { DomBoard, webglAvailable } from './domboard.js?v=3';
 import { Home3D } from './home3d.js?v=3';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=14';
+import { getQuality, setQuality } from './quality.js?v=1';
 import { sfx } from './sfx.js?v=16';
 
 const $ = id => document.getElementById(id);
@@ -225,6 +226,13 @@ function initHome() {
     ch.onclick = () => { applyTheme(ch.dataset.theme); sfx.click(); };
   });
   applyTheme(tileTheme);   // reflect the persisted choice on first paint
+  // B2: graphics quality picker (auto / high / low) — persisted by quality.js
+  const syncQualityChips = () => document.querySelectorAll('#qualityRow .diff-chip')
+    .forEach(c => c.classList.toggle('active', c.dataset.quality === getQuality().mode));
+  document.querySelectorAll('#qualityRow .diff-chip').forEach(ch => {
+    ch.onclick = () => { setQuality(ch.dataset.quality); syncQualityChips(); sfx.click(); };
+  });
+  syncQualityChips();
   $('btnBots').onclick = () => {
     const name = getName(); if (!name) return;
     emit('room:create', { name, vsBots: true, botLevel, botProfile }).then(res => {
@@ -1048,6 +1056,8 @@ function updateTurnTimer() {
   wrap.classList.remove('hidden');
   wrap.classList.toggle('warn', remainMs <= 10000);
   wrap.classList.toggle('danger', remainMs <= 5000);
+  // C: conic-gradient ring progress (0–100) read by the CSS
+  wrap.style.setProperty('--p', Math.max(0, Math.min(100, (remainMs / view.turnMs) * 100)).toFixed(1));
   $('turnTimerSecs').textContent = secs;
   if (view.turn === myId && secs !== lastTickSec) {
     lastTickSec = secs;
