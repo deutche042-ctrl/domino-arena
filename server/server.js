@@ -4,16 +4,11 @@ import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import os from 'node:os';
 import { RoomManager, TURN_MS } from './rooms.js';
 import { IllegalMove } from '../engine/game.js';
 import { chooseAction } from '../engine/bot.js';
 
-// Bundle-safe directory resolution: in the mobile CJS bundle esbuild replaces
-// import.meta.url with undefined, where node's own CJS __dirname is correct.
-const here = typeof import.meta.url === 'string'
-  ? path.dirname(fileURLToPath(import.meta.url))
-  : typeof __dirname !== 'undefined' ? __dirname : process.cwd();
+const here = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 
 const app = express();
@@ -27,27 +22,10 @@ app.use((req, res, next) => {
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
 app.use(express.static(process.env.DOMINO_PUBLIC_DIR || path.join(here, '..', 'public'), { etag: false, maxAge: 0 }));
 
-// LAN debug aid: which addresses the phone/host is reachable on (hotspot IP to share).
-// Also reports live room/player counts so the APK discovery list can label each host.
-app.get('/host-info', (req, res) => {
-  const ips = [];
-  for (const addrs of Object.values(os.networkInterfaces())) {
-    for (const a of addrs || []) {
-      if (a.family === 'IPv4' && !a.internal) ips.push(a.address);
-    }
-  }
-  let rooms = 0, players = 0;
-  for (const room of manager.rooms.values()) {
-    rooms++;
-    players += room.players.filter((p) => !p.isBot).length;
-  }
-  res.json({ port: Number(PORT), ips, rooms, players });
-});
-
 const http = createServer(app);
 const io = new Server(http, {
   // long-polling fallback keeps the game working through any tunnel/proxy;
-  // APK clients are on a localhost origin connecting to the LAN host — allow it
+  // rooms are shared by link, so allow any origin
   cors: { origin: true },
   transports: ['websocket', 'polling'],
 });
@@ -63,8 +41,7 @@ const sessions = new Map();
 const joinFailsByIp = new Map();   // ip -> failed-join timestamps[]
 
 // K2.S7: a throw inside a socket listener propagates synchronously and would
-// kill the process — and every room on it. Log and stay up (the embedded
-// mobile launcher likewise never exits).
+// kill the process — and every room on it. Log and stay up.
 process.on('uncaughtException', (err) => console.error('[domino] uncaughtException:', err));
 process.on('unhandledRejection', (err) => console.error('[domino] unhandledRejection:', err));
 
@@ -322,7 +299,7 @@ function detachCurrentRoom(socket) {
 }
 
 // ---- idle lobby sweeper ----
-// A lobby nobody touches forever pins memory (matters on the APK host phone).
+// A lobby nobody touches forever pins memory.
 // Sweep lobbies with no lobby activity (config/ready/chat/join) for LOBBY_TTL_MS.
 // Playing rooms are excluded — they have their own all-disconnected cleanup.
 const LOBBY_TTL_MS = Math.max(5000, Number(process.env.LOBBY_TTL_MS) || 30 * 60 * 1000);
@@ -362,7 +339,7 @@ io.on('connection', (socket) => {
   // ---- lobby ----
 
   socket.on('room:create', ({ name, vsBots, botLevel, botProfile, botDelayMs } = {}, cb) => {
-    // Unbounded room creation would let any LAN peer memory-DoS the host phone.
+    // Unbounded room creation would let any client memory-DoS the server.
     if (manager.rooms.size >= (Number(process.env.MAX_ROOMS) || 50)) {
       cb?.({ ok: false, error: 'الغرف كتير أوي على الخادم — جرب كمان شوية' });
       return;
@@ -871,10 +848,3 @@ http.listen(PORT, () => {
   console.log(`\n  🁢 DOMINO ARENA running at http://localhost:${PORT}`);
   console.log(`  Share it: cloudflared tunnel --url http://localhost:${PORT}\n`);
 });
-
-// Mobile: the embedded launcher can stop the server in-process — the host-yield
-// path (a superior rival host appeared on the LAN). Unused on desktop.
-globalThis.__dominoStop = () => {
-  try { io.close(); } catch {}
-  try { http.close(); } catch {}
-};

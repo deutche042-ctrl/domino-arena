@@ -2040,11 +2040,7 @@ function emit(event, payload) {
 }
 
 // ══════════ boot ══════════
-// Web mode: same-origin (browser / Cloudflare Tunnel) — today's behaviour, untouched.
-// APK mode: every phone runs its own game server; the launcher discovers nearby
-// phones and the app shows them as a tap-to-join list (startAppNet below).
-const IN_APP = typeof window.Capacitor !== 'undefined';
-const STATUS_URL = 'http://127.0.0.1:3001';
+// Same-origin connection (browser / Render / Cloudflare Tunnel).
 
 function startSocket(base) {
   socket = io(base || undefined, { transports: ['websocket', 'polling'] });
@@ -2127,131 +2123,9 @@ function startSocket(base) {
   });
 }
 
-// ── APK network glue: every phone runs its own game server, so we connect to
-// ourselves by default and keep a tap-to-join list of nearby phones (from the
-// launcher's discovery). Status contract (mobile launcher): GET 127.0.0.1:3001/status →
-// { status: 'ready', serverUrl, ips, peers: [{ ip, port }] }
-function netPill(html, cls = '') {
-  const el = $('netStatus');
-  if (!el) return;
-  el.className = 'net-status' + (cls ? ' ' + cls : '');
-  el.innerHTML = html;
-}
-
-const LOCAL_BASE = 'http://127.0.0.1:3000';
-let activeBase = null;
-
-function connectToBase(base, label) {
-  if (activeBase === base) return;
-  activeBase = base;
-  if (socket) { socket.disconnect(); socket = null; }
-  startSocket(base);
-  netPill(label, 'ok');
-}
-
-function startAppNet() {
-  const manual = (localStorage.getItem('domino_manual_server') || '').trim();
-  if (manual) {
-    const base = /^https?:\/\//.test(manual) ? manual : 'http://' + manual;
-    connectToBase(base, '🔌 خادم مخصص: ' + manual);
-  } else {
-    connectToBase(LOCAL_BASE, '📡 أنت مضيف الشبكة — اعمل غرفة وشارك الكود');
-  }
-  tickLan();
-}
-
-// discovery loop: refresh the nearby-phones panel + your own LAN IP line
-async function tickLan() {
-  if (!activeBase) return;
-  let s = null;
-  try { s = await (await fetch(STATUS_URL + '/status')).json(); } catch { /* launcher not up yet */ }
-  const ul = $('lanPeers');
-  if (s && ul) {
-    // own LAN IP(s): what remote players must type to join YOUR room
-    const self = $('lanSelf');
-    if (self) {
-      self.textContent = s.ips && s.ips[0]
-        ? 'شارك عنوانك: ' + s.ips[0] + ':3000 — أو اعمل غرفة وشارك الكود'
-        : 'اعمل غرفة وشارك الكود';
-    }
-    // nearby phones: other players found on this subnet
-    const peers = (s.peers || []).filter((p) => 'ip' in p);
-    ul.innerHTML = '';
-    // "back to my phone" entry whenever we're connected somewhere else
-    if (activeBase !== LOCAL_BASE) {
-      const li = document.createElement('li');
-      li.className = 'lan-peer self';
-      li.textContent = '🏠 جهازك (مضيفك أنت)';
-      li.onclick = () => { sfx.click(); connectToBase(LOCAL_BASE, '📡 رجعت لجهازك — أنت المضيف'); };
-      ul.appendChild(li);
-    }
-    for (const p of p_list(peers)) {
-      const li = document.createElement('li');
-      li.className = 'lan-peer' + (activeBase === `http://${p.ip}:${p.port}` ? ' active' : '');
-      li.textContent = '📱 ' + p.label;
-      li.onclick = () => {
-        sfx.click();
-        connectToBase(`http://${p.ip}:${p.port}`, '🔌 اتصلت بـ ' + p.label);
-      };
-      ul.appendChild(li);
-    }
-    if (!peers.length && activeBase === LOCAL_BASE) {
-      const li = document.createElement('li');
-      li.className = 'lan-peer none';
-      li.textContent = '🔍 مفيش أجهزة ظاهرة — اتأكد إن اللاعبين على نفس الواي فاي/هوت سبوت';
-      ul.appendChild(li);
-    }
-  }
-  setTimeout(tickLan, 2000);
-}
-
-// fetch each peer's live room/player counts once (launcher proxies to avoid CORS)
-const peerLabels = new Map();   // ip -> { label, at }
-function p_list(peers) {
-  return peers.map((p) => {
-    const cached = peerLabels.get(p.ip);
-    if (cached && Date.now() - cached.at < 30000) return { ...p, label: cached.label };
-    fetch(STATUS_URL + '/peer/' + encodeURIComponent(p.ip))
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j) => {
-        const rooms = j && typeof j.rooms === 'number' ? j.rooms : 0;
-        const players = j && typeof j.players === 'number' ? j.players : 0;
-        const label = `${p.ip} — ${players} لاعبين، ${rooms} غرف`;
-        peerLabels.set(p.ip, { label, at: Date.now() });
-      })
-      .catch(() => { peerLabels.set(p.ip, { label: p.ip, at: Date.now() }); });
-    return { ...p, label: cached ? cached.label : p.ip };
-  });
-}
-
-// ── advanced settings (APK only): manual server address
-function initAppNetUI() {
-  const toggle = $('advToggle');
-  if (!toggle || !IN_APP) return;
-  toggle.classList.remove('hidden');
-  toggle.onclick = () => {
-    sfx.click();
-    $('advPanel').classList.toggle('hidden');
-  };
-  const inp = $('inpManualServer');
-  inp.value = localStorage.getItem('domino_manual_server') || '';
-  $('btnSaveServer').onclick = () => {
-    sfx.click();
-    const v = inp.value.trim().replace(/^https?:\/\//, '');
-    if (v) localStorage.setItem('domino_manual_server', v);
-    else localStorage.removeItem('domino_manual_server');
-    location.reload();
-  };
-  $('btnClearServer').onclick = () => {
-    sfx.click();
-    localStorage.removeItem('domino_manual_server');
-    location.reload();
-  };
-}
-
 function boot() {
-  if (IN_APP) startAppNet(); else startSocket('');
-  initHome(); initLobby(); initGameUI(); initAppNetUI();
+  startSocket('');
+  initHome(); initLobby(); initGameUI();
   // F1.3: skip the countdown tick entirely while the tab is hidden — it is pure
   // DOM work nobody can see, and it keeps SFX (alarm/tick) from firing in a
   // background tab. The state render on return catches the clock up instantly.

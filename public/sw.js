@@ -2,9 +2,9 @@
 // Strategy:
 //   - navigations (index.html): network-first, cache fallback (stay fresh, work offline)
 //   - static assets (js/css/vendor/fonts/icons): cache-first, filled at runtime
-//   - everything else (socket.io, /status, /peer): network only — live data never cached
+//   - everything else (socket.io): network only — live data never cached
 // Cache name is versioned: bump SW_VER when shipped asset expectations change.
-const SW_VER = 'domino-v1';
+const SW_VER = 'domino-v2';
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SW_VER).then(c => c.addAll([
@@ -25,7 +25,7 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
   const p = url.pathname;
   // live traffic: never intercept
-  if (p.startsWith('/socket.io') || p === '/status' || p.startsWith('/peer/')) return;
+  if (p.startsWith('/socket.io')) return;
 
   if (e.request.mode === 'navigate') {
     // page: try the network, fall back to the cached shell when offline
