@@ -1,7 +1,7 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
 import { Board3D } from './board3d.js?v=27';
 import { DomBoard, webglAvailable } from './domboard.js?v=3';
-import { Home3D } from './home3d.js?v=3';
+import { Home3D } from './home3d.js?v=4';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=14';
 import { getQuality, setQuality } from './quality.js?v=1';
 import { sfx } from './sfx.js?v=16';
@@ -259,6 +259,54 @@ function initHome() {
         }
       });
   };
+
+  // collapsible play-settings (difficulty / personality / theme / quality)
+  const settingsPanel = $('homeSettings');
+  $('btnSettings').onclick = () => {
+    const open = settingsPanel.classList.toggle('hidden');
+    $('btnSettings').classList.toggle('open', !open);
+    $('btnSettings').setAttribute('aria-expanded', String(!open));
+    sfx.click();
+  };
+
+  // how-to-play modal — examples are painted with the real tile art (no images)
+  const howModal = $('modalHow');
+  const paintHowTiles = () => {
+    howModal.querySelectorAll('.how-tiles').forEach(box => {
+      if (box.children.length) return;
+      for (const id of box.dataset.tiles.split(',')) {
+        const [a, b] = id.split('-').map(Number);
+        const img = document.createElement('img');
+        img.src = tileImage(a, b);
+        img.alt = `${a}-${b}`;
+        box.appendChild(img);
+      }
+    });
+  };
+  $('btnHow').onclick = () => {
+    paintHowTiles();
+    howModal.classList.remove('hidden');
+    sfx.click();
+  };
+  $('howClose').onclick = () => howModal.classList.add('hidden');
+  howModal.addEventListener('click', e => {
+    if (e.target === howModal) howModal.classList.add('hidden');
+  });
+
+  // subtle 3D tilt following the pointer — flattened under reduced motion.
+  // cardIn runs with fill-mode both, which would keep overriding the inline
+  // transform forever, so the first interaction retires the entry animation.
+  const homeCard = document.querySelector('.home-card');
+  if (homeCard && !prefersReducedMotion()) {
+    homeCard.addEventListener('pointermove', e => {
+      if (homeCard.style.animation !== 'none') homeCard.style.animation = 'none';
+      const r = homeCard.getBoundingClientRect();
+      const rx = ((e.clientY - r.top) / r.height - 0.5) * -3.5;
+      const ry = ((e.clientX - r.left) / r.width - 0.5) * 3.5;
+      homeCard.style.transform = `perspective(1100px) rotateX(${rx}deg) rotateY(${ry}deg)`;
+    });
+    homeCard.addEventListener('pointerleave', () => { homeCard.style.transform = ''; });
+  }
 }
 
 function getName() {
@@ -1144,16 +1192,19 @@ function renderHomeStats() {
   if (!el) return;
   const s = loadStats();
   if (!s.matches) {
-    el.textContent = '';
+    el.innerHTML = '';
     el.classList.add('hidden');
   } else {
     const winPct = Math.round((s.wins / s.matches) * 100);
     el.classList.remove('hidden');
     el.innerHTML =
-      `<span class="hs-row"><b>🏆 ${s.wins}</b> فوز من <b>${s.matches}</b> · ${winPct}%</span>` +
-      `<span class="hs-row">سلسلة <b>${streakLabel(s.streak)}</b> · أطول <b>${s.bestStreak}</b></span>` +
-      `<span class="hs-row">متوسط <b>${s.avgScore}</b> · أعلى <b>${s.bestScore}</b>${s.botWins ? ` · ${s.botWins} ضد البوت` : ''}</span>` +
-      (s.history.length ? `<span class="hs-form" title="آخر ${s.history.length} مباريات (الأحدث أولاً)">${formStrip(s.history)}</span>` : '');
+      `<div class="stat-card"><b>${s.matches}</b><span>مباراة</span></div>` +
+      `<div class="stat-card gold"><b>${winPct}%</b><span>🏆 ${s.wins} فوز</span></div>` +
+      `<div class="stat-card mint"><b>${streakLabel(s.streak)}</b><span>السلسلة · أطول ${s.bestStreak}</span></div>` +
+      `<div class="stat-card"><b>${s.bestScore}</b><span>أعلى نتيجة · متوسط ${s.avgScore}</span></div>` +
+      (s.history.length
+        ? `<div class="stat-form" title="آخر ${s.history.length} مباريات (الأحدث أولاً)">${formStrip(s.history)}</div>`
+        : '');
   }
   const reset = $('btnResetStats');
   if (reset) reset.classList.toggle('hidden', !s.matches);

@@ -8,7 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=57">
+<link rel="stylesheet" href="css/style.css?v=58">
 <script type="importmap">
 {
   "imports": {
@@ -62,39 +62,97 @@
     <div class="home-actions">
       <button id="btnCreate" class="btn primary">إنشاء غرفة</button>
       <button id="btnBots" class="btn bots">🤖 العب ضد البوتات</button>
-      <div class="diff-row" id="diffRow">
-        <button type="button" class="diff-chip" data-level="easy">سهل</button>
-        <button type="button" class="diff-chip active" data-level="medium">متوسط</button>
-        <button type="button" class="diff-chip" data-level="hard">صعب</button>
-        <button type="button" class="diff-chip" data-level="expert">خبير</button>
-      </div>
-      <div class="diff-row" id="profileRow">
-        <button type="button" class="diff-chip active" data-profile="balanced">⚖ متوازن</button>
-        <button type="button" class="diff-chip" data-profile="aggressive">🔥 هجومي</button>
-        <button type="button" class="diff-chip" data-profile="defensive">🛡 دفاعي</button>
-      </div>
-      <div class="diff-row" id="themeRow">
-        <button type="button" class="diff-chip active" data-theme="classic">🎨 كلاسيك</button>
-        <button type="button" class="diff-chip" data-theme="neon">💠 نيون</button>
-        <button type="button" class="diff-chip" data-theme="wood">🪵 خشب</button>
-        <button type="button" class="diff-chip" data-theme="piano">🎹 بيانو</button>
-      </div>
-      <div class="diff-row" id="qualityRow">
-        <button type="button" class="diff-chip active" data-quality="auto">✨ تلقائي</button>
-        <button type="button" class="diff-chip" data-quality="high">💎 عالي</button>
-        <button type="button" class="diff-chip" data-quality="low">🪫 منخفض</button>
-      </div>
       <div class="join-row">
         <input id="inpCode" maxlength="4" placeholder="الكود" autocomplete="off">
         <button id="btnJoin" class="btn">انضمام</button>
       </div>
     </div>
+    <button id="btnSettings" class="settings-toggle" type="button" aria-expanded="false" aria-controls="homeSettings">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+      </svg>
+      <span>إعدادات اللعب</span>
+      <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="6 9 12 15 18 9"></polyline>
+      </svg>
+    </button>
+    <div id="homeSettings" class="home-settings hidden">
+      <div class="set-group">
+        <span class="set-label">مستوى البوتات وشخصيتهم</span>
+        <div class="diff-row" id="diffRow">
+          <button type="button" class="diff-chip" data-level="easy">سهل</button>
+          <button type="button" class="diff-chip active" data-level="medium">متوسط</button>
+          <button type="button" class="diff-chip" data-level="hard">صعب</button>
+          <button type="button" class="diff-chip" data-level="expert">خبير</button>
+        </div>
+        <div class="diff-row" id="profileRow">
+          <button type="button" class="diff-chip active" data-profile="balanced">⚖ متوازن</button>
+          <button type="button" class="diff-chip" data-profile="aggressive">🔥 هجومي</button>
+          <button type="button" class="diff-chip" data-profile="defensive">🛡 دفاعي</button>
+        </div>
+      </div>
+      <div class="set-group">
+        <span class="set-label">ثيم القطع</span>
+        <div class="diff-row" id="themeRow">
+          <button type="button" class="diff-chip active" data-theme="classic">🎨 كلاسيك</button>
+          <button type="button" class="diff-chip" data-theme="neon">💠 نيون</button>
+          <button type="button" class="diff-chip" data-theme="wood">🪵 خشب</button>
+          <button type="button" class="diff-chip" data-theme="piano">🎹 بيانو</button>
+        </div>
+      </div>
+      <div class="set-group">
+        <span class="set-label">جودة الرسوم</span>
+        <div class="diff-row" id="qualityRow">
+          <button type="button" class="diff-chip active" data-quality="auto">✨ تلقائي</button>
+          <button type="button" class="diff-chip" data-quality="high">💎 عالي</button>
+          <button type="button" class="diff-chip" data-quality="low">🪫 منخفض</button>
+        </div>
+      </div>
+    </div>
     <p id="homeError" class="error"></p>
   </div>
-  <footer class="home-foot">عادي (Block) · سحب (Draw) · خمسات (All Fives) — من 2 إلى 4 لاعبين</footer>
+  <footer class="home-foot">
+    <span>عادي (Block) · سحب (Draw) · خمسات (All Fives) — من 2 إلى 4 لاعبين</span>
+    <button id="btnHow" class="how-link" type="button">📖 كيف تلعب؟</button>
+  </footer>
   <div class="home-stats-row">
-    <span id="homeStats"></span>
+    <div id="homeStats" class="stats-grid hidden"></div>
     <button id="btnResetStats" class="btn small danger hidden" title="مسح إحصائياتك المحلية">مسح</button>
+  </div>
+
+  <!-- how-to-play modal -->
+  <div id="modalHow" class="modal hidden">
+    <div class="modal-card how-card">
+      <button id="howClose" class="chat-icon-btn how-close" title="إغلاق" aria-label="إغلاق">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+      <h2>📖 كيف تلعب الدومينو؟</h2>
+      <p class="how-intro">28 كرت، كل كرت فيه رقمين من 0 لـ 6. في دورك نزّل كرت يطابق رقم أحد طرفي السلسلة على الطاولة.</p>
+      <div class="how-variants">
+        <div class="how-variant">
+          <h3>عادي (Block)</h3>
+          <div class="how-tiles" data-tiles="6-6,6-4,4-4"></div>
+          <p>مفيش سحب — لو معندكش كرت يطابق الطرف بتعمل «باص». الفائز بالجولة ياخد مجموع نقاط كروت الخصوم المتبقية.</p>
+        </div>
+        <div class="how-variant">
+          <h3>سحب (Draw)</h3>
+          <div class="how-tiles" data-tiles="2-5,5-5,5-1"></div>
+          <p>لو معندكش حركة بتسحب من السحابة لحد ما تلاقي كرت ينزل. نفس قواعد احتساب النقاط.</p>
+        </div>
+        <div class="how-variant">
+          <h3>خمسات (All Fives)</h3>
+          <div class="how-tiles" data-tiles="6-4,4-6,6-1"></div>
+          <p>لو مجموع أطراف السلسلة من مضاعفات 5 (5، 10، 15…) تكسب نقاط فورًا! أول دبل يبقى «سنتر» يفتح 4 اتجاهات للّعب.</p>
+        </div>
+      </div>
+      <div class="how-goal">
+        🏆 الجولة تخلص لما لاعب يخلّص كروته أو اللعبة تقفل — وأول واحد يوصل لنقاط الفوز (100 افتراضيًا) يكسب الماتش!
+      </div>
+    </div>
   </div>
 </section>
 
@@ -342,6 +400,6 @@
 </section>
 
 <script>window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(((e.error&&e.error.stack)||e.message).split('\n').slice(0,4).join(' | '));});window.addEventListener('unhandledrejection',function(e){window.__errs.push('rej: '+((e.reason&&(e.reason.stack||e.reason.message))||String(e.reason)));});</script>
-<script type="module" src="js/app.js?v=61"></script>
+<script type="module" src="js/app.js?v=62"></script>
 </body>
 </html>

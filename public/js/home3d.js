@@ -35,7 +35,7 @@ export class Home3D {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     // B4: filmic output — matches the game board's grade
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 1.12;
 
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.Fog(DEEP, 11, 24);
@@ -58,6 +58,10 @@ export class Home3D {
     const gold = new THREE.PointLight(0xf7b32b, 85, 0, 2);
     gold.position.set(-7, -5, 5);
     this.scene.add(gold);
+    // warm rim from below-front — gilds the tile edges against the dusk sky
+    const rim = new THREE.DirectionalLight(0xffd27a, 0.65);
+    rim.position.set(-4, -6, 9);
+    this.scene.add(rim);
     const teal = new THREE.PointLight(0x2ee6a8, 40, 0, 2);
     teal.position.set(8, 6, 2);
     this.scene.add(teal);
@@ -67,7 +71,8 @@ export class Home3D {
     this.sideMat = new THREE.MeshStandardMaterial({ color: 0xe9e1c8, roughness: 0.55, metalness: 0.05, envMapIntensity: 0.5 });
     this.backMat = new THREE.MeshStandardMaterial({ map: makeTex(tileBackCanvas()), roughness: 0.6, metalness: 0.1, envMapIntensity: 0.3 });
 
-    const count = Math.min(window.innerWidth, window.innerHeight) < 640 ? 10 : 18;
+    const count = Math.min(window.innerWidth, window.innerHeight) < 640 ? 10
+      : (window.innerWidth >= 1500 ? 24 : 18);
     this.tiles = [];
     this.buildLanes(count);
     for (let i = 0; i < count; i++) this.tiles.push(this.makeTile());
@@ -103,7 +108,7 @@ export class Home3D {
     const rp = new RenderPass(this.scene, this.camera);
     rp.clearAlpha = 0;   // keep the CSS twilight gradient visible behind the tiles
     composer.addPass(rp);
-    composer.addPass(new UnrealBloomPass(size.clone(), 0.25, 0.5, 0.85));
+    composer.addPass(new UnrealBloomPass(size.clone(), 0.3, 0.5, 0.85));
     composer.addPass(new OutputPass());
     this._composer = composer;
   }
