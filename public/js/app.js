@@ -1,6 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
 import { Board3D } from './board3d.js?v=29';
-import { DomBoard, webglAvailable } from './domboard.js?v=5';
 import { Home3D } from './home3d.js?v=6';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, setQuality } from './quality.js?v=2';
@@ -136,24 +135,14 @@ function applyTheme(name) {
     .forEach(c => c.classList.toggle('active', c.dataset.theme === name));
 }
 
-// F4.5: build the game table, degrading to a 2D DOM board when WebGL is
-// unavailable (old GPUs, blocklisted drivers, VMs, GPU process crashes) — or
-// when the user forced 2D in settings (K3.C6). The 3D renderer can throw from
-// its constructor, so both the probe and the construct are guarded — a failed
-// table must never take the whole game down with it.
-function force2d() {
-  try { return localStorage.getItem('domino_force2d') === '1'; } catch { return false; }
-}
+// Build the 3D game table. There is no 2D table mode: if WebGL is unavailable
+// the board is null and the hand/HUD remain fully playable.
 function createBoard(canvas, cbs) {
   try {
-    if (!force2d() && webglAvailable()) return new Board3D(canvas, cbs);
+    return new Board3D(canvas, cbs);
   } catch (err) {
-    console.warn('[domino] 3D board unavailable, falling back to 2D:', err?.message || err);
-  }
-  try {
-    return new DomBoard(canvas, cbs);
-  } catch (err) {
-    console.error('[domino] 2D fallback board also failed:', err);
+    console.warn('[domino] 3D board unavailable:', err?.message || err);
+    toast('الطاولة 3D مش متاحة على الجهاز ده — اللعب شغال من إيدك.', 5000);
     return null;
   }
 }
@@ -219,25 +208,19 @@ function spawnFallingTiles(containerId) {
 }
 
 function initHome() {
-  // K3.C6: force-2D also skips the 3D backdrops (battery/weak-GPU setting).
-  const want3d = !force2d();
-  if (want3d) {
-    try {
-      home3d = new Home3D($('home3d'));
-      home3d.setActive(true);
-    } catch (err) {
-      console.warn('home3d unavailable — using 2D falling tiles', err);
-      home3d = null;
-    }
+  try {
+    home3d = new Home3D($('home3d'));
+    home3d.setActive(true);
+  } catch (err) {
+    console.warn('home3d unavailable — using CSS falling tiles', err);
+    home3d = null;
   }
   if (!home3d) spawnFallingTiles('heroTiles');
-  if (want3d) {
-    try {
-      lobby3d = new Home3D($('lobby3d'));
-    } catch (err) {
-      console.warn('lobby3d unavailable — using 2D falling tiles', err);
-      lobby3d = null;
-    }
+  try {
+    lobby3d = new Home3D($('lobby3d'));
+  } catch (err) {
+    console.warn('lobby3d unavailable — using CSS falling tiles', err);
+    lobby3d = null;
   }
   // K3.C5: the 2D lobby tiles spawn ONLY when the 3D lobby backdrop is dead —
   // they used to run stacked on top of it (23 blurred images + a canvas rAF).
@@ -1586,7 +1569,7 @@ async function requestHint() {
     if (board) {
       const moves = (view.legalMoves || []).filter(m => m.tileId === res.tileId);
       const ends = moves.map(m => m.end).filter(e => e != null);
-      if (ends.length) board.showMarkers(ends);
+      if (ends.length) board?.showMarkers(ends);
     }
     renderHand();
     sfx.select();
@@ -1619,12 +1602,12 @@ function onTileClick(tile, el) {
     sfx.select();
     socket.emit('game:play', { tileId: tile.id, end: uniqueEnds[0] });
     selectedTile = null;
-    board.clearMarkers();
+    board?.clearMarkers();
     renderHand();
     return;
   }
   if (selectedTile === tile.id) {
-    selectedTile = null; board.clearMarkers(); renderHand();
+    selectedTile = null; board?.clearMarkers(); renderHand();
     clearBannerHold();
     return;
   }
@@ -1634,7 +1617,7 @@ function onTileClick(tile, el) {
   if (view.variant === 'allfives') {
     for (const e of uniqueEnds) previews[e] = endsDeltaLabel(previewEndsTotal(tile.id, e));
   }
-  board.showMarkers(uniqueEnds, view.variant === 'allfives' ? previews : null);
+  board?.showMarkers(uniqueEnds, view.variant === 'allfives' ? previews : null);
   renderHand();
   setBannerHold('اختر الطرف اللي عايز تلعب عليه — النقطة الخضراء', 'mine');
 }
@@ -1653,7 +1636,7 @@ function onMarkerClick(end) {
   if (!selectedTile) return;
   socket.emit('game:play', { tileId: selectedTile, end });
   selectedTile = null;
-  board.clearMarkers();
+  board?.clearMarkers();
   clearBannerHold();
   renderHand();
 }
@@ -1716,7 +1699,7 @@ function moveTileDrag(e) {
       if (view.variant === 'allfives') {
         for (const en of uniqueEnds) previews[en] = endsDeltaLabel(previewEndsTotal(tileDrag.tile.id, en));
       }
-      board.showMarkers(uniqueEnds, view.variant === 'allfives' ? previews : null);
+      board?.showMarkers(uniqueEnds, view.variant === 'allfives' ? previews : null);
     }
   }
   // 0.15 is handled in CSS (`.drag-ghost { translate: -50% -110% }` lifts the
@@ -1751,12 +1734,12 @@ function endTileDrag(e) {
   if (d.moved && d.over) {
     socket.emit('game:play', { tileId: d.tile.id, end: d.over });
     selectedTile = null;
-    board.clearMarkers();
+    board?.clearMarkers();
     clearBannerHold();
     renderHand();
   } else if (d.moved) {
     // dropped nowhere — clean up the markers we revealed (unless tap-selected)
-    if (selectedTile !== d.tile.id) { board.clearMarkers(); }
+    if (selectedTile !== d.tile.id) { board?.clearMarkers(); }
   } else {
     onTileClick(d.tile, d.el); // no movement — treat as a plain tap
   }
@@ -1927,7 +1910,7 @@ function initGameUI() {
   });
 }
 
-// ── K3.C6: settings modal — master volume, force-2D, confirm-moves, vibration ──
+// ── K3.C6: settings modal — master volume, confirm-moves, vibration ──
 function openSettings() {
   const modal = $('modalSettings');
   if (!modal) return;
@@ -1936,8 +1919,6 @@ function openSettings() {
   if (rng) rng.value = String(vol);
   const vv = $('volVal');
   if (vv) vv.textContent = vol + '%';
-  const f2 = $('chkForce2d');
-  if (f2) f2.checked = force2d();
   const cf = $('chkConfirm');
   if (cf) cf.checked = confirmEnabled();
   const vb = $('chkVibrate');
@@ -1959,13 +1940,6 @@ function initSettingsModal() {
       if (vv) vv.textContent = rng.value + '%';
     };
     rng.onchange = () => sfx.click();
-  }
-  const f2 = $('chkForce2d');
-  if (f2) {
-    f2.onchange = () => {
-      try { localStorage.setItem('domino_force2d', f2.checked ? '1' : '0'); } catch { /* no storage */ }
-      location.reload();   // boards/backdrops are built at boot — rebuild fresh
-    };
   }
   const cf = $('chkConfirm');
   if (cf) {
@@ -3730,6 +3704,8 @@ function startSocket(base) {
 }
 
 function boot() {
+  // Retired preference from the removed 2D-table mode — clean it up once.
+  try { localStorage.removeItem('domino_force2d'); } catch { /* storage blocked */ }
   startSocket('');
   initHome(); initLobby(); initGameUI();
   try { initVoiceUI(); } catch (err) {

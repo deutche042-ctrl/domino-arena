@@ -66,20 +66,20 @@ home → lobby → game.
 
 - `js/app.js` — UI orchestration + socket client: screen switching, scoreboard, hand rendering, modals, chat, confetti. Talks to server only via the socket events above. Also owns the home stats (`loadStats`/`recordMatchResult`), the bot level/personality pickers, the tile-theme picker, the perf overlay (`P` key), the score roll-up (`rollNumber` + `_scorePrev`), and `createBoard()`.
 - `js/board3d.js` — Three.js board: snake layout with L/R ends plus U/D spinner arms, auto-fit camera, click targets for ends (`onMarkerClick`). Resources are pooled (see F3.1 below); `setTheme(name)` repaints in a new skin; `setCanDraw(b)` drives the boneyard spotlight; `setMyTurn(b)` is vestigial (the centre turn ring was removed) and only feeds `stats()`, which feeds the perf overlay.
-- `js/domboard.js` — **F4.5 2D fallback.** When WebGL is unavailable (or `new Board3D` throws), `createBoard()` in `app.js` builds a `DomBoard` instead: same duck-typed API (`sync`/`showMarkers`/`endFromPoint`/…) so the game stays fully playable as a plain DOM table. Also exports `webglAvailable()` (never throws) and the pure `buildChain`/`chainEnds` helpers. Keep the API surface in step with `Board3D` when adding methods.
+- `js/domboard.js` — **removed.** There is no 2D table mode or DOM fallback; the 3D table is the only table. If `new Board3D` throws (WebGL unavailable), `createBoard()` returns `null` and the hand/HUD/action bar remain fully playable, with an Arabic notice.
 - `js/home3d.js` — animated Three.js home-screen backdrop.
 - `js/quality.js` — adaptive quality tier (`auto`/`high`/`low`, persisted in `localStorage('domino_quality')`); auto mode runs a ~2s frame-time probe that can downgrade once per session. `board3d.js`/`home3d.js` wire composer/shadow budgets/pixel-ratio to it; the home-screen quality chip row calls `setQuality`.
 - `js/tiles.js` — canvas-painted tile faces/backs/felt textures (data-URL cached). F4.3: a `THEMES` registry paints four skins (`classic`/`neon`/`wood`/`piano`); `setTheme(name)` clears the data-URL cache so the next paint uses the new skin. The board keys its texture cache by theme, so the pool stays bounded across switches.
 - `js/sfx.js` — WebAudio-synthesized sounds (no audio files). Game sound effects only; voice is a separate system, not part of the SFX module.
 - `js/voice.js` — fresh WebRTC mesh voice engine for seated players. No imports and no browser work at module-evaluation time. Voice is opt-in: nothing calls `getUserMedia` until the user taps the mic / join button, and the module requires a secure context (`https:` or localhost) — on plain HTTP it reports the Arabic "needs a secure connection" error instead of prompting. It owns the peer connections, push-to-talk, self/host mute handling, device switching, speaking detection, and the `/voice-config` fetch. The server relays signaling only; audio stays peer-to-peer.
-- `css/style.css` — all styling, single file. The tail holds the F4.5 `.board2d` fallback table styles.
+- `css/style.css` — all styling, single file. The 3D board is the only table; the old `.board2d` fallback styles were removed.
 
 **Resource-pooling rules (F3.1) — read before touching the board.** The tile geometry (`_geo`), hit-area geometry/material (`_hitBoxGeo`/`_hitMatC`), side material, and the pooled face/back materials (`_matCache`/`_backMatC`) are **shared**. `_disposeTileMesh` deliberately skips them — disposing one would blank every tile using it. `dispose()` is the only place that may release them, and it is idempotent. The `engine/` `attachableEnds()` cache (F3.2) is a `WeakMap`-keyed revision counter so the engine stays pure and serializable.
 
 **Reduced motion (F4.4).** `board3d.js` reads `prefers-reduced-motion: reduce` once at construction and flattens the arc/drop flourishes; `app.js`'s `prefersReducedMotion()` makes score roll-ups snap. Keep new animation behind that gate.
 
 **Cache-busting convention:** every client asset is imported with a `?v=N` query
-(`js/app.js?v=64`, `./board3d.js?v=29`, `./domboard.js?v=5`, `./home3d.js?v=6`, `./tiles.js?v=15`, `./quality.js?v=2`, `./sfx.js?v=17`, `./voice.js?v=2`, `css/style.css?v=60`). When you edit a client
+(`js/app.js?v=65`, `./board3d.js?v=29`, `./home3d.js?v=6`, `./tiles.js?v=15`, `./quality.js?v=2`, `./sfx.js?v=17`, `./voice.js?v=2`, `css/style.css?v=61`). When you edit a client
 module, bump its tag in `index.html` and in every importer's `import` line — otherwise browsers keep
 running the stale module and your change appears to do nothing.
 

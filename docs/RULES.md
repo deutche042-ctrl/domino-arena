@@ -1,9 +1,10 @@
 # 🁢 DOMINO ARENA — Online Multiplayer Domino Game
 
-> **Historical notice.** The Android/APK plan and the old voice implementation below are historical
-> and have been removed from the shipped code. This document is kept for game-rules intent; for the
-> current architecture (including the fresh WebRTC voice system in `public/js/voice.js` and the
-> `voice:*` signaling in `server/server.js`), `AGENTS.md` is authoritative.
+> **Historical notice.** The Android/APK plan, the old voice implementation, and the selectable
+> 2D-table mode (with its DOM fallback) below are historical and have been removed from the shipped
+> code as of 2026-10-23. The 3D table is the only table. This document is kept for game-rules intent;
+> for the current architecture (including the fresh WebRTC voice system in `public/js/voice.js` and
+> the `voice:*` signaling in `server/server.js`), `AGENTS.md` is authoritative.
 
 **Goal:** A polished, real-time domino game you host locally, expose via a Cloudflare Tunnel, and play with friends — everyone opens the same URL in their browser, no installs, no accounts.
 
