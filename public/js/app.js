@@ -1,8 +1,8 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=33';
+import { Board3D } from './board3d.js?v=34';
 import { Home3D } from './home3d.js?v=7';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
-import { getQuality, setQuality } from './quality.js?v=3';
+import { getQuality, setQuality, onQualityChange } from './quality.js?v=3';
 import { sfx } from './sfx.js?v=17';
 import { VoiceChat } from './voice.js?v=2';
 
@@ -153,6 +153,37 @@ function createBoard(canvas, cbs) {
   }
 }
 
+// ── graphics quality: one persisted mode, two pickers (home + in-game) ──
+// Auto resolves to a tier at runtime; showing that tier in the settings makes
+// it obvious which budget is actually active instead of leaving the player to
+// guess why the table suddenly looks different.
+const QUALITY_LABEL = { auto: 'تلقائي', high: 'عالي', low: 'منخفض' };
+function syncQualityUI() {
+  const { mode, tier } = getQuality();
+  document.querySelectorAll('#qualityRow .diff-chip, #qualityRowGame .diff-chip')
+    .forEach(c => c.classList.toggle('active', c.dataset.quality === mode));
+  const cur = $('qualityCurrent');
+  if (cur) cur.textContent = mode === 'auto' ? `تلقائي · ${QUALITY_LABEL[tier]}` : QUALITY_LABEL[mode];
+  const noteText = mode === 'auto'
+    ? `بيختار الأنسب لجهازك — المستخدم حاليًا: ${QUALITY_LABEL[tier]}.`
+    : mode === 'high'
+      ? 'تفاصيل كاملة: ظلال وتوهج ودقة أعلى — الأنسب للكمبيوتر.'
+      : 'أسرع أداء: بدون ظلال أو توهج ودقة أخف — الأنسب للموبايل.';
+  for (const id of ['qualityNote', 'qualityNoteHome']) {
+    const n = $(id);
+    if (n) n.textContent = noteText;
+  }
+}
+function bindQualityPicker(rootId) {
+  document.querySelectorAll(`#${rootId} .diff-chip`).forEach(ch => {
+    ch.onclick = () => {
+      if (!setQuality(ch.dataset.quality)) return;
+      syncQualityUI();
+      sfx.click();
+    };
+  });
+}
+
 // ══════════ screens ══════════
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -280,12 +311,8 @@ function initHome() {
   });
   applyTheme(tileTheme);   // reflect the persisted choice on first paint
   // B2: graphics quality picker (auto / high / low) — persisted by quality.js
-  const syncQualityChips = () => document.querySelectorAll('#qualityRow .diff-chip')
-    .forEach(c => c.classList.toggle('active', c.dataset.quality === getQuality().mode));
-  document.querySelectorAll('#qualityRow .diff-chip').forEach(ch => {
-    ch.onclick = () => { setQuality(ch.dataset.quality); syncQualityChips(); sfx.click(); };
-  });
-  syncQualityChips();
+  bindQualityPicker('qualityRow');
+  syncQualityUI();
   $('btnBots').onclick = () => {
     const name = getName(); if (!name) return;
     emit('room:create', { name, vsBots: true, botLevel, botProfile }).then(res => {
@@ -1891,6 +1918,7 @@ function openSettings() {
   if (cf) cf.checked = confirmEnabled();
   const vb = $('chkVibrate');
   if (vb) vb.checked = vibrationOn();
+  syncQualityUI();
   modal.classList.remove('hidden');
 }
 function initSettingsModal() {
@@ -1924,6 +1952,11 @@ function initSettingsModal() {
       sfx.click();
     };
   }
+  bindQualityPicker('qualityRowGame');
+  syncQualityUI();
+  // Auto can downgrade itself after the live probe; keep the "currently using"
+  // label honest when that happens mid-session.
+  onQualityChange(() => syncQualityUI());
 }
 
 function toggleFullscreen() {

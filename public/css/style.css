@@ -1013,7 +1013,15 @@ input:focus, select:focus { border-color: var(--gold); box-shadow: 0 0 0 4px rgb
 }
 
 /* ── in-game settings modal ── */
-.settings-card { width: min(400px, 92vw); text-align: start; }
+.settings-card {
+  width: min(400px, 92vw); text-align: start;
+  /* the quality section made this card tall enough to overflow a short
+     landscape phone; keep it scrollable instead of clipping the last row */
+  max-height: min(88vh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
 .settings-card h2 { text-align: center; font-size: 19px; margin-bottom: 6px; }
 .set-row {
   display: flex; flex-direction: column; gap: 6px;
@@ -1028,6 +1036,16 @@ input:focus, select:focus { border-color: var(--gold); box-shadow: 0 0 0 4px rgb
 }
 .settings-card .rule-row { padding: 9px 0; }
 .set-note { text-align: center; margin-top: 10px; }
+/* quality picker: the note explains what the active budget actually changes */
+.quality-set { padding-bottom: 2px; }
+.quality-note {
+  margin-top: 0;
+  font-size: 11px;
+  line-height: 1.55;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: center;
+}
 
 /* ── turn countdown — circular conic ring, a flex item INSIDE .hud-right so it
    can never collide with the conn/sound/fullscreen buttons (bug 0.3: in RTL the

@@ -1367,13 +1367,11 @@ export class Board3D {
 
       // Keep the light in the render list with intensity 0 when idle: toggling
       // `visible` on a light changes the light count and forces a shader recompile.
-      // Low tier gets a position-only placeholder — the pads stay visible, but
-      // the four extra point lights leave the fragment shader.
-      const light = this._quality.tier === 'high'
-        ? new THREE.PointLight(0x2ee6a8, 0, 4)
-        : new THREE.Object3D();
+      // The low tier creates it hidden (zero shader cost) so switching the
+      // quality setting back to high restores the halo without a reload.
+      const light = new THREE.PointLight(0x2ee6a8, 0, 4);
       light.position.y = 1.2;
-      if (light.isLight) light.visible = true;
+      light.visible = this._quality.tier === 'high';
 
       const sprite = new THREE.Sprite(this._ghostSpriteMat);
       sprite.scale.set(1.7, 0.85, 1);

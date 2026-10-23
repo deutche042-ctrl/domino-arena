@@ -8,7 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=80">
+<link rel="stylesheet" href="css/style.css?v=81">
 <script type="importmap">
 {
   "imports": {
@@ -105,8 +105,9 @@
         <div class="diff-row" id="qualityRow">
           <button type="button" class="diff-chip active" data-quality="auto">✨ تلقائي</button>
           <button type="button" class="diff-chip" data-quality="high">💎 عالي</button>
-          <button type="button" class="diff-chip" data-quality="low">🪫 منخفض</button>
+          <button type="button" class="diff-chip" data-quality="low">⚡ منخفض</button>
         </div>
+        <p class="quality-note" id="qualityNoteHome">تلقائي بيختار الأنسب لجهازك.</p>
       </div>
     </div>
     <p id="homeError" class="error"></p>
@@ -398,6 +399,15 @@
         <input type="checkbox" id="chkVibrate">
         <span>اهتزاز تنبيه لما يبقى دورك</span>
       </label>
+      <div class="set-row quality-set">
+        <span>جودة الرسوم <b id="qualityCurrent">تلقائي</b></span>
+        <div class="diff-row" id="qualityRowGame">
+          <button type="button" class="diff-chip" data-quality="auto">✨ تلقائي</button>
+          <button type="button" class="diff-chip" data-quality="high">💎 عالي</button>
+          <button type="button" class="diff-chip" data-quality="low">⚡ منخفض</button>
+        </div>
+        <p class="quality-note" id="qualityNote">تلقائي بيختار الأنسب لجهازك.</p>
+      </div>
       <p class="muted small set-note">التغييرات بتتحفظ على جهازك على طول.</p>
     </div>
   </div>
@@ -564,6 +574,6 @@
 </div>
 
 <script>window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(((e.error&&e.error.stack)||e.message).split('\n').slice(0,4).join(' | '));});window.addEventListener('unhandledrejection',function(e){window.__errs.push('rej: '+((e.reason&&(e.reason.stack||e.reason.message))||String(e.reason)));});</script>
-<script type="module" src="js/app.js?v=73"></script>
+<script type="module" src="js/app.js?v=74"></script>
 </body>
 </html>
