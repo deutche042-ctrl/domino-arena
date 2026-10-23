@@ -903,7 +903,33 @@ export class Board3D {
    * The rebuild path remains for the rare cases where the list shrinks or
    * changes (new hand, reconnect, variant switch) — those still cost O(n).
    */
+  /**
+   * Remove short-lived meshes whose animation must not outlive a state update.
+   * The draw flight lives directly on the scene (not in chainGroup), so a
+   * rebuild never touches it; this is the explicit owner of that lifetime.
+   */
+  _flushTransientAnims(kinds = ['draw']) {
+    if (!this._anims?.length) return;
+    const keep = [];
+    for (const a of this._anims) {
+      if (kinds.includes(a.kind)) {
+        if (a.mesh) {
+          this.scene.remove(a.mesh);
+          this._disposeTileMesh(a.mesh);
+        }
+      } else {
+        keep.push(a);
+      }
+    }
+    this._anims = keep;
+  }
+
   sync(view) {
+    // A new state is the one point where a transient draw flight must not
+    // survive: tapping/playing mid-flight used to leave its mesh hovering
+    // over the hand. Also nudge the single rAF loop in case it was paused.
+    this._flushTransientAnims();
+    this._updateLoop();
     const moves = view.moves || [];
     const isAllFives = view.variant === 'allfives';
 
@@ -1215,6 +1241,9 @@ export class Board3D {
       dur3: isMe ? 0.30 : 0.20,  // Phase 3: Glide into the hand (or opponent's side)
       t: 0,
       kind: 'draw',
+      // Wall-clock start so a loop paused by the OS/browser cannot leave the
+      // mesh on screen indefinitely after it resumes.
+      wallStart: performance.now(),
     };
     anim.totalDur = anim.dur1 + anim.dur2 + anim.dur3;
     this._anims.push(anim);
@@ -1636,6 +1665,9 @@ export class Board3D {
       this.resize();
       this._updateLoop();
     } else {
+      // Leaving the table mid-flight must not leave the draw mesh parked over
+      // the hand when the player returns.
+      this._flushTransientAnims();
       this.pauseLoop();
     }
   }
@@ -1698,7 +1730,8 @@ export class Board3D {
 
       if (a.kind === 'draw') {
         const { isMe, mesh, startPos, midPos, endPos, startRotY, dur1, dur2, dur3, totalDur } = a;
-        if (a.t >= totalDur) {
+        const stale = a.wallStart && performance.now() - a.wallStart > 4000;
+        if (a.t >= totalDur || stale) {
           this.scene.remove(mesh);
           // Release this tile's own materials; the shared _geo is left intact.
           this._disposeTileMesh(mesh);

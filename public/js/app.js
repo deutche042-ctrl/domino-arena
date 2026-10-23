@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=31';
+import { Board3D } from './board3d.js?v=32';
 import { Home3D } from './home3d.js?v=6';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, setQuality } from './quality.js?v=2';
@@ -915,6 +915,10 @@ function cycleSort() {
 
 function renderHand() {
   if (!view) return; // boot/themes can repaint before any game:state arrives
+  // A state broadcast can rebuild the hand mid-drag. Without this, the DOM
+  // drag ghost and its pointer capture survived with no element left to end
+  // the gesture, leaving a tile glued over the board/hand.
+  if (tileDrag) cancelTileDrag();
   const hand = $('hand');
   const myTurn = !spectating && view.turn === myId && view.status === 'playing';
   hand.classList.toggle('my-turn', myTurn);
@@ -1684,8 +1688,19 @@ function startTileDrag(e, tile, el) {
   tileDrag = {
     tile, el, startX: e.clientX, startY: e.clientY, moved: false, ghost: null, over: null,
     noDrop: moves[0].end === null, armed: !touch, cancelled: false,
-    holdTimer: null,
+    holdTimer: null, safety: null,
   };
+  // A pointerup that never reaches the original tile (the hand re-rendered,
+  // the finger left the element, an OS gesture took over) must still end the
+  // drag. Capture it at window level and hard-cap the gesture lifetime.
+  const finish = (ev) => {
+    if (tileDrag && tileDrag.el === el) endTileDrag(ev);
+  };
+  window.addEventListener('pointerup', finish, { once: true, passive: true });
+  window.addEventListener('pointercancel', finish, { once: true, passive: true });
+  tileDrag.safety = setTimeout(() => {
+    if (tileDrag && tileDrag.el === el) cancelTileDrag();
+  }, 15000);
   if (touch) {
     tileDrag.holdTimer = setTimeout(() => {
       if (!tileDrag || tileDrag.cancelled) return;
@@ -1741,6 +1756,7 @@ function cancelTileDrag() {
   tileDrag = null;
   if (!d) return;
   clearTimeout(d.holdTimer);
+  clearTimeout(d.safety);
   d.ghost?.remove();
   if (board?.controls) board.controls.enabled = true;
   board?.highlightEnd?.(null);
@@ -1750,6 +1766,7 @@ function endTileDrag(e) {
   const d = tileDrag;
   tileDrag = null;
   clearTimeout(d.holdTimer);
+  clearTimeout(d.safety);
   try { d.el.releasePointerCapture(e.pointerId); } catch { /* noop */ }
   d.ghost?.remove();
   if (board?.controls) board.controls.enabled = true;
