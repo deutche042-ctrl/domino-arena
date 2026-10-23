@@ -48,7 +48,7 @@ const FACE_PX_HIGH = 256, FACE_PX_LOW = 128;
 // ── real 3D room sizing (measured from THIS table, not the demo's) ─────────
 // Measured table facts: the procedural felt top is a radius-17 cylinder, the
 // rim is radius 18.4, the felt surface sits at y = -TILE_H/2 with its underside
-// at -0.81 (rim to -0.97), and the boneyard sprawls to ~(12.5, 15.5). The room
+// at -0.81 (rim to -0.97), and the boneyard grid spans ~(2.3, 5.5)–(9.2, 14). The room
 // is built in the room3d-authored "room metres" and uniformly scaled so the
 // real table sits inside with a walk-around ring — props keep their authored
 // proportions AND the felt/rim/tile ratios read true.
