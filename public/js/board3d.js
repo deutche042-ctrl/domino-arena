@@ -2,16 +2,15 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { tileFaceCanvas, tileBackCanvas, feltCanvas, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, onQualityChange, startProbe, feedFrame } from './quality.js?v=3';
 import {
   getTableDesign, loadTableModel, placeTableModel, applyTableMaterials, disposeTableModel,
 } from './tables3d.js?v=1';
+import {
+  getEnvironment, loadEnvironmentTexture, disposeEnvironmentTexture,
+} from './environments3d.js?v=1';
 
 const TILE_W = 1, TILE_L = 2, TILE_H = 0.42, GAP = 0.07;
 const MAX_X = 9.5;              // table boundary along X before turning
@@ -87,14 +86,24 @@ export class Board3D {
     this._tableModel = null;
     this._tableLoadToken = 0;
     this._tableLoadingId = null;
+    // Selected 360° environment (Poly Haven HDRI). The RoomEnvironment PMREM
+    // below stays as the fallback until the chosen photo loads.
+    this._environmentDesign = 'comfy_cafe';
+    this._envTier = null;
+    this._envLoadToken = 0;
+    this._envLoadingId = null;
+    this._hdriRT = null;
 
     const low = this._quality.tier === 'low';
     // Low tier renders at CSS resolution with no MSAA and no shadow pass. Those
     // three together are the difference between a phone GPU compositing a frame
     // and choking on it; the desktop high-tier path is untouched.
     this.renderer = new THREE.WebGLRenderer({
-      canvas, antialias: !low, powerPreference: 'high-performance',
+      canvas, antialias: !low, alpha: true, powerPreference: 'high-performance',
     });
+    // The DOM environment photo sits behind the transparent canvas; only the
+    // table, tiles and their effects are composited by WebGL.
+    this.renderer.setClearColor(0x000000, 0);
     this.renderer.setPixelRatio(low ? 1 : Math.min(devicePixelRatio || 1, 2));
     this.renderer.shadowMap.enabled = !low;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -112,7 +121,9 @@ export class Board3D {
     this._lastStep = 0;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x070a14);
+    // Deliberately transparent: #gameEnv shows the selected 360° environment
+    // photo behind the table (see applyEnvironmentBackdrop in app.js).
+    this.scene.background = null;
 
     // B3: one-time PMREM room environment — subtle realistic reflections on the
     // tiles/felt/rim (pooled materials tune their own envMapIntensity).
@@ -130,6 +141,7 @@ export class Board3D {
     this._camVel = { x: 0, y: 0, z: 0 };   // B3: critically-damped fit velocity
     this._camUntil = 0;                    // spring active until (ms); user drag cancels
     this._camStartAt = 0;
+    this._firstFit = true;                 // first sync snaps; later fits spring
     this._camGoal = null;
     this._camTargetGoal = null;
     this._camTargetVec = new THREE.Vector3();
@@ -270,6 +282,7 @@ export class Board3D {
     // camera actually moved by the time 'end' fires.
     const onOrbitStart = () => {
       this._orbiting = true;
+      this._firstFit = false;
       this._orbitFrom = this.camera.position.clone();
       this._orbitTargetFrom = this.controls.target.clone();
       this._camUntil = 0;
@@ -325,14 +338,16 @@ export class Board3D {
     if (this._disposed) return;
     this._quality = q;
     const high = q.tier === 'high';
+    // The environment ships 1K for low and 2K for high. Reload it when the
+    // tier actually changes (forced high/low in the settings picker).
+    if (this._hdriRT && this._envTier !== q.tier) {
+      this.setEnvironment(this._environmentDesign, { force: true });
+    }
     // Low is a phone budget: CSS-resolution buffer, no MSAA, no shadows and a
-    // 30fps cap. High keeps the full desktop pipeline (DPR 2, MSAA bloom,
-    // 2048 shadows) so nothing changes on a computer.
+    // 30fps cap. High keeps DPR 2, AA and 2048 shadows on a computer.
     const dpr = high ? Math.min(devicePixelRatio || 1, 2) : 1;
     this._frameInterval = high ? 0 : 1000 / 30;
     this.renderer.setPixelRatio(dpr);
-    // A composer that survives the resize must adopt the new pixel ratio too.
-    this._composer?.setPixelRatio(dpr);
     // Shadow budget: 2048 high / 1024 low. The low tier disables the shadow
     // pass entirely; the instanced contact quads still ground every tile.
     if (this._key) {
@@ -362,56 +377,16 @@ export class Board3D {
       this._texPx = px;
       this._reskin();          // rebuild face/back textures at the new budget
     }
-    if (high) this._ensureComposer();
-    else this._teardownComposer();
+    // Direct transparent rendering: the board composites over the DOM
+    // environment photo, and a bloom composer would write opaque alpha.
     this._applyThemeFx();
   }
 
-  /** High tier only: RenderPass → subtle bloom → OutputPass, MSAA + HDR target. */
-  _ensureComposer() {
-    if (this._composer || this._disposed) return;
-    const size = this.renderer.getSize(new THREE.Vector2());
-    const dpr = this.renderer.getPixelRatio();
-    const rt = new THREE.WebGLRenderTarget(
-      Math.max(1, Math.floor(size.x * dpr)), Math.max(1, Math.floor(size.y * dpr)),
-      { samples: 4, type: THREE.HalfFloatType },
-    );
-    const composer = new EffectComposer(this.renderer, rt);
-    composer.addPass(new RenderPass(this.scene, this.camera));
-    // low strength + high threshold: only the hottest highlights bloom
-    // (marker pads, halo lights, boneyard glow)
-    const bloom = new UnrealBloomPass(size.clone(), 0.32, 0.4, 0.82);
-    composer.addPass(bloom);
-    composer.addPass(new OutputPass());
-    this._composer = composer;
-    this._bloom = bloom;
-    this._applyThemeFx();
-  }
-
-  _teardownComposer() {
-    const composer = this._composer;
-    this._composer = null;
-    this._bloom = null;
-    if (!composer) return;
-    // EffectComposer.dispose() only frees its two render targets and the copy
-    // pass. UnrealBloomPass/OutputPass own render targets, materials and a
-    // FullScreenQuad — without this every quality toggle leaked them.
-    for (const pass of composer.passes || []) {
-      try { pass.dispose?.(); } catch { /* a pass without disposal is harmless */ }
-    }
-    composer.dispose?.();
-  }
-
-  /** Theme/tier-aware grade: exposure + bloom stay inside sane, readable bounds. */
+  /** Theme-aware exposure, clamped so no skin can blow out the frame. */
   _applyThemeFx() {
     if (this._disposed) return;
     const look = themeLook(this._theme);
     this.renderer.toneMappingExposure = clamp(look.exposure, 1.0, 1.15);
-    if (this._bloom) {
-      this._bloom.strength = clamp(look.bloom, 0.18, 0.5);
-      this._bloom.radius = clamp(look.bloomRadius, 0.2, 0.6);
-      this._bloom.threshold = clamp(look.bloomThreshold, 0.6, 0.95);
-    }
   }
 
   // ── table ──
@@ -430,12 +405,11 @@ export class Board3D {
     rim.position.y = -0.42 - TILE_H / 2;
     this.scene.add(rim);
     this._tableRim = rim;
-    this._floorMat = new THREE.MeshStandardMaterial({ color: 0x0a0e1c, roughness: 1 });
-    const floor = new THREE.Mesh(new THREE.CircleGeometry(60, 32), this._floorMat);
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = -1.2;
-    this.scene.add(floor);
-    this._tableFloor = floor;
+    // The selected HDRI is the room AND the ground. A dark ground disc would
+    // cover the photo and read as a hole, so the classic table now ends at its
+    // rim (the play camera never sees the underside).
+    this._tableFloor = null;
+    this._floorMat = null;
     this._applyTableTheme();
   }
 
@@ -508,11 +482,55 @@ export class Board3D {
     });
   }
 
-  /** The felt disc/rim/floor are the classic table; models replace all three. */
+  /** Models replace the felt top/rim; the HDRI supplies the ground. */
   _showProceduralTable(show) {
     if (this._tableTop) this._tableTop.visible = show;
     if (this._tableRim) this._tableRim.visible = show;
-    if (this._tableFloor) this._tableFloor.visible = show;
+  }
+
+  // ── 360° environment (Poly Haven HDRI) ──
+  /**
+   * Bake the selected equirectangular photo into the scene's PBR environment.
+   * The visible room itself is the #gameEnv DOM layer, so the source JPEG is
+   * released right after the PMREM is built. The old PMREM stays active until
+   * the new one is ready (no flash back to the fallback studio).
+   */
+  setEnvironment(id, { force = false } = {}) {
+    if (this._disposed) return;
+    const design = getEnvironment(id);
+    const tier = this._quality.tier === 'low' ? 'low' : 'high';
+    if (!force && design.id === this._environmentDesign
+        && this._hdriRT && this._envTier === tier) return;
+    if (!force && this._envLoadingId === design.id && this._envTier === tier) return;
+    this._environmentDesign = design.id;
+    const token = ++this._envLoadToken;
+    this._envLoadingId = design.id;
+
+    loadEnvironmentTexture(design, tier).then((tex) => {
+      if (this._disposed || token !== this._envLoadToken) {
+        disposeEnvironmentTexture(tex);
+        return;
+      }
+      const pmrem = new THREE.PMREMGenerator(this.renderer);
+      const rt = pmrem.fromEquirectangular(tex);
+      pmrem.dispose();
+      disposeEnvironmentTexture(tex);   // only the PMREM is needed after this
+      if (this._disposed || token !== this._envLoadToken) {
+        rt.dispose?.();
+        return;
+      }
+      const oldRT = this._hdriRT;
+      this._hdriRT = rt;
+      this._envTier = tier;
+      this._envLoadingId = null;
+      this.scene.environment = rt.texture;
+      oldRT?.dispose?.();
+      this._shadowDirty = true;
+      if (this.renderer.shadowMap.enabled) this.renderer.shadowMap.needsUpdate = true;
+    }).catch((err) => {
+      if (token === this._envLoadToken) this._envLoadingId = null;
+      console.warn('[environment] load failed:', design.id, err?.message || err);
+    });
   }
 
   _clearTableModel() {
@@ -985,7 +1003,7 @@ export class Board3D {
       myTurn: !!this._myTurn,
       reducedMotion: !!this._reducedMotion,
       quality: this._quality?.tier ?? null,
-      composer: !!this._composer,
+      composer: false,
     };
   }
 
@@ -1364,7 +1382,9 @@ export class Board3D {
     this._camUntil = this._camStartAt + 2000;
     if (!spots.length) {
       this._camTargetGoal = { x: 0, y: 0, z: 0 };
-      this._camGoal = { x: 0, y: 16, z: 11 };
+      // Lower than the old top-down default: the environment photo must be
+      // visible above/behind the table, not just a green felt filling the frame.
+      this._camGoal = { x: 0, y: 12, z: 17 };
       this._applyCameraGoal();
       return;
     }
@@ -1388,13 +1408,15 @@ export class Board3D {
     // the depth span (foreshortened by the ~51° camera elevation).
     const tan = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
     const aspect = Math.max(0.35, this.camera.aspect || 1);
-    const distH = (spanX / (2 * tan * aspect)) * 1.25;
-    const distV = ((spanZ * 0.85) / (2 * tan)) * 1.25;
+    const distH = (spanX / (2 * tan * aspect)) * 1.35;
+    const distV = ((spanZ * 0.85) / (2 * tan)) * 1.35;
     // Portrait phones need a larger ceiling or the chain falls off-screen.
     const maxDist = aspect < 0.85 ? 72 : 48;
     const dist = clamp(Math.max(distH, distV, 13), 13, maxDist);
     this.controls.maxDistance = Math.max(46, Math.min(90, dist * 1.3));
-    this._camGoal = { x: cx, y: dist * 0.78, z: cz + dist * 0.62 };
+    // ~41° above the felt (was ~52°): keeps the dominoes readable while
+    // revealing the environment behind the far edge of the table.
+    this._camGoal = { x: cx, y: dist * 0.66, z: cz + dist * 0.75 };
     this._camTargetGoal = { x: cx, y: 0, z: cz };
     this._applyCameraGoal();
   }
@@ -1402,11 +1424,12 @@ export class Board3D {
   /** Reduced motion (and the first fit) skip the spring; a user orbit wins. */
   _applyCameraGoal() {
     if (!this._camGoal || !this._camTargetGoal || this._userOrbited || this._orbiting) return;
-    if (!this._reducedMotion) return;
+    if (!this._reducedMotion && !this._firstFit) return;
     this.camera.position.set(this._camGoal.x, this._camGoal.y, this._camGoal.z);
     this.controls.target.set(this._camTargetGoal.x, this._camTargetGoal.y, this._camTargetGoal.z);
     this._camVel.x = this._camVel.y = this._camVel.z = 0;
     this._camUntil = 0;
+    this._firstFit = false;
     this.controls.update?.();
   }
 
@@ -1734,7 +1757,15 @@ export class Board3D {
   }
 
   resumeLoop() {
-    this.clock = performance.now();
+    const now = performance.now();
+    this.clock = now;
+    // If the tab was hidden while a fit was in flight, its wall-clock window
+    // expired and the camera would stay at the old position forever. Re-arm it
+    // on resume so returning to the game still settles onto the table.
+    if (this._camGoal && !this._userOrbited && !this._reducedMotion && now >= (this._camUntil || 0)) {
+      this._camStartAt = now;
+      this._camUntil = now + 2000;
+    }
     this._startLoop();
   }
 
@@ -1926,10 +1957,9 @@ export class Board3D {
       this._shadowDirty = false;
     }
 
-    // P1.12: reset once per frame, then let scene + every composer pass add up.
+    // P1.12: reset once per frame, then count the scene draw calls.
     this.renderer.info.reset();
-    if (this._composer) this._composer.render();
-    else this.renderer.render(this.scene, this.camera);
+    this.renderer.render(this.scene, this.camera);
     // Only the running loop feeds the probe (owner token), so a background board
     // can never poison the frame-time window.
     feedFrame(now, 'board');
@@ -1941,7 +1971,6 @@ export class Board3D {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this._composer?.setSize(w, h);
     // The fit distance depends on the aspect — recompute it on a real resize.
     if (w > 0 && h > 0 && this._lastFitSpots?.length && !this._userOrbited) {
       this._fitCamera(this._lastFitSpots);
@@ -1967,7 +1996,6 @@ export class Board3D {
 
     this._unsubQuality?.();
     this._unsubQuality = null;
-    this._teardownComposer();
 
     // In-flight draw meshes live directly on the scene, not in a group.
     for (const a of this._anims) {
@@ -2041,7 +2069,17 @@ export class Board3D {
     for (const mat of this._labelMats.values()) { mat.map?.dispose?.(); mat.dispose?.(); }
     this._labelMats.clear();
 
-    // Environment map (a PMREM render target) and its binding.
+    // Selected environment PMREM.
+    this._envLoadToken++;
+    if (this._hdriRT) {
+      if (this.scene.environment === this._hdriRT.texture) {
+        this.scene.environment = this._envRT?.texture || null;
+      }
+      this._hdriRT.dispose?.();
+      this._hdriRT = null;
+    }
+
+    // Fallback environment map (a PMREM render target) and its binding.
     if (this._envRT) {
       if (this.scene.environment === this._envRT.texture) this.scene.environment = null;
       this._envRT.dispose?.();

@@ -8,7 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=82">
+<link rel="stylesheet" href="css/style.css?v=84">
 <script type="importmap">
 {
   "imports": {
@@ -78,34 +78,37 @@
     </button>
     <div id="homeSettings" class="home-settings hidden">
       <div class="set-group">
-        <span class="set-label">مستوى البوتات وشخصيتهم</span>
-        <div class="diff-row" id="diffRow">
-          <button type="button" class="diff-chip" data-level="easy">سهل</button>
-          <button type="button" class="diff-chip active" data-level="medium">متوسط</button>
-          <button type="button" class="diff-chip" data-level="hard">صعب</button>
-          <button type="button" class="diff-chip" data-level="expert">خبير</button>
-        </div>
-        <div class="diff-row" id="profileRow">
-          <button type="button" class="diff-chip active" data-profile="balanced">⚖ متوازن</button>
-          <button type="button" class="diff-chip" data-profile="aggressive">🔥 هجومي</button>
-          <button type="button" class="diff-chip" data-profile="defensive">🛡 دفاعي</button>
+        <span class="set-label">مستوى صعوبة البوتات</span>
+        <div class="diff-row" id="diffRow" role="group" aria-label="مستوى صعوبة البوتات">
+          <button type="button" class="diff-chip" data-level="easy" aria-pressed="false">سهل</button>
+          <button type="button" class="diff-chip active" data-level="medium" aria-pressed="true">متوسط</button>
+          <button type="button" class="diff-chip" data-level="hard" aria-pressed="false">صعب</button>
+          <button type="button" class="diff-chip" data-level="expert" aria-pressed="false">خبير</button>
         </div>
       </div>
       <div class="set-group">
-        <span class="set-label">ثيم القطع</span>
-        <div class="diff-row" id="themeRow">
-          <button type="button" class="diff-chip active" data-theme="classic">🎨 كلاسيك</button>
-          <button type="button" class="diff-chip" data-theme="neon">💠 نيون</button>
-          <button type="button" class="diff-chip" data-theme="wood">🪵 خشب</button>
-          <button type="button" class="diff-chip" data-theme="piano">🎹 بيانو</button>
+        <span class="set-label">شخصية البوتات</span>
+        <div class="diff-row" id="profileRow" role="group" aria-label="شخصية البوتات">
+          <button type="button" class="diff-chip active" data-profile="balanced" aria-pressed="true">⚖ متوازن</button>
+          <button type="button" class="diff-chip" data-profile="aggressive" aria-pressed="false">🔥 هجومي</button>
+          <button type="button" class="diff-chip" data-profile="defensive" aria-pressed="false">🛡 دفاعي</button>
+        </div>
+      </div>
+      <div class="set-group">
+        <span class="set-label">شكل قطع الدومينو</span>
+        <div class="diff-row" id="themeRow" role="group" aria-label="شكل قطع الدومينو">
+          <button type="button" class="diff-chip active" data-theme="classic" aria-pressed="true">🎨 كلاسيك</button>
+          <button type="button" class="diff-chip" data-theme="neon" aria-pressed="false">💠 نيون</button>
+          <button type="button" class="diff-chip" data-theme="wood" aria-pressed="false">🪵 خشب</button>
+          <button type="button" class="diff-chip" data-theme="piano" aria-pressed="false">🎹 بيانو</button>
         </div>
       </div>
       <div class="set-group">
         <span class="set-label">جودة الرسوم</span>
-        <div class="diff-row" id="qualityRow">
-          <button type="button" class="diff-chip active" data-quality="auto">✨ تلقائي</button>
-          <button type="button" class="diff-chip" data-quality="high">💎 عالي</button>
-          <button type="button" class="diff-chip" data-quality="low">⚡ منخفض</button>
+        <div class="diff-row" id="qualityRow" role="group" aria-label="جودة الرسوم">
+          <button type="button" class="diff-chip active" data-quality="auto" aria-pressed="true">✨ تلقائي</button>
+          <button type="button" class="diff-chip" data-quality="high" aria-pressed="false">💎 عالي</button>
+          <button type="button" class="diff-chip" data-quality="low" aria-pressed="false">⚡ منخفض</button>
         </div>
         <p class="quality-note" id="qualityNoteHome">تلقائي بيختار الأنسب لجهازك.</p>
       </div>
@@ -122,7 +125,7 @@
   </div>
 
   <!-- how-to-play modal -->
-  <div id="modalHow" class="modal hidden">
+  <div id="modalHow" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="howTitle">
     <div class="modal-card how-card">
       <button id="howClose" class="chat-icon-btn how-close" title="إغلاق" aria-label="إغلاق">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
@@ -130,18 +133,18 @@
           <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
       </button>
-      <h2>📖 كيف تلعب الدومينو؟</h2>
-      <p class="how-intro">28 كرت، كل كرت فيه رقمين من 0 لـ 6. في دورك نزّل كرت يطابق رقم أحد طرفي السلسلة على الطاولة.</p>
+      <h2 id="howTitle">📖 كيف تلعب الدومينو؟</h2>
+      <p class="how-intro">28 كارت، كل كارت فيه رقمين من 0 لـ 6. في دورك نزّل كارت يطابق رقم أحد طرفي السلسلة على الطاولة.</p>
       <div class="how-variants">
         <div class="how-variant">
           <h3>عادي (Block)</h3>
           <div class="how-tiles" data-tiles="6-6,6-4,4-4"></div>
-          <p>مفيش سحب — لو معندكش كرت يطابق الطرف بتعمل «باص». الفائز بالجولة ياخد مجموع نقاط كروت الخصوم المتبقية.</p>
+          <p>مفيش سحب — لو معندكش كارت يطابق الطرف بتعمل «باص». الفائز بالجولة ياخد مجموع نقاط كروت الخصوم المتبقية.</p>
         </div>
         <div class="how-variant">
           <h3>سحب (Draw)</h3>
           <div class="how-tiles" data-tiles="2-5,5-5,5-1"></div>
-          <p>لو معندكش حركة بتسحب من السحابة لحد ما تلاقي كرت ينزل. نفس قواعد احتساب النقاط.</p>
+          <p>لو معندكش حركة بتسحب من السحابة لحد ما تلاقي كارت ينزل. نفس قواعد احتساب النقاط.</p>
         </div>
         <div class="how-variant">
           <h3>خمسات (All Fives)</h3>
@@ -150,7 +153,7 @@
         </div>
       </div>
       <div class="how-goal">
-        🏆 الجولة تخلص لما لاعب يخلّص كروته أو اللعبة تقفل — وأول واحد يوصل لنقاط الفوز (100 افتراضيًا) يكسب الماتش!
+        🏆 الجولة تخلص لما لاعب يخلّص كروته أو اللعبة تقفل — وأول واحد يوصل لنقاط الفوز (100 افتراضيًا) يكسب المباراة!
       </div>
     </div>
   </div>
@@ -202,17 +205,27 @@
     <button id="btnAddBot" class="btn small add-bot hidden">🤖 إضافة بوت</button>
     <div class="table-picker">
       <div class="table-picker-head">
-        <span class="table-picker-title">شكل الطاولة</span>
-        <button id="btnTablePreview" class="btn small" type="button">👁 معاينة</button>
+        <span class="set-label">تصميم الطاولة</span>
+        <button id="btnTablePreview" class="btn small" type="button" title="معاينة التصميم المختار" aria-label="معاينة تصميم الطاولة المختار">👁 معاينة التصميم</button>
       </div>
-      <div id="tableChoices" class="table-choices" role="group" aria-label="اختيار شكل الطاولة"></div>
+      <div id="tableChoices" class="table-choices" role="group" aria-label="تصميم الطاولة"></div>
+      <p class="quality-note">التصميم بيتحفظ على جهازك — جرّب «معاينة التصميم» قبل ما تختار.</p>
     </div>
+    <div class="table-picker env-picker">
+      <div class="table-picker-head">
+        <span class="set-label">بيئة اللعب</span>
+        <button id="btnEnvPreview" class="btn small" type="button" title="معاينة البيئة المختارة" aria-label="معاينة بيئة اللعب المختارة">👁 معاينة البيئة</button>
+      </div>
+      <div id="envChoices" class="table-choices" role="group" aria-label="بيئة اللعب"></div>
+      <p class="quality-note">البيئة بتتحفظ على جهازك — اختار الجو اللي تحبه.</p>
+    </div>
+    <div id="hostConfigHead" class="set-label hidden">قواعد الغرفة</div>
     <div id="hostConfig" class="host-config hidden">
       <label>نوع اللعبة
         <select id="selVariant">
-          <option value="draw" selected>عادي (سحب من الطاولة)</option>
-          <option value="block">حجز بدون سحب (Block)</option>
-          <option value="allfives">خمسات (مضاعفات 5)</option>
+          <option value="draw" selected>سحب (Draw)</option>
+          <option value="block">عادي (Block) — بدون سحب</option>
+          <option value="allfives">خمسات (All Fives)</option>
         </select>
       </label>
       <label>نقاط الفوز
@@ -247,9 +260,9 @@
         <input type="checkbox" id="chkAllowPass" checked>
         <span>السماح بالتمرير (باص)</span>
       </label>
-      <label class="rule-row" title="آخر كرتين في السحابة يفضلوا محجوبين — بيدي إحساس بالشد في آخر الجولة">
+      <label class="rule-row" title="آخر كارتين في السحابة يفضلوا محجوبين — بيدي إحساس بالشد في آخر الجولة">
         <input type="checkbox" id="chkKeepLastTwo">
-        <span>حجب آخر كرتين في السحابة</span>
+        <span>حجب آخر كارتين في السحابة</span>
       </label>
     </div>
     <p id="variantDesc" class="variant-desc"></p>
@@ -269,6 +282,7 @@
 
 <!-- ══════════ GAME ══════════ -->
 <section id="screen-game" class="screen">
+  <div id="gameEnv" aria-hidden="true"></div>
   <canvas id="table3d"></canvas>
   <div id="vignette" aria-hidden="true"></div>
 
@@ -304,7 +318,7 @@
           <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"></path>
         </svg>
       </button>
-      <button id="btnGameSettings" class="hud-btn" title="الإعدادات" aria-label="الإعدادات">
+      <button id="btnGameSettings" class="hud-btn" title="إعدادات اللعب" aria-label="إعدادات اللعب">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"></circle>
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
@@ -348,7 +362,7 @@
   <div id="floatLayer"></div>
 
   <!-- hand end modal -->
-  <div id="modalHand" class="modal hidden">
+  <div id="modalHand" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="handTitle">
     <div class="modal-card">
       <h2 id="handTitle">انتهت الجولة</h2>
       <div id="handBreakdown"></div>
@@ -359,9 +373,9 @@
   </div>
 
   <!-- match end modal -->
-  <div id="modalMatch" class="modal hidden">
+  <div id="modalMatch" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="matchTitle">
     <div class="modal-card">
-      <h2>🏆 <span id="matchWinner"></span> فاز بالمباراة!</h2>
+      <h2 id="matchTitle">🏆 <span id="matchWinner"></span> فاز بالمباراة!</h2>
       <div id="matchStandings"></div>
       <p id="matchStallNote" class="muted small hidden"></p>
       <canvas id="confetti"></canvas>
@@ -373,7 +387,7 @@
   </div>
 
   <!-- leave confirm modal -->
-  <div id="modalLeave" class="modal hidden">
+  <div id="modalLeave" class="modal hidden" role="dialog" aria-modal="true" aria-label="مغادرة الغرفة">
     <div class="modal-card">
       <h2>مغادرة الغرفة؟</h2>
       <p class="leave-warn">لو غادرت دلتي أثناء اللعب هتتفصل من المباراة.</p>
@@ -385,7 +399,7 @@
   </div>
 
   <!-- in-game settings (gear in the HUD) -->
-  <div id="modalSettings" class="modal hidden" role="dialog" aria-modal="true" aria-label="الإعدادات">
+  <div id="modalSettings" class="modal hidden" role="dialog" aria-modal="true" aria-label="إعدادات اللعب">
     <div class="modal-card settings-card">
       <button id="btnSettingsClose" class="chat-icon-btn how-close" title="إغلاق" aria-label="إغلاق">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
@@ -393,35 +407,41 @@
           <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
       </button>
-      <h2>⚙️ الإعدادات</h2>
-      <label class="set-row">
-        <span>مستوى الصوت <b id="volVal">95%</b></span>
-        <input type="range" id="rngVolume" min="0" max="100" step="1" value="95" dir="ltr">
-      </label>
-      <label class="rule-row">
-        <input type="checkbox" id="chkConfirm">
-        <span>تأكيد قبل السحب أو الباص</span>
-      </label>
-      <label class="rule-row">
-        <input type="checkbox" id="chkVibrate">
-        <span>اهتزاز تنبيه لما يبقى دورك</span>
-      </label>
-      <div class="set-row quality-set">
-        <span>جودة الرسوم <b id="qualityCurrent">تلقائي</b></span>
-        <div class="diff-row" id="qualityRowGame">
-          <button type="button" class="diff-chip" data-quality="auto">✨ تلقائي</button>
-          <button type="button" class="diff-chip" data-quality="high">💎 عالي</button>
-          <button type="button" class="diff-chip" data-quality="low">⚡ منخفض</button>
+      <h2>⚙️ إعدادات اللعب</h2>
+      <div class="set-group">
+        <span class="set-label">الصوت</span>
+        <label class="set-row">
+          <span>مستوى الصوت <b id="volVal">95%</b></span>
+          <input type="range" id="rngVolume" min="0" max="100" step="1" value="95" dir="ltr">
+        </label>
+      </div>
+      <div class="set-group">
+        <span class="set-label">اللعب</span>
+        <label class="rule-row">
+          <input type="checkbox" id="chkConfirm">
+          <span>تأكيد قبل السحب أو الباص</span>
+        </label>
+        <label class="rule-row">
+          <input type="checkbox" id="chkVibrate">
+          <span>اهتزاز تنبيه لما يبقى دورك</span>
+        </label>
+      </div>
+      <div class="set-group">
+        <span class="set-label">جودة الرسوم</span>
+        <div class="diff-row" id="qualityRowGame" role="group" aria-label="جودة الرسوم">
+          <button type="button" class="diff-chip" data-quality="auto" aria-pressed="false">✨ تلقائي</button>
+          <button type="button" class="diff-chip" data-quality="high" aria-pressed="false">💎 عالي</button>
+          <button type="button" class="diff-chip" data-quality="low" aria-pressed="false">⚡ منخفض</button>
         </div>
         <p class="quality-note" id="qualityNote">تلقائي بيختار الأنسب لجهازك.</p>
       </div>
-      <p class="muted small set-note">التغييرات بتتحفظ على جهازك على طول.</p>
+      <p class="muted small set-note">كل التغييرات بتتحفظ على جهازك على طول.</p>
     </div>
   </div>
 </section>
 
 <!-- lobby table preview: body-level so it can cover the lobby screen -->
-  <div id="modalTableView" class="modal hidden" role="dialog" aria-modal="true" aria-label="معاينة الطاولة">
+  <div id="modalTableView" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="tableViewName">
     <div class="modal-card table-view-card">
       <button id="btnTableViewClose" class="chat-icon-btn how-close" title="إغلاق" aria-label="إغلاق">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
@@ -429,7 +449,7 @@
           <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
       </button>
-      <h2 id="tableViewName">معاينة الطاولة</h2>
+      <h2 id="tableViewName">معاينة تصميم الطاولة</h2>
       <p id="tableViewDesc" class="table-view-desc"></p>
       <div class="table-view-stage" id="tableViewStage">
         <canvas id="tableViewCanvas"></canvas>
@@ -440,6 +460,27 @@
       <button id="btnTableViewUse" class="btn primary" type="button">استخدم التصميم ده</button>
     </div>
   </div>
+
+<!-- lobby environment preview: body-level 360° panorama -->
+<div id="modalEnvView" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="envViewName">
+  <div class="modal-card table-view-card">
+    <button id="btnEnvViewClose" class="chat-icon-btn how-close" title="إغلاق" aria-label="إغلاق">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+    <h2 id="envViewName">معاينة بيئة اللعب</h2>
+    <p id="envViewDesc" class="table-view-desc"></p>
+    <div class="table-view-stage" id="envViewStage">
+      <canvas id="envViewCanvas"></canvas>
+      <div id="envViewLoading" class="table-view-loading">جاري التحميل…</div>
+    </div>
+    <p class="table-view-hint">اسحب لتدوير الكاميرا 360°</p>
+    <p id="envViewCredit" class="table-view-credit"></p>
+    <button id="btnEnvViewUse" class="btn primary" type="button">استخدم البيئة دي</button>
+  </div>
+</div>
 
 <!-- ══════════ GLOBAL CHAT (lobby + game, while in a room) ══════════
      Body-level on purpose: it must work on both screens, not just #screen-game.
@@ -602,6 +643,6 @@
 </div>
 
 <script>window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(((e.error&&e.error.stack)||e.message).split('\n').slice(0,4).join(' | '));});window.addEventListener('unhandledrejection',function(e){window.__errs.push('rej: '+((e.reason&&(e.reason.stack||e.reason.message))||String(e.reason)));});</script>
-<script type="module" src="js/app.js?v=75"></script>
+<script type="module" src="js/app.js?v=77"></script>
 </body>
 </html>

@@ -27,6 +27,28 @@
   --sh-2: 0 12px 32px rgba(2, 4, 12, .55);
   --sh-3: 0 28px 70px rgba(2, 4, 12, .65);
   --glass: blur(18px) saturate(1.15);
+
+  /* ── consistency-pass role tokens ──────────────────────────────────
+     Surfaces are grouped into three elevation tiers (hero cards, floating
+     panels/drawers, modals) plus two inner fills (grouped settings, list
+     rows). Every later rule that needs "the same surface as …" points at
+     one of these instead of re-typing an rgba pair. */
+  --surface-hero: linear-gradient(165deg, rgba(30, 42, 80, .72), rgba(10, 15, 34, .80));
+  --surface-panel: linear-gradient(160deg, rgba(15, 23, 46, .95), rgba(5, 8, 18, .97));
+  --surface-modal: linear-gradient(165deg, rgba(24, 34, 66, .96), rgba(9, 13, 28, .98));
+  --surface-inset: rgba(9, 14, 30, .62);
+  --surface-row: rgba(13, 20, 42, .82);
+  --surface-raised: rgba(255, 255, 255, .05);
+  --stroke: rgba(255, 255, 255, .09);
+  --stroke-strong: rgba(255, 255, 255, .14);
+  --danger-soft: #ffc2ce;
+  --r-pill: 999px;
+  --h-chip: 30px;
+  --h-btn: 40px;
+  --h-btn-sm: 32px;
+  --fs-label: 11px;      /* section eyebrows / overlines */
+  --fs-chip: 12px;       /* pill chips and compact toggles */
+  --fs-help: 12.5px;     /* helper / description copy */
   font-family: Arial, "Segoe UI", Tahoma, sans-serif;
 }
 /* glass fallback: without backdrop-filter the surfaces go (almost) opaque
@@ -1037,7 +1059,6 @@ input:focus, select:focus { border-color: var(--gold); box-shadow: 0 0 0 4px rgb
 .settings-card .rule-row { padding: 9px 0; }
 .set-note { text-align: center; margin-top: 10px; }
 /* quality picker: the note explains what the active budget actually changes */
-.quality-set { padding-bottom: 2px; }
 .quality-note {
   margin-top: 0;
   font-size: 11px;
@@ -3252,10 +3273,6 @@ body:not(.in-room) #voicePanel {
    ═══════════════════════════════════════════════════════════════════ */
 .table-picker { display: flex; flex-direction: column; gap: 8px; }
 .table-picker-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.table-picker-title {
-  font-size: 11px; font-weight: 800; color: var(--muted);
-  text-transform: uppercase; letter-spacing: .02em;
-}
 .table-choices {
   display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden;
   padding: 2px 1px 6px; scrollbar-width: thin; overscroll-behavior-x: contain;
@@ -3343,3 +3360,222 @@ body:not(.in-room) #voicePanel {
   .table-view-stage { height: min(38vh, 300px); }
   .table-view-card { padding: 22px 14px 16px; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   VISUAL CONSISTENCY PASS — shared roles
+   The UI grew through many incremental passes, so the same component
+   was re-invented on each screen. This final block only restates the
+   canonical value for a role — surface, radius, section label, chip,
+   button height, helper copy, text colour — so home, lobby, game HUD,
+   modals, chat and voice read as one system.
+   Rules:
+   • no selector contract changes (every id/class the JS toggles keeps
+     its meaning and its state rules);
+   • no positioning/size overrides for the responsive game furniture
+     (scorecard, action bar, FAB rail, hand dock, voice panel), so the
+     mobile layouts above stay intact;
+   • nothing here re-enables backdrop-filter, so the coarse-pointer /
+     ≤680px no-blur budget still wins.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* 1 ── surfaces: hero card · floating panel · modal · inner group · row ── */
+.home-card,
+.lobby-card { background: var(--surface-hero); }
+
+#chatDrawer,
+.voice-panel,
+.chat-toast,
+.emoji-pop {
+  background: var(--surface-panel);
+  border-color: var(--panel-border);
+}
+
+.modal-card {
+  background: var(--surface-modal);
+  border-color: var(--panel-border);
+}
+
+/* grouped settings blocks (home + lobby host config) share one fill/radius */
+.home-settings,
+.host-config {
+  background: var(--surface-inset);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+}
+
+/* the settings modal reuses the home sheet's group rhythm */
+.settings-card .set-group { gap: 6px; padding-bottom: 10px; }
+.settings-card .set-group .set-row { padding: 4px 0; }
+
+/* dense list rows share one fill/border/radius (state rules still win) */
+.how-variant,
+.player-list li,
+.voice-peer-row {
+  background: var(--surface-row);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--r-md);
+}
+.player-list li { padding: 10px 14px; }
+
+/* system notes and day markers are the same quiet pill */
+.chat-sys,
+.chat-day {
+  background: var(--surface-raised);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-pill);
+}
+
+/* both comms drawers use one header band */
+.chat-header,
+.voice-head {
+  background: rgba(10, 16, 32, .92);
+  border-bottom: 1px solid var(--stroke);
+}
+
+/* 2 ── picker lanes use the same inner radius as list cards ── */
+.table-choice { border-radius: var(--r-md); border-color: var(--stroke-strong); }
+.tc-thumb { border-radius: calc(var(--r-md) - 4px); }
+
+/* 3 ── section labels: one eyebrow style everywhere.
+   Never add letter-spacing here: tracking breaks Arabic cursive joining. ── */
+.set-label,
+.voice-list-title,
+.code-sub {
+  font-size: var(--fs-label);
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1.5;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.players-title {
+  font-size: var(--fs-help);
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+/* 4 ── modals: one heading size and one padding rhythm ── */
+.modal-card h2,
+.how-card h2,
+.settings-card h2,
+.table-view-card h2 {
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.35;
+  margin-bottom: 10px;
+}
+.modal-card,
+.how-card,
+.settings-card,
+.table-view-card { padding: 26px 24px 22px; }
+.how-close { top: 10px; inset-inline-start: 10px; }
+
+@media (max-width: 680px) {
+  .modal-card,
+  .how-card,
+  .settings-card { padding: 22px 16px 18px; }
+  .table-view-card { padding: 22px 14px 16px; } /* keep the picker's wider stage */
+}
+
+/* 5 ── buttons and chips: one height scale, one disabled state ── */
+.btn { min-height: var(--h-btn); }
+.btn.small { min-height: var(--h-btn-sm); padding: 6px 14px; font-size: 13px; }
+.btn:disabled { opacity: .45; cursor: not-allowed; transform: none; filter: none; }
+.modal-actions .btn { min-height: 44px; }
+.lobby-actions .btn { min-height: 48px; }
+
+.diff-chip,
+.chat-chip,
+.how-link,
+.voice-strip-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--h-chip);
+  padding-block: 0;
+  font-size: var(--fs-chip);
+  font-weight: 700;
+  line-height: 1;
+}
+.settings-toggle { min-height: var(--h-chip); font-size: var(--fs-chip); }
+
+/* 6 ── helper copy: descriptions, notes and empty states agree ── */
+.small,
+.how-intro,
+.how-variant p,
+.variant-desc,
+.table-view-desc,
+.table-view-hint,
+.quality-note,
+.voice-empty {
+  font-size: var(--fs-help);
+  line-height: 1.65;
+}
+
+/* 7 ── player names read as primary text in every list ── */
+.opp-name,
+.sc-name,
+.chat-head-title,
+.voice-head-title { color: var(--text); }
+
+/* 8 ── the game-screen room code matches the lobby code face ── */
+.sc-code b { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+
+/* 9 ── soft-danger text gets one value ── */
+.exit-fab,
+.opp-badge.offline,
+.voice-fab.is-host-muted,
+.voice-fab.is-failed { color: var(--danger-soft); }
+
+/* 10 ── remaining one-off token leaks ── */
+#turnBanner.spect { color: var(--muted); }
+#btnSound.is-muted { color: var(--muted); }
+.host-config select,
+.voice-device select { border-radius: var(--r-sm); }
+
+/* 11 ── RTL: nudge list rows toward the reading start, not away from it ── */
+[dir="rtl"] .player-list li:hover { transform: translateX(3px); }
+
+/* ── final consistency follow-ups ──
+   The settings modal's last group is followed by the footnote, so the generic
+   :last-child divider rule no longer matches. The lobby table picker also joins
+   the same inset-surface tier as the home sheet and host config. */
+.settings-card .set-group:last-of-type { border-bottom: none; padding-bottom: 0; }
+.table-picker {
+  background: var(--surface-inset);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+}
+
+/* The compact game action capsule owns its 34–36px height; the global
+   .btn min-height (40px) must not grow it and eat the scorecard clearance. */
+#actionBar .btn { min-height: 0; }
+
+/* the environment 360° preview is body-level, like the table preview */
+#modalEnvView { position: fixed; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   GAME ENVIRONMENT BACKDROP
+   The WebGL board renders on a transparent canvas; the selected 360°
+   environment photo is a room-band crop behind it. This keeps the café /
+   bar / billiards room visible around the table at every camera angle,
+   while the HDRI PMREM still lights the table and tiles.
+   ═══════════════════════════════════════════════════════════════════ */
+#gameEnv {
+  position: absolute; inset: 0;
+  background-color: #070b18;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: saturate(.98) brightness(.88);
+}
+#gameEnv::after {
+  content: "";
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(180deg, rgba(3, 6, 14, .42) 0, transparent 18%, transparent 68%, rgba(3, 6, 14, .74) 100%),
+    radial-gradient(ellipse at center, transparent 46%, rgba(3, 6, 14, .34) 100%);
+}
+#table3d { z-index: 1; }

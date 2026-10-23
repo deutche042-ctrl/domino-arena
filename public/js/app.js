@@ -1,10 +1,12 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=35';
+import { Board3D } from './board3d.js?v=37';
 import { Home3D } from './home3d.js?v=7';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, setQuality, onQualityChange } from './quality.js?v=3';
 import { TABLE_DESIGNS, getTableDesign, loadTableDesign, saveTableDesign } from './tables3d.js?v=1';
 import { TablePreview } from './tablepreview.js?v=1';
+import { ENVIRONMENTS, getEnvironment, loadEnvironmentSelection, saveEnvironmentSelection } from './environments3d.js?v=1';
+import { EnvironmentPreview } from './envpreview.js?v=1';
 import { sfx } from './sfx.js?v=17';
 import { VoiceChat } from './voice.js?v=2';
 
@@ -16,9 +18,9 @@ function bindEl(id, ev, fn, opts) {
   return el;
 }
 const VARIANT_DESC = {
-  block: 'عادي (Block): بدون سحب — لا تملك حركة متطابقة؟ تمرير (باص). الفائز بالجولة يكسب مجموع نقاط كروت الخصوم المتبقية.',
-  draw: 'سحب (Draw): عند عدم امتلاك كارت متطابق، تسحب من السحابة حتى تجد كارت يمكن لعبه. نفس قواعد احتساب النقاط.',
-  allfives: 'مضاعفات الخمسة (خمسات): إذا كان مجموع أطراف السلسلة يقبل القسمة على 5 تكسب نقاط فورية. أول دبل يصبح سنتر يفتح 4 اتجاهات!',
+  block: 'عادي (Block): بدون سحب — لو معندكش كارت متطابق بتعمل باص. الفائز بالجولة ياخد مجموع نقاط كروت الخصوم المتبقية.',
+  draw: 'سحب (Draw): لو معندكش كارت متطابق بتسحب من السحابة لحد ما تلاقي كارت ينزل. نفس قواعد احتساب النقاط.',
+  allfives: 'خمسات (All Fives): لو مجموع أطراف السلسلة من مضاعفات 5 (5، 10، 15…) بتكسب نقاط فورًا. أول دبل يبقى سنتر ويفتح 4 اتجاهات!',
 };
 
 // ── state ──
@@ -133,6 +135,8 @@ let tileTheme = (() => {
 setTileTheme(tileTheme);
 // F4.5: selected 3D table design (classic felt or a vendored Poly Haven model).
 let tableDesign = loadTableDesign();
+// F4.6: selected 360° environment (Poly Haven HDRI, local to this device).
+let environmentDesign = loadEnvironmentSelection();
 
 function applyTheme(name) {
   if (!THEME_NAMES.includes(name)) return;
@@ -142,7 +146,11 @@ function applyTheme(name) {
   board?.setTheme?.(name);     // 3D board repaints (no-op when no board yet)
   renderHand?.();              // hand tiles are themed images
   document.querySelectorAll('#themeRow .diff-chip')
-    .forEach(c => c.classList.toggle('active', c.dataset.theme === name));
+    .forEach(c => {
+      const on = c.dataset.theme === name;
+      c.classList.toggle('active', on);
+      c.setAttribute('aria-pressed', String(on));
+    });
 }
 
 // Build the 3D game table. There is no 2D table mode: if WebGL is unavailable
@@ -165,14 +173,16 @@ const QUALITY_LABEL = { auto: 'تلقائي', high: 'عالي', low: 'منخفض
 function syncQualityUI() {
   const { mode, tier } = getQuality();
   document.querySelectorAll('#qualityRow .diff-chip, #qualityRowGame .diff-chip')
-    .forEach(c => c.classList.toggle('active', c.dataset.quality === mode));
-  const cur = $('qualityCurrent');
-  if (cur) cur.textContent = mode === 'auto' ? `تلقائي · ${QUALITY_LABEL[tier]}` : QUALITY_LABEL[mode];
+    .forEach(c => {
+      const on = c.dataset.quality === mode;
+      c.classList.toggle('active', on);
+      c.setAttribute('aria-pressed', String(on));
+    });
   const noteText = mode === 'auto'
     ? `بيختار الأنسب لجهازك — المستخدم حاليًا: ${QUALITY_LABEL[tier]}.`
     : mode === 'high'
-      ? 'تفاصيل كاملة: ظلال وتوهج ودقة أعلى — الأنسب للكمبيوتر.'
-      : 'أسرع أداء: بدون ظلال أو توهج ودقة أخف — الأنسب للموبايل.';
+      ? 'تفاصيل كاملة: ظلال وإضاءة ودقة أعلى — الأنسب للكمبيوتر.'
+      : 'أسرع أداء: بدون ظلال أو إضاءة إضافية ودقة أخف — الأنسب للموبايل.';
   for (const id of ['qualityNote', 'qualityNoteHome']) {
     const n = $(id);
     if (n) n.textContent = noteText;
@@ -198,7 +208,7 @@ function selectTable(id) {
   tableDesign = design.id;
   saveTableDesign(design.id);
   board?.setTable?.(design.id);
-  document.querySelectorAll('.table-choice').forEach((c) => {
+  document.querySelectorAll('#tableChoices .table-choice').forEach((c) => {
     const on = c.dataset.table === design.id;
     c.classList.toggle('active', on);
     c.setAttribute('aria-pressed', String(on));
@@ -208,8 +218,8 @@ function selectTable(id) {
 }
 
 /** Horizontally centre the selected card in its strip without scrolling the page. */
-function centerActiveTableCard() {
-  const wrap = $('tableChoices');
+function centerActiveCard(wrapId) {
+  const wrap = $(wrapId);
   const active = wrap?.querySelector('.table-choice.active');
   if (!wrap || !active) return;
   const a = active.getBoundingClientRect();
@@ -218,6 +228,8 @@ function centerActiveTableCard() {
   const delta = (a.left + a.width / 2) - (w.left + w.width / 2);
   if (Math.abs(delta) > 4) wrap.scrollBy({ left: delta, behavior: 'smooth' });
 }
+function centerActiveTableCard() { centerActiveCard('tableChoices'); }
+function centerActiveEnvironmentCard() { centerActiveCard('envChoices'); }
 
 function renderTableChoices() {
   const wrap = $('tableChoices');
@@ -259,35 +271,49 @@ function openTablePreview(id) {
   const modal = $('modalTableView');
   if (!modal || !design) return;
   previewTableId = design.id;
-  $('tableViewName').textContent = design.name;
-  $('tableViewDesc').textContent = design.desc || '';
-  $('tableViewCredit').textContent = design.credit || '';
+  const nameEl = $('tableViewName');
+  if (nameEl) nameEl.textContent = 'معاينة: ' + design.name;
+  const descEl = $('tableViewDesc');
+  if (descEl) descEl.textContent = design.desc || '';
+  const creditEl = $('tableViewCredit');
+  if (creditEl) creditEl.textContent = design.credit || 'تصميم أصلي من دومينو أرينا';
   const use = $('btnTableViewUse');
   if (use) {
-    use.textContent = design.id === tableDesign ? 'مختارة بالفعل' : 'استخدم التصميم ده';
-    use.disabled = design.id === tableDesign;
+    const alreadyOn = design.id === tableDesign;
+    use.textContent = alreadyOn ? 'التصميم ده مستخدم بالفعل' : 'استخدم التصميم ده';
+    use.disabled = alreadyOn;
   }
   const loading = $('tableViewLoading');
   if (loading) { loading.textContent = 'جاري التحميل…'; loading.classList.remove('hidden'); }
   modal.classList.remove('hidden');
   if (!tablePreview) {
-    tablePreview = new TablePreview($('tableViewCanvas'), {
-      onState: (state) => {
-        const el = $('tableViewLoading');
-        if (!el) return;
-        el.classList.toggle('hidden', state === 'ready');
-        if (state === 'error') el.textContent = 'تعذّر تحميل المعاينة';
-      },
-    });
+    try {
+      tablePreview = new TablePreview($('tableViewCanvas'), {
+        onState: (state) => {
+          const el = $('tableViewLoading');
+          if (!el) return;
+          el.classList.toggle('hidden', state === 'ready');
+          if (state === 'error') el.textContent = 'تعذّر تحميل المعاينة';
+        },
+      });
+    } catch (err) {
+      // Same graceful degradation as the game board: a device without WebGL
+      // still gets the rest of the lobby, minus the 3D preview.
+      console.warn('[domino] table preview unavailable:', err?.message || err);
+      modal.classList.add('hidden');
+      toast('معاينة الطاولة 3D مش متاحة على الجهاز ده.', 4000);
+      return;
+    }
   }
   tablePreview.resume();
   tablePreview.setDesign(design);
   sfx.click();
 }
 
-function closeTablePreview() {
+function closeTablePreview(playSound = false) {
   $('modalTableView')?.classList.add('hidden');
   tablePreview?.pause();
+  if (playSound) sfx.click();
 }
 
 function initTablePicker() {
@@ -295,11 +321,134 @@ function initTablePicker() {
   const previewBtn = $('btnTablePreview');
   if (previewBtn) previewBtn.onclick = () => openTablePreview(tableDesign);
   const closeBtn = $('btnTableViewClose');
-  if (closeBtn) closeBtn.onclick = closeTablePreview;
+  if (closeBtn) closeBtn.onclick = () => closeTablePreview(true);
   const useBtn = $('btnTableViewUse');
   if (useBtn) useBtn.onclick = () => { selectTable(previewTableId); closeTablePreview(); };
   const modal = $('modalTableView');
-  if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) closeTablePreview(); });
+  if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) closeTablePreview(true); });
+}
+
+// ══════════ environment picker + 360° preview (lobby) ══════════
+let environmentPreview = null;
+let previewEnvId = environmentDesign;
+
+/** Paint the selected room photo behind the transparent WebGL canvas. */
+function applyEnvironmentBackdrop(design) {
+  const el = $('gameEnv');
+  if (!el || !design?.bg) return;
+  if (el.dataset.env === design.id) return;
+  el.style.backgroundImage = `url("${design.bg}")`;
+  el.dataset.env = design.id;
+}
+
+function selectEnvironment(id) {
+  const design = getEnvironment(id);
+  if (!design) return;
+  environmentDesign = design.id;
+  saveEnvironmentSelection(design.id);
+  applyEnvironmentBackdrop(design);
+  board?.setEnvironment?.(design.id);
+  document.querySelectorAll('#envChoices .table-choice').forEach((c) => {
+    const on = c.dataset.env === design.id;
+    c.classList.toggle('active', on);
+    c.setAttribute('aria-pressed', String(on));
+  });
+  centerActiveEnvironmentCard();
+  sfx.click();
+}
+
+function renderEnvironmentChoices() {
+  const wrap = $('envChoices');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  for (const d of ENVIRONMENTS) {
+    const card = document.createElement('div');
+    card.className = 'table-choice' + (d.id === environmentDesign ? ' active' : '');
+    card.dataset.env = d.id;
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-pressed', String(d.id === environmentDesign));
+    card.innerHTML = `
+      <img class="tc-thumb" src="${d.thumb}" alt="" loading="lazy" draggable="false">
+      <span class="tc-name">${esc(d.name)}</span>
+      <span class="tc-check" aria-hidden="true">✓</span>
+    `;
+    const eye = document.createElement('button');
+    eye.type = 'button';
+    eye.className = 'tc-eye';
+    eye.title = 'معاينة البيئة';
+    eye.setAttribute('aria-label', `معاينة ${d.name}`);
+    eye.textContent = '👁';
+    eye.addEventListener('click', (e) => { e.stopPropagation(); openEnvironmentPreview(d.id); });
+    card.appendChild(eye);
+    card.addEventListener('click', () => selectEnvironment(d.id));
+    card.addEventListener('keydown', (e) => {
+      if (e.target !== card) return;
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectEnvironment(d.id); }
+    });
+    wrap.appendChild(card);
+  }
+}
+
+function openEnvironmentPreview(id) {
+  const design = getEnvironment(id);
+  const modal = $('modalEnvView');
+  if (!modal || !design) return;
+  previewEnvId = design.id;
+  const nameEl = $('envViewName');
+  if (nameEl) nameEl.textContent = 'معاينة: ' + design.name;
+  const descEl = $('envViewDesc');
+  if (descEl) descEl.textContent = design.desc || '';
+  const creditEl = $('envViewCredit');
+  if (creditEl) creditEl.textContent = design.credit || '';
+  const use = $('btnEnvViewUse');
+  if (use) {
+    const alreadyOn = design.id === environmentDesign;
+    use.textContent = alreadyOn ? 'البيئة دي مستخدمة بالفعل' : 'استخدم البيئة دي';
+    use.disabled = alreadyOn;
+  }
+  const loading = $('envViewLoading');
+  if (loading) { loading.textContent = 'جاري التحميل…'; loading.classList.remove('hidden'); }
+  modal.classList.remove('hidden');
+  if (!environmentPreview) {
+    try {
+      environmentPreview = new EnvironmentPreview($('envViewCanvas'), {
+        onState: (state) => {
+          const el = $('envViewLoading');
+          if (!el) return;
+          el.classList.toggle('hidden', state === 'ready');
+          if (state === 'error') el.textContent = 'تعذّر تحميل المعاينة';
+        },
+      });
+    } catch (err) {
+      console.warn('[domino] environment preview unavailable:', err?.message || err);
+      modal.classList.add('hidden');
+      toast('معاينة البيئة 360° مش متاحة على الجهاز ده.', 4000);
+      return;
+    }
+  }
+  environmentPreview.resume();
+  environmentPreview.setDesign(design);
+  sfx.click();
+}
+
+function closeEnvironmentPreview(playSound = false) {
+  $('modalEnvView')?.classList.add('hidden');
+  environmentPreview?.pause();
+  if (playSound) sfx.click();
+}
+
+function initEnvironmentPicker() {
+  renderEnvironmentChoices();
+  applyEnvironmentBackdrop(getEnvironment(environmentDesign));
+  const previewBtn = $('btnEnvPreview');
+  if (previewBtn) previewBtn.onclick = () => openEnvironmentPreview(environmentDesign);
+  const closeBtn = $('btnEnvViewClose');
+  if (closeBtn) closeBtn.onclick = () => closeEnvironmentPreview(true);
+  const useBtn = $('btnEnvViewUse');
+  if (useBtn) useBtn.onclick = () => { selectEnvironment(previewEnvId); closeEnvironmentPreview(); };
+  const modal = $('modalEnvView');
+  if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) closeEnvironmentPreview(true); });
 }
 
 // ══════════ screens ══════════
@@ -318,17 +467,21 @@ function showScreen(name) {
   // was missed, stale, or rendered while roomCode was still unset.
   if (name === 'lobby') {
     paintLobbyCode(lastLobbyState);
-    requestAnimationFrame(centerActiveTableCard);
+    requestAnimationFrame(() => { centerActiveTableCard(); centerActiveEnvironmentCard(); });
   }
   if (name === 'game') {
-    // The lobby preview owns a second WebGL context; release it before the
-    // actual board starts so low-end phones never hold both at once.
+    // The lobby previews own extra WebGL contexts; release both before the
+    // actual board starts so low-end phones never hold them at once.
     closeTablePreview();
     if (tablePreview) { tablePreview.destroy(); tablePreview = null; }
+    closeEnvironmentPreview();
+    if (environmentPreview) { environmentPreview.destroy(); environmentPreview = null; }
   }
+  if (name === 'game') applyEnvironmentBackdrop(getEnvironment(environmentDesign));
   if (name === 'game' && !board) {
     board = createBoard($('table3d'), { onMarkerClick, onBoardMiss, onBoneyardClick: onBoneyardDraw });
     board?.setTable?.(tableDesign);
+    board?.setEnvironment?.(environmentDesign);
   }
   if (name === 'game') setTimeout(() => board?.resize(), 50);
   home3d?.setActive(name === 'home');
@@ -417,13 +570,21 @@ function initHome() {
   document.querySelectorAll('#diffRow .diff-chip').forEach(ch => {
     ch.onclick = () => {
       botLevel = ch.dataset.level;
-      document.querySelectorAll('#diffRow .diff-chip').forEach(c => c.classList.toggle('active', c === ch));
+      document.querySelectorAll('#diffRow .diff-chip').forEach(c => {
+        const on = c === ch;
+        c.classList.toggle('active', on);
+        c.setAttribute('aria-pressed', String(on));
+      });
       sfx.click();
     };
   });
   // F4.2: bot personality (same evaluator, different weights)
   const syncProfileChips = () => document.querySelectorAll('#profileRow .diff-chip')
-    .forEach(c => c.classList.toggle('active', c.dataset.profile === botProfile));
+    .forEach(c => {
+      const on = c.dataset.profile === botProfile;
+      c.classList.toggle('active', on);
+      c.setAttribute('aria-pressed', String(on));
+    });
   document.querySelectorAll('#profileRow .diff-chip').forEach(ch => {
     ch.onclick = () => {
       botProfile = ch.dataset.profile;
@@ -496,9 +657,9 @@ function initHome() {
     howModal.classList.remove('hidden');
     sfx.click();
   };
-  $('howClose').onclick = () => howModal.classList.add('hidden');
+  $('howClose').onclick = closeHowModal;
   howModal.addEventListener('click', e => {
-    if (e.target === howModal) howModal.classList.add('hidden');
+    if (e.target === howModal) closeHowModal();
   });
 
   // subtle 3D tilt following the pointer — flattened under reduced motion.
@@ -524,6 +685,21 @@ function getName() {
   return name;
 }
 function homeError(msg) { $('homeError').textContent = msg || ''; }
+
+// Informational modals share one close path so the ✕, the backdrop and Escape
+// can never drift apart.
+function closeHowModal() {
+  const modal = $('modalHow');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  sfx.click();
+}
+function closeRulesModal() {
+  const modal = $('modalRules');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  sfx.click();
+}
 
 function afterJoin(res, name) {
   // Spectator joins carry no playerId, but the server stamps their chat with
@@ -657,6 +833,7 @@ function renderLobby(st) {
     btnAddBot.disabled = full;
   }
 
+  $('hostConfigHead')?.classList.toggle('hidden', !isHost || spectating);
   $('hostConfig').classList.toggle('hidden', !isHost || spectating);
   $('btnStart').classList.toggle('hidden', !isHost || spectating);
   const btnReady = $('btnReady');
@@ -713,7 +890,7 @@ function renderRulesSummary(cfg) {
   if (cfg.turnMs === 0) bits.push('بدون مؤقّت');
   else if (cfg.turnMs) bits.push(`${Math.round(cfg.turnMs / 1000)} ثانية/دور`);
   if (cfg.allowPass === false) bits.push('بدون باص');
-  if (cfg.keepLastTwo) bits.push('آخر كرتين محجوبين');
+  if (cfg.keepLastTwo) bits.push('آخر كارتين محجوبين');
   el.textContent = bits.length ? '⚙ ' + bits.join(' · ') : '';
   el.classList.toggle('hidden', bits.length === 0);
 }
@@ -790,6 +967,7 @@ function initLobby() {
     if (el) el.onchange = pushConfig;
   }
   initTablePicker();
+  initEnvironmentPicker();
 }
 function lobbyError(msg) { $('lobbyError').textContent = msg || ''; }
 
@@ -1390,6 +1568,10 @@ function previewEndsTotal(tileId, end) {
   return total;
 }
 
+function tilesCountLabel(n) {
+  return n === 1 ? 'كارت واحد' : `${n} كروت`;
+}
+
 function renderTurnBanner() {
   if (!view) return;            // leaving the room clears view before the banner hold
   if (bannerOverride) return;   // a coaching/notice line is holding the banner
@@ -1398,7 +1580,7 @@ function renderTurnBanner() {
     const nm = view.names?.[pid] || '';
     const n = view.handCounts?.[pid];
     setBanner(view.status === 'playing'
-      ? `👁 بتتفرج — دور ${nm}${n != null ? ` · معاه ${n} ورق` : ''}`
+      ? `👁 بتتفرج — دور ${nm}${n != null ? ` · معاه ${tilesCountLabel(n)}` : ''}`
       : '👁 بتتفرج', 'spect');
     return;
   }
@@ -1421,7 +1603,7 @@ function renderTurnBanner() {
     const pid = view.turn;
     const nm = view.names[pid] || 'اللاعب';
     const n = view.handCounts?.[pid];
-    setBanner(n != null ? `دور ${nm} — معاه ${n} ورق` : `دور ${nm}`, '');
+    setBanner(n != null ? `دور ${nm} — معاه ${tilesCountLabel(n)}` : `دور ${nm}`, '');
   }
 }
 
@@ -1955,12 +2137,26 @@ function initGameUI() {
       return;
     }
     if (e.key === 'Escape') {
-      if (!$('modalSettings')?.classList.contains('hidden')) {
+      const settingsModal = $('modalSettings');
+      const leaveModal = $('modalLeave');
+      const tableModal = $('modalTableView');
+      const envModal = $('modalEnvView');
+      const howModal = $('modalHow');
+      const rulesModal = $('modalRules');
+      if (settingsModal && !settingsModal.classList.contains('hidden')) {
         sfx.click();
-        $('modalSettings').classList.add('hidden');
-      } else if (!$('modalLeave').classList.contains('hidden')) {
+        settingsModal.classList.add('hidden');
+      } else if (leaveModal && !leaveModal.classList.contains('hidden')) {
         sfx.click();
         closeLeaveConfirm();
+      } else if (tableModal && !tableModal.classList.contains('hidden')) {
+        closeTablePreview(true);
+      } else if (envModal && !envModal.classList.contains('hidden')) {
+        closeEnvironmentPreview(true);
+      } else if (howModal && !howModal.classList.contains('hidden')) {
+        closeHowModal();
+      } else if (rulesModal && !rulesModal.classList.contains('hidden')) {
+        closeRulesModal();
       } else if (emojiPopOpen) {
         closeEmojiPop();
       } else if (chatOpen) {
@@ -2024,10 +2220,10 @@ function initGameUI() {
   // K3.C7: rules modal (home + lobby) — close on ✕ or backdrop tap.
   for (const id of ['btnRulesHome', 'btnRulesClose']) {
     const b = $(id);
-    if (b) b.onclick = () => { $('modalRules')?.classList.add('hidden'); sfx.click(); };
+    if (b) b.onclick = closeRulesModal;
   }
   $('modalRules')?.addEventListener('click', (e) => {
-    if (e.target === $('modalRules')) { sfx.click(); $('modalRules').classList.add('hidden'); }
+    if (e.target === $('modalRules')) closeRulesModal();
   });
   initSettingsModal();
   ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach(ev => {
