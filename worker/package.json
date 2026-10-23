@@ -1,0 +1,17 @@
+{
+  "name": "domino-arena-worker",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Cloudflare Workers deployment for Domino Arena (Worker + Durable Object running the Node game server through shims)",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs && wrangler dev",
+    "deploy": "node build.mjs && wrangler deploy",
+    "typecheck": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "wrangler": "^4"
+  }
+}

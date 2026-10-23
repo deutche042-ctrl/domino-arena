@@ -54,3 +54,32 @@ npm run e2e 3100    # full protocol test against a running server on :3100
 ```
 
 Stack: Node.js + Express + Socket.IO · vanilla JS + Three.js (vendored, offline) · no build step, no client dependencies.
+
+## Deploy 24/7 free on Cloudflare (Workers + Durable Object)
+
+The whole game server runs on Cloudflare's free plan — no card, no sleep. It needs no
+rewrite: `worker/` bundles the same `server/server.js` and `engine/`, with small shims
+(`worker/src/shims/`) standing in for express, socket.io, `node:http` and `node:os`. The same
+client, the same engine and the same handlers therefore run both at home (`npm start`) and in
+the cloud.
+
+```bash
+cd worker
+npm install
+npm run build          # bundles dist/worker.js
+npx wrangler login     # or set CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
+npm run deploy         # https://domino-arena.<your-subdomain>.workers.dev
+```
+
+Notes:
+
+- `public/` is served by the Worker's assets binding; `/socket.io` is handled by the
+  `DominoGame` Durable Object, which keeps every room in memory exactly like the single Node
+  process does.
+- Free-plan Durable Objects require the SQLite backend (`new_sqlite_classes`).
+- A code deploy disconnects live sockets; clients reconnect on their own.
+- Verify a deployment end to end from the repo root:
+
+```bash
+DOMINO_URL=https://domino-arena.<your-subdomain>.workers.dev node scripts/e2e.js
+```

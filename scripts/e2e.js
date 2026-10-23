@@ -1,10 +1,11 @@
 // scripts/e2e.js — end-to-end protocol check against a RUNNING server (event-driven, fast).
 // Usage:  PORT=3100 node server/server.js &   then   node scripts/e2e.js 3100
+//         DOMINO_URL=https://your-deployment.example node scripts/e2e.js   (remote server)
 import { io as ioc } from 'socket.io-client';
 import assert from 'node:assert/strict';
 
 const PORT = process.argv[2] || 3100;
-const URL = `http://localhost:${PORT}`;
+const URL = process.env.DOMINO_URL || `http://localhost:${PORT}`;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function client() {
@@ -22,6 +23,20 @@ const once = (s, ev, ms = 5000) => Promise.race([
   new Promise(r => s.once(ev, r)),
   sleep(ms).then(() => null),
 ]);
+// A remote server can deliver a broadcast that was already in flight before the
+// action under test, so state assertions wait for the state they describe
+// instead of assuming it is the very next frame. The assertion itself is
+// unchanged — only the waiting is tolerant.
+const waitForState = (s, predicate, ms = 8000) => new Promise(resolve => {
+  const handler = state => {
+    if (!predicate(state)) return;
+    clearTimeout(timer);
+    s.off('game:state', handler);
+    resolve(state);
+  };
+  const timer = setTimeout(() => { s.off('game:state', handler); resolve(null); }, ms);
+  s.on('game:state', handler);
+});
 
 let passed = 0;
 function ok(cond, name) {
@@ -113,7 +128,7 @@ ok(handEnds >= 0, 'hand flow ok');
   const nudge = await nudgeP;
   ok(nudge && /مباراة جديدة/.test(nudge.text || ''), 'advisory rematch vote nudges the host');
   await voteStateP;   // drain the advisory-vote broadcast
-  const restartP = new Promise(r => a.once('game:state', r));
+  const restartP = waitForState(a, s => s && s.status === 'playing');
   b.emit('game:rematch');   // 1 of 2 humans >= unanimous-minus-host → instant restart
   const rs = await restartP;
   await once(b, 'game:state');   // drain bob's copy of the restart broadcast
@@ -213,7 +228,7 @@ ok(unmuted && unmuted.text === 'hello again', 'unmuted guest message delivered')
 // ── host kick: removes the player now and refuses rejoin by token ──
 ok(!(await emit(d, 'lobby:kick', { pid: ncr.playerId })).ok, 'non-host cannot kick');
 ok(!(await emit(c, 'lobby:kick', { pid: ncr.playerId })).ok, 'host cannot kick himself');
-const kickedEvP = once(d, 'room:kicked', 2000);
+const kickedEvP = once(d, 'room:kicked', 6000);
 ok((await emit(c, 'lobby:kick', { pid: dj.playerId })).ok, 'host kicked the guest');
 const kickedEv = await kickedEvP;
 ok(kickedEv !== null, 'kicked socket got room:kicked');
@@ -265,8 +280,10 @@ a.close(); b2.close(); c.close(); d.close();
   ok(sp2j.ok === true && sp2j.spectating === true, 'spec: second watcher auto-spectates a full lobby');
   sp.emit('lobby:ready', { ready: true });
   await sleep(60);
-  ok((await emit(h, 'game:start')).ok, 'spec: game started');
+  // Register the spectator listener before the game starts: on a remote server
+  // the broadcast can land before a listener registered after the start ack.
   const spStateP = once(sp2, 'game:state', 3000);
+  ok((await emit(h, 'game:start')).ok, 'spec: game started');
   const spState = await spStateP;
   ok(spState && spState.hand === undefined && Array.isArray(spState.legalMoves) && spState.legalMoves.length === 0,
     'spec: spectator view has no hand and no legal moves');

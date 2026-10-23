@@ -1,0 +1,27 @@
+# worker/wrangler.toml — Cloudflare deployment for Domino Arena.
+#
+# The Worker serves the game client from public/ and hands all realtime traffic
+# to one Durable Object, which runs the untouched server/server.js on top of the
+# socket.io + express shims in src/. Build with `node build.mjs` first: the
+# bundles land in dist/ and this file points at them.
+
+name = "domino-arena"
+main = "dist/worker.js"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[assets]
+directory = "../public"
+binding = "ASSETS"
+
+[durable_objects]
+bindings = [{ name = "GAME", class_name = "DominoGame" }]
+
+# Free-plan Durable Objects must use the SQLite storage backend.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DominoGame"]
+
+[observability]
+enabled = true
