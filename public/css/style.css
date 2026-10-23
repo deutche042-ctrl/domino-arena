@@ -405,6 +405,12 @@ input:focus, select:focus { border-color: var(--gold); box-shadow: 0 0 0 4px rgb
   color: var(--muted); text-transform: uppercase;
 }
 .set-group .diff-row { margin-top: 0; }
+/* label + inline action on one line (home table picker's preview button) */
+.set-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.set-head .btn.small { padding: 4px 11px; font-size: 11.5px; border-radius: 999px; }
+.home-settings .table-choices { gap: 7px; padding: 2px 0 4px; }
+.home-settings .table-choice { flex-basis: 88px; }
+.home-settings .tc-thumb { height: 56px; }
 
 /* ── home footer: variants line + how-to link ── */
 .home-foot { display: flex; align-items: center; gap: 10px; }

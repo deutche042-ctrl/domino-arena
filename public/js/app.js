@@ -216,9 +216,27 @@ function bindQualityPicker(rootId) {
   });
 }
 
-// ══════════ table picker + rotatable 3D preview (lobby) ══════════
+// ══════════ table picker + rotatable 3D preview (home + lobby) ══════════
+// The same strip is rendered twice: home (before entering a room) and the
+// lobby. Both stay mirror-synced through syncTablePickers(), so a pick on
+// either screen is reflected wherever the cards are visible.
 let tablePreview = null;
 let previewTableId = 'classic';
+
+const TABLE_PICKER_IDS = ['tableChoices', 'tableChoicesHome'];
+function tablePickerRoots() {
+  return TABLE_PICKER_IDS.map((id) => $(id)).filter(Boolean);
+}
+
+function syncTablePickers() {
+  for (const wrap of tablePickerRoots()) {
+    wrap.querySelectorAll('.table-choice').forEach((c) => {
+      const on = c.dataset.table === tableDesign;
+      c.classList.toggle('active', on);
+      c.setAttribute('aria-pressed', String(on));
+    });
+  }
+}
 
 function selectTable(id) {
   const design = getTableDesign(id);
@@ -226,11 +244,7 @@ function selectTable(id) {
   tableDesign = design.id;
   saveTableDesign(design.id);
   board?.setTable?.(design.id);
-  document.querySelectorAll('#tableChoices .table-choice').forEach((c) => {
-    const on = c.dataset.table === design.id;
-    c.classList.toggle('active', on);
-    c.setAttribute('aria-pressed', String(on));
-  });
+  syncTablePickers();
   centerActiveTableCard();
   sfx.click();
 }
@@ -246,41 +260,43 @@ function centerActiveCard(wrapId) {
   const delta = (a.left + a.width / 2) - (w.left + w.width / 2);
   if (Math.abs(delta) > 4) wrap.scrollBy({ left: delta, behavior: 'smooth' });
 }
-function centerActiveTableCard() { centerActiveCard('tableChoices'); }
+function centerActiveTableCard() {
+  for (const id of TABLE_PICKER_IDS) centerActiveCard(id);
+}
 function centerActiveEnvironmentCard() { centerActiveCard('envChoices'); }
 
 function renderTableChoices() {
-  const wrap = $('tableChoices');
-  if (!wrap) return;
-  wrap.innerHTML = '';
-  for (const d of TABLE_DESIGNS) {
-    const card = document.createElement('div');
-    card.className = 'table-choice' + (d.id === tableDesign ? ' active' : '');
-    card.dataset.table = d.id;
-    card.setAttribute('role', 'button');
-    card.setAttribute('tabindex', '0');
-    card.setAttribute('aria-pressed', String(d.id === tableDesign));
-    card.innerHTML = `
-      ${d.thumb
-        ? `<img class="tc-thumb" src="${d.thumb}" alt="" loading="lazy" draggable="false">`
-        : '<span class="tc-thumb tc-classic" aria-hidden="true"></span>'}
-      <span class="tc-name">${esc(d.name)}</span>
-      <span class="tc-check" aria-hidden="true">✓</span>
-    `;
-    const eye = document.createElement('button');
-    eye.type = 'button';
-    eye.className = 'tc-eye';
-    eye.title = 'معاينة الطاولة';
-    eye.setAttribute('aria-label', `معاينة ${d.name}`);
-    eye.textContent = '👁';
-    eye.addEventListener('click', (e) => { e.stopPropagation(); openTablePreview(d.id); });
-    card.appendChild(eye);
-    card.addEventListener('click', () => selectTable(d.id));
-    card.addEventListener('keydown', (e) => {
-      if (e.target !== card) return;   // the nested preview button owns its keys
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectTable(d.id); }
-    });
-    wrap.appendChild(card);
+  for (const wrap of tablePickerRoots()) {
+    wrap.innerHTML = '';
+    for (const d of TABLE_DESIGNS) {
+      const card = document.createElement('div');
+      card.className = 'table-choice' + (d.id === tableDesign ? ' active' : '');
+      card.dataset.table = d.id;
+      card.setAttribute('role', 'button');
+      card.setAttribute('tabindex', '0');
+      card.setAttribute('aria-pressed', String(d.id === tableDesign));
+      card.innerHTML = `
+        ${d.thumb
+          ? `<img class="tc-thumb" src="${d.thumb}" alt="" loading="lazy" draggable="false">`
+          : '<span class="tc-thumb tc-classic" aria-hidden="true"></span>'}
+        <span class="tc-name">${esc(d.name)}</span>
+        <span class="tc-check" aria-hidden="true">✓</span>
+      `;
+      const eye = document.createElement('button');
+      eye.type = 'button';
+      eye.className = 'tc-eye';
+      eye.title = 'معاينة الطاولة';
+      eye.setAttribute('aria-label', `معاينة ${d.name}`);
+      eye.textContent = '👁';
+      eye.addEventListener('click', (e) => { e.stopPropagation(); openTablePreview(d.id); });
+      card.appendChild(eye);
+      card.addEventListener('click', () => selectTable(d.id));
+      card.addEventListener('keydown', (e) => {
+        if (e.target !== card) return;   // the nested preview button owns its keys
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectTable(d.id); }
+      });
+      wrap.appendChild(card);
+    }
   }
 }
 
@@ -336,8 +352,10 @@ function closeTablePreview(playSound = false) {
 
 function initTablePicker() {
   renderTableChoices();
-  const previewBtn = $('btnTablePreview');
-  if (previewBtn) previewBtn.onclick = () => openTablePreview(tableDesign);
+  for (const id of ['btnTablePreview', 'btnTablePreviewHome']) {
+    const previewBtn = $(id);
+    if (previewBtn) previewBtn.onclick = () => openTablePreview(tableDesign);
+  }
   const closeBtn = $('btnTableViewClose');
   if (closeBtn) closeBtn.onclick = () => closeTablePreview(true);
   const useBtn = $('btnTableViewUse');
@@ -657,12 +675,15 @@ function initHome() {
       });
   };
 
-  // collapsible play-settings (difficulty / personality / theme / quality)
+  // collapsible play-settings (difficulty / personality / theme / table / quality)
   const settingsPanel = $('homeSettings');
   $('btnSettings').onclick = () => {
     const open = settingsPanel.classList.toggle('hidden');
     $('btnSettings').classList.toggle('open', !open);
     $('btnSettings').setAttribute('aria-expanded', String(!open));
+    // The table strip has zero width while the sheet is collapsed, so its
+    // first real centring has to wait until it is on screen.
+    if (!open) requestAnimationFrame(() => centerActiveTableCard());
     sfx.click();
   };
 

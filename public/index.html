@@ -8,7 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=84">
+<link rel="stylesheet" href="css/style.css?v=85">
 <script type="importmap">
 {
   "imports": {
@@ -102,6 +102,14 @@
           <button type="button" class="diff-chip" data-theme="wood" aria-pressed="false">🪵 خشب</button>
           <button type="button" class="diff-chip" data-theme="piano" aria-pressed="false">🎹 بيانو</button>
         </div>
+      </div>
+      <div class="set-group">
+        <div class="set-head">
+          <span class="set-label">شكل الترابيزة</span>
+          <button id="btnTablePreviewHome" class="btn small" type="button" title="معاينة شكل الترابيزة" aria-label="معاينة شكل الترابيزة المختار">👁 معاينة</button>
+        </div>
+        <div id="tableChoicesHome" class="table-choices" role="group" aria-label="شكل الترابيزة"></div>
+        <p class="quality-note">الشكل بيتحفظ على جهازك — دوس المعاينة تشوف الترابيزة وهي بتلف.</p>
       </div>
       <div class="set-group">
         <span class="set-label">جودة الرسوم</span>
@@ -643,6 +651,6 @@
 </div>
 
 <script>window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(((e.error&&e.error.stack)||e.message).split('\n').slice(0,4).join(' | '));});window.addEventListener('unhandledrejection',function(e){window.__errs.push('rej: '+((e.reason&&(e.reason.stack||e.reason.message))||String(e.reason)));});</script>
-<script type="module" src="js/app.js?v=88"></script>
+<script type="module" src="js/app.js?v=99"></script>
 </body>
 </html>
