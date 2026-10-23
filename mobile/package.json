@@ -1,0 +1,22 @@
+{
+  "name": "domino-arena-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Domino Arena — Capacitor Android wrapper that runs the game server inside the app (Capacitor Node.js plugin, manual start mode).",
+  "type": "module",
+  "scripts": {
+    "sync": "node sync.mjs",
+    "verify:launcher": "node verify-launcher.mjs",
+    "add:android": "cap add android",
+    "cap:sync": "cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
+    "@capawesome/capacitor-nodejs": "^0.2.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.3",
+    "esbuild": "^0.25.0"
+  }
+}

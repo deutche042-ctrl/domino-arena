@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">دومينو أرينا</string>
+    <string name="title_activity_main">دومينو أرينا</string>
+    <string name="package_name">com.mahmoud.dominoarena</string>
+    <string name="custom_url_scheme">com.mahmoud.dominoarena</string>
+</resources>

@@ -1,0 +1,11 @@
+{
+  "appId": "com.mahmoud.dominoarena",
+  "appName": "دومينو أرينا",
+  "webDir": "www",
+  "plugins": {
+    "Nodejs": {
+      "nodeDir": "nodejs",
+      "startMode": "manual"
+    }
+  }
+}

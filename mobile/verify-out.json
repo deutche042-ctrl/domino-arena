@@ -1,0 +1,110 @@
+[check] capacitor.config.json webDir: www → ok
+[check] plugins.Nodejs.nodeDir (must resolve inside webDir): nodejs → ok
+[check] plugins.Nodejs.startMode: manual → ok
+[check] www/nodejs/package.json main: index.cjs → ok
+[check] www/nodejs/index.cjs exists: undefined → ok
+[check] www/nodejs/server-bundle.cjs exists: undefined → ok
+[check] www/nodejs/public/index.html exists: undefined → ok
+{
+  "ok": true,
+  "startedAt": "2026-10-23T16:01:16.815Z",
+  "port": 3000,
+  "base": "http://127.0.0.1:3000",
+  "passes": [
+    {
+      "name": "source-launcher",
+      "entry": "node/index.cjs",
+      "command": "node node/index.cjs",
+      "env": {
+        "DOMINO_SERVER_BUNDLE": "C:\\Users\\Mahmoud\\Desktop\\domino\\mobile\\www\\nodejs\\server-bundle.cjs",
+        "DOMINO_PUBLIC_DIR": "C:\\Users\\Mahmoud\\Desktop\\domino\\mobile\\www\\nodejs\\public"
+      },
+      "ok": true,
+      "pid": 7400,
+      "readyMs": 270,
+      "healthz": {
+        "reached": true,
+        "status": 200,
+        "body": "ok"
+      },
+      "hostInfo": {
+        "reached": true,
+        "status": 200,
+        "json": {
+          "port": 3000,
+          "ips": [
+            "192.168.1.28"
+          ]
+        }
+      },
+      "launcherLogLine": "[domino-mobile] READY — Domino Arena server answered /healthz on http://127.0.0.1:3000 (ok)",
+      "exitBeforeProbe": null,
+      "stdout": "[domino-mobile] runtime dir  : C:\\Users\\Mahmoud\\Desktop\\domino\\mobile\\node\n[domino-mobile] server bundle: C:\\Users\\Mahmoud\\Desktop\\domino\\mobile\\www\\nodejs\\server-bundle.cjs\n[domino-mobile] public dir   : C:\\Users\\Mahmoud\\Desktop\\domino\\mobile\\www\\nodejs\\public\n[domino-mobile] port         : 3000\n[domino-mobile] starting server bundle …\n[domino-mobile] server bundle loaded\n\n  🁢 DOMINO ARENA running at http://localhost:3000\n  Share it: cloudflared tunnel --url http://localhost:3000\n\n[domino-mobile] READY — Domino Arena server answered /healthz on http://127.0.0.1:3000 (ok)\n",
+      "stderr": "[domino-mobile] bridge module not available (Cannot find module 'bridge'\nRequire stack:\n- C:\\Users\\Mahmoud\\Desktop\\domino\\mobile\\node\\index.cjs) — continuing without the app channel\n"
+    },
+    {
+      "name": "device-layout",
+      "entry": "www/nodejs/index.cjs",
+      "command": "node www/nodejs/index.cjs",
+      "env": {},
+      "ok": true,
+      "pid": 5324,
+      "readyMs": 264,
+      "healthz": {
+        "reached": true,
+        "status": 200,
+        "body": "ok"
+      },
+      "hostInfo": {
+        "reached": true,
+        "status": 200,
+        "json": {
+          "port": 3000,
+          "ips": [
+            "192.168.1.28"
+          ]
+        }
+      },
+      "launcherLogLine": "[domino-mobile] READY — Domino Arena server answered /healthz on http://127.0.0.1:3000 (ok)",
+      "exitBeforeProbe": null,
+      "stdout": "[domino-mobile] runtime dir  : C:\\Users\\Mahmoud\\Desktop\\domino\\mobile\\www\\nodejs\n[domino-mobile] server bundle: C:\\Users\\Mahmoud\\Desktop\\domino\\mobile\\www\\nodejs\\server-bundle.cjs\n[domino-mobile] public dir   : C:\\Users\\Mahmoud\\Desktop\\domino\\mobile\\www\\nodejs\\public\n[domino-mobile] port         : 3000\n[domino-mobile] starting server bundle …\n[domino-mobile] server bundle loaded\n\n  🁢 DOMINO ARENA running at http://localhost:3000\n  Share it: cloudflared tunnel --url http://localhost:3000\n\n[domino-mobile] READY — Domino Arena server answered /healthz on http://127.0.0.1:3000 (ok)\n",
+      "stderr": "[domino-mobile] bridge module not available (Cannot find module 'bridge'\nRequire stack:\n- C:\\Users\\Mahmoud\\Desktop\\domino\\mobile\\www\\nodejs\\index.cjs) — continuing without the app channel\n"
+    }
+  ],
+  "preconditions": [
+    {
+      "check": "capacitor.config.json webDir",
+      "value": "www",
+      "ok": true
+    },
+    {
+      "check": "plugins.Nodejs.nodeDir (must resolve inside webDir)",
+      "value": "nodejs",
+      "ok": true
+    },
+    {
+      "check": "plugins.Nodejs.startMode",
+      "value": "manual",
+      "ok": true
+    },
+    {
+      "check": "www/nodejs/package.json main",
+      "value": "index.cjs",
+      "ok": true
+    },
+    {
+      "check": "www/nodejs/index.cjs exists",
+      "ok": true
+    },
+    {
+      "check": "www/nodejs/server-bundle.cjs exists",
+      "ok": true
+    },
+    {
+      "check": "www/nodejs/public/index.html exists",
+      "ok": true
+    }
+  ],
+  "finishedAt": "2026-10-23T16:01:17.392Z"
+}
+[verify] OK — in-app server answered /healthz and /host-info on http://127.0.0.1:3000
