@@ -124,18 +124,27 @@ ok(handEnds >= 0, 'hand flow ok');
 a.emit('chat:send', { text: 'gg' });
 const msg = await once(b, 'chat:msg');
 ok(msg && msg.from === 'Alice' && msg.text === 'gg', 'chat delivered');
+ok(msg && typeof msg.mid === 'string' && msg.mid.startsWith(cr.code + ':c'),
+  'chat message carries a room-scoped mid');
+ok(msg && typeof msg.at === 'number', 'chat message carries at');
 
 // disconnect then reconnect mid-game with token
 const bToken = jr.token;
 b.close();
 await sleep(120);
 const b2 = await client();
-// the server unicasts the game state inside the join handler, so register first
+// the server unicasts the game state + chat history after the join ack, so
+// register both listeners first
 const b2stateP = once(b2, 'game:state', 3000);
+const b2histP = once(b2, 'chat:history', 3000);
 const rj = await emit(b2, 'room:join', { code: cr.code, name: 'Bob', token: bToken });
 ok(rj.ok && rj.reconnected && rj.state === 'playing', 'reconnect with token mid-game');
 const b2state = await b2stateP;
 ok(b2state && Array.isArray(b2state.hand) && b2state.names, 'reconnected player receives state');
+const b2hist = await b2histP;
+ok(b2hist && b2hist.code === cr.code &&
+   b2hist.messages.some(m => m.text === 'gg' && typeof m.mid === 'string'),
+  'chat:history replays the room log on reconnect');
 
 // ── bots mode: instant room, bots drive the game, room dies with the human ──
 const h = await client();

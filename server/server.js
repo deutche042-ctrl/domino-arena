@@ -1,6 +1,7 @@
 // server/server.js — Express static host + Socket.IO realtime game server
 import express from 'express';
 import { createServer } from 'node:http';
+import { createHmac } from 'node:crypto';
 import { Server } from 'socket.io';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -20,6 +21,49 @@ app.use((req, res, next) => {
 
 // Uptime probe: Render health check + free keep-alive ping target.
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
+
+// ---- voice ICE config ----
+// The browser needs TURN to connect peers across strict NATs. This endpoint
+// exposes ONLY iceServers — never any other env value, and never a credential
+// in the logs. TURN_SECRET (coturn REST auth) is preferred when configured:
+// credentials are minted per request with a short expiry. Otherwise the static
+// TURN_USER/TURN_PASS pair is used. Invalid/empty env means "no TURN": the
+// client keeps its built-in STUN defaults.
+const VOICE_CONFIG_WINDOW_MS = 60000;
+const VOICE_CONFIG_MAX_HITS = 20;
+const voiceConfigHits = new Map();   // ip -> request timestamps[]
+
+function turnIceServers() {
+  const raw = typeof process.env.TURN_URLS === 'string' ? process.env.TURN_URLS : '';
+  const urls = raw.split(',')
+    .map(u => u.trim())
+    .filter(u => /^turns?:[^\s,]+$/i.test(u));
+  if (!urls.length) return [];
+  const secret = process.env.TURN_SECRET;
+  if (secret) {
+    const ttl = Math.min(3600, Math.max(60, Number(process.env.TURN_TTL) || 600));
+    const username = `${Math.floor(Date.now() / 1000) + ttl}:domino`;
+    const credential = createHmac('sha1', secret).update(username).digest('base64');
+    return [{ urls, username, credential }];
+  }
+  const username = (process.env.TURN_USER || '').trim();
+  const credential = (process.env.TURN_PASS || '').trim();
+  if (!username || !credential) return [];
+  return [{ urls, username, credential }];
+}
+
+app.get('/voice-config', (req, res) => {
+  const ip = req.ip || req.socket?.remoteAddress || '?';
+  const now = Date.now();
+  const hits = (voiceConfigHits.get(ip) || []).filter(t => now - t < VOICE_CONFIG_WINDOW_MS);
+  if (hits.length >= VOICE_CONFIG_MAX_HITS) {
+    return res.status(429).json({ iceServers: [] });
+  }
+  hits.push(now);
+  voiceConfigHits.set(ip, hits);
+  res.json({ iceServers: turnIceServers() });
+});
+
 app.use(express.static(process.env.DOMINO_PUBLIC_DIR || path.join(here, '..', 'public'), { etag: false, maxAge: 0 }));
 
 const http = createServer(app);
@@ -28,6 +72,9 @@ const io = new Server(http, {
   // rooms are shared by link, so allow any origin
   cors: { origin: true },
   transports: ['websocket', 'polling'],
+  // Voice signaling payloads are capped at 16 KB by the handler; keep the
+  // transport buffer close to that instead of Socket.IO's ~1 MB default.
+  maxHttpBufferSize: 64 * 1024,
 });
 
 const manager = new RoomManager();
@@ -62,6 +109,177 @@ function broadcastGame(room) {
       io.to(p.socketId).emit('game:state', manager.gameView(room, p.id));
     }
   }
+}
+
+// ---- chat history ----
+// Every chat:msg goes through pushChat: the room log stays complete and every
+// message carries a stable mid + at. mid is room-scoped because 4-letter room
+// codes are recycled — a bare "cN" would collide across rooms for client dedupe.
+const CHAT_LOG_MAX = 80;
+const CHAT_TEXT_MAX = 200;
+const CHAT_EMOJI_MAX = 8;   // code points, not UTF-16 units
+
+function roomChatLog(room) {
+  if (!Array.isArray(room.chatLog)) room.chatLog = [];
+  if (!Number.isFinite(room.chatSeq)) room.chatSeq = 0;
+  return room.chatLog;
+}
+
+/**
+ * Emit one chat message and (by default) append it to the bounded room log.
+ * opts.to      — unicast socket id instead of the whole room
+ * opts.persist — false for transient lines (vote progress, host-only nudges)
+ */
+function pushChat(room, msg, { to = null, persist = true } = {}) {
+  if (!room || !msg) return null;
+  // Same hygiene as the timers: a stale room object must never emit into a
+  // recycled room code.
+  if (manager.getRoom(room.code) !== room) return null;
+  const log = roomChatLog(room);
+  const out = {
+    ...msg,
+    mid: `${room.code}:c${++room.chatSeq}`,
+    at: typeof msg.at === 'number' ? msg.at : Date.now(),
+  };
+  if (persist) {
+    log.push(out);
+    if (log.length > CHAT_LOG_MAX) log.splice(0, log.length - CHAT_LOG_MAX);
+  }
+  if (to) io.to(to).emit('chat:msg', out);
+  else io.to(room.code).emit('chat:msg', out);
+  return out;
+}
+
+function sendChatHistory(socket, room) {
+  if (!room || manager.getRoom(room.code) !== room) return;
+  // slice(): the live array must not be mutated while the payload is encoded.
+  socket.emit('chat:history', { code: room.code, messages: roomChatLog(room).slice() });
+}
+
+// Strip bidi overrides/isolates and control characters so a message cannot
+// reorder the UI around it; ZWJ/variation selectors (emoji) are preserved.
+function stripChatControls(s) {
+  return s
+    .replace(/[\u202A-\u202E\u2066-\u2069]/g, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '')
+    .replace(/[\r\n\t]+/g, ' ');
+}
+
+function clipCodePoints(s, max) {
+  const cps = Array.from(s);
+  return cps.length > max ? cps.slice(0, max).join('') : s;
+}
+
+function chatTextValue(raw) {
+  if (typeof raw !== 'string') return null;
+  const text = clipCodePoints(stripChatControls(raw).trim(), CHAT_TEXT_MAX);
+  return text || null;
+}
+
+function chatEmojiValue(raw) {
+  if (typeof raw !== 'string') return null;
+  const emoji = stripChatControls(raw).trim();
+  if (!emoji || Array.from(emoji).length > CHAT_EMOJI_MAX) return null;
+  return emoji;
+}
+
+// ---- voice roster / moderation ----
+// Media never touches the server (the mesh is peer-to-peer); these flags only
+// drive signaling admission and UI-level moderation. Host mute is best-effort
+// moderation, not a security boundary.
+const MAX_VOICE_SIGNAL_BYTES = 16384;
+const VOICE_SIGNAL_WINDOW_MS = 10000;
+const VOICE_SIGNAL_MAX = 200;
+
+function voiceRoster(room) {
+  // room.players order is the stable seat order — never sort (chips would jump).
+  return room.players
+    .filter(p => p.connected && !p.isBot && p.voiceJoined)
+    .map(p => ({
+      id: p.id,
+      name: p.name,
+      muted: !!(p.voiceMuted || p.voiceHostMuted),
+      hostMuted: !!p.voiceHostMuted,
+    }));
+}
+
+function broadcastVoiceRoster(room) {
+  if (!room) return;
+  // Same identity check as the timers: never emit into a recycled room code.
+  if (manager.getRoom(room.code) !== room) return;
+  io.to(room.code).emit('voice:roster', voiceRoster(room));
+}
+
+/**
+ * Clear a player's voice state. Full clears are for a seat leaving the room
+ * (leave/detach/kick); a transient disconnect passes keepHostMuted so host
+ * moderation survives a refresh. Callers can pass broadcast:false to coalesce
+ * several changes into one roster emit.
+ */
+function clearVoice(room, p, { broadcast = true, keepHostMuted = false } = {}) {
+  if (!room || !p) return false;
+  const changed = !!p.voiceJoined || !!p.voiceMuted || (!keepHostMuted && !!p.voiceHostMuted);
+  p.voiceJoined = false;
+  p.voiceMuted = false;
+  if (!keepHostMuted) p.voiceHostMuted = false;
+  if (changed && broadcast) broadcastVoiceRoster(room);
+  return changed;
+}
+
+// Host migration must not leave a host-muted player as the new host: nobody
+// would be able to unmute them. Lift it (callers may coalesce the emit).
+function liftNewHostVoiceMute(room, prevHostId, { broadcast = true } = {}) {
+  if (!room || room.hostId === prevHostId) return false;
+  const host = room.players.find(p => p.id === room.hostId);
+  if (!host || !host.voiceHostMuted) return false;
+  host.voiceHostMuted = false;
+  if (broadcast) broadcastVoiceRoster(room);
+  return true;
+}
+
+function voiceSignalBytes(payload) {
+  try {
+    if (typeof payload === 'string') return Buffer.byteLength(payload, 'utf8');
+    return Buffer.byteLength(JSON.stringify(payload) ?? '', 'utf8');
+  } catch {
+    return Infinity;   // unserializable payloads are treated as oversized
+  }
+}
+
+// Explicit relay schema — two independent client implementations must agree:
+//   string                                     → opaque relay
+//   { kind:'offer'|'answer', sdp:string }
+//   { kind:'candidate', candidate:object|string|null }
+function sanitizeVoiceSignal(payload) {
+  if (typeof payload === 'string') return payload || null;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  if (payload.kind === 'offer' || payload.kind === 'answer') {
+    if (typeof payload.sdp !== 'string' || !payload.sdp) return null;
+    return { kind: payload.kind, sdp: payload.sdp };
+  }
+  if (payload.kind === 'candidate') {
+    const c = payload.candidate;
+    if (c === null || typeof c === 'string' ||
+        (typeof c === 'object' && !Array.isArray(c) && typeof c.candidate === 'string')) {
+      return { kind: 'candidate', candidate: c };
+    }
+  }
+  return null;
+}
+
+// A throw inside a new listener would otherwise leave an acking client waiting
+// forever (the process-level handlers only log it).
+function guarded(handler, errorMessage = 'حصل خطأ — جرب تاني.') {
+  return function guardedSocketHandler(...args) {
+    try {
+      return handler(...args);
+    } catch (err) {
+      console.error('[domino] socket handler failed:', err);
+      const cb = args.find(a => typeof a === 'function');
+      try { cb?.({ ok: false, error: errorMessage }); } catch { /* socket gone */ }
+      return undefined;
+    }
+  };
 }
 
 // ---- per-turn timeout ----
@@ -137,7 +355,7 @@ function handleTurnTimeout(room) {
   } catch {
     return; // state moved on between arm and fire — the next broadcast re-arms safely
   }
-  io.to(room.code).emit('chat:msg', { from: 'النظام', text: msg });
+  pushChat(room, { from: 'النظام', text: msg });
   broadcastGame(room);
 }
 
@@ -232,13 +450,15 @@ function botChatter(room, bot, action) {
     const now = Date.now();
     if (bot.lastChatAt && now - bot.lastChatAt < 8000) return;
     bot.lastChatAt = now;
-    io.to(room.code).emit('chat:msg', { from: bot.name, pid: bot.id, at: now, text: line });
+    pushChat(room, { from: bot.name, pid: bot.id, at: now, text: line });
   }, 400 + Math.floor(Math.random() * 600));
 }
 
 function deleteRoom(room, reason = 'اتقفلت الغرفة.') {
   clearTurnTimer(room);
   if (room.botTimer) { clearTimeout(room.botTimer); room.botTimer = null; }
+  // The room is dying — drop voice flags without emitting a roster anywhere.
+  for (const p of room.players) clearVoice(room, p, { broadcast: false });
   // K2.S10 note: spectators have no player entry — without this they'd never
   // learn the room died.
   io.to(room.code).emit('lobby:closed', { reason });
@@ -266,16 +486,27 @@ function detachCurrentRoom(socket) {
   const p = room.players.find(x => x.id === s.playerId);
   if (!p) return;
   p.chatMuted = false; // detaching is a full cleanup
+  // Detaching means leaving the room for good, so host moderation on this seat
+  // is cleared too. Coalesce the roster emit with the host-migration one below.
+  const voiceChanged = clearVoice(room, p, { broadcast: false });
   if (room.state === 'lobby') {
+    const prevHostId = room.hostId;
     const res = manager.removePlayer(room, p.id);
-    if (!res.empty) broadcastLobby(room);
+    if (!res.empty) {
+      const hostLifted = liftNewHostVoiceMute(room, prevHostId, { broadcast: false });
+      if (voiceChanged || hostLifted) broadcastVoiceRoster(room);
+      broadcastLobby(room);
+    }
   } else {
     p.connected = false;
     p.socketId = null;
+    const prevHostId = room.hostId;
     if (room.hostId === p.id) {
       const next = room.players.find(x => x.connected && !x.isBot);
       if (next) room.hostId = next.id;
     }
+    const hostLifted = liftNewHostVoiceMute(room, prevHostId, { broadcast: false });
+    if (voiceChanged || hostLifted) broadcastVoiceRoster(room);
     const humans = room.players.filter(x => x.connected && !x.isBot);
     if (humans.length === 0) {
       deleteRoom(room);
@@ -283,7 +514,7 @@ function detachCurrentRoom(socket) {
       if (humans.length === 1 && !room.players.some(x => x.isBot) &&
           room.game && room.game.status === 'playing') {
         room.game._endMatch(humans[0].id);
-        io.to(room.code).emit('chat:msg', { from: 'النظام', text: `غادر ${p.name} اللعبة. فوز بالانسحاب!` });
+        pushChat(room, { from: 'النظام', text: `غادر ${p.name} اللعبة. فوز بالانسحاب!` });
       } else if (room.game && room.game.status === 'playing' && room.game.turn === p.id) {
         let nextPid = p.id;
         for (let i = 0; i < room.players.length; i++) {
@@ -310,6 +541,11 @@ setInterval(() => {
     const fresh = ts.filter(t => now - t < 10000);
     if (fresh.length) joinFailsByIp.set(ip, fresh);
     else joinFailsByIp.delete(ip);
+  }
+  for (const [ip, ts] of voiceConfigHits) {
+    const fresh = ts.filter(t => now - t < VOICE_CONFIG_WINDOW_MS);
+    if (fresh.length) voiceConfigHits.set(ip, fresh);
+    else voiceConfigHits.delete(ip);
   }
   for (const room of [...manager.rooms.values()]) {
     if (room.state !== 'lobby') continue;
@@ -374,6 +610,10 @@ io.on('connection', (socket) => {
       ok: true, code: room.code, playerId: player.id, token: player.token,
       state: room.state, lobby: manager.lobbyState(room),
     });
+    // Bootstrap the creator: chat history is unicast AFTER the ack so the client
+    // has already set its room identity when the replay is rendered.
+    socket.emit('voice:roster', voiceRoster(room));
+    sendChatHistory(socket, room);
     if (vsBots) {
       io.to(room.code).emit('game:started');
       broadcastGame(room);
@@ -423,6 +663,9 @@ io.on('connection', (socket) => {
         spectating: true, spectatorId: spectator.id,
       });
       cb?.({ ok: true, spectating: true, code: room.code, spectatorId: spectator.id, state: room.state });
+      // Spectators cannot join voice, but they may render the roster/chat.
+      socket.emit('voice:roster', voiceRoster(room));
+      sendChatHistory(socket, room);
       if (room.game) {
         socket.emit('game:state', manager.gameView(room, '__spectator__'));
       }
@@ -437,10 +680,15 @@ io.on('connection', (socket) => {
                      s0.roomCode === room.code && s0.playerId === player.id;
     if (!sameSeat) detachCurrentRoom(socket);
     // If this player was attached to another socket (refresh), detach the old one
+    let supersededVoice = false;
     if (player.socketId && player.socketId !== socket.id) {
       const oldSocketId = player.socketId;
       sessions.delete(oldSocketId);
       io.sockets.sockets.get(oldSocketId)?.leave(room.code);
+      // The new tab holds the seat now: the old tab's peer connections must be
+      // torn down by its client, and peers must stop signaling the stale tab.
+      // Host moderation belongs to the seat, so it survives the supersede.
+      supersededVoice = clearVoice(room, player, { broadcast: false, keepHostMuted: true });
       // S8: the seat moved to a newer live socket — tell the old tab
       // (it used to silently no-op forever).
       io.to(oldSocketId).emit('room:superseded');
@@ -449,6 +697,7 @@ io.on('connection', (socket) => {
     player.connected = true;
     socket.join(room.code);
     sessions.set(socket.id, { roomCode: room.code, playerId: player.id });
+    if (supersededVoice) broadcastVoiceRoster(room);
     cb?.({
       ok: true, code: room.code, playerId: player.id, token: player.token,
       reconnected: !!res.reconnected, state: room.state,
@@ -457,6 +706,8 @@ io.on('connection', (socket) => {
       youAreUp: room.state === 'playing' && room.game?.status === 'playing' && room.game.turn === player.id,
       lobby: manager.lobbyState(room),
     });
+    socket.emit('voice:roster', voiceRoster(room));
+    sendChatHistory(socket, room);
     broadcastLobby(room);
     if (room.state === 'playing') broadcastGame(room);
   });
@@ -606,15 +857,21 @@ io.on('connection', (socket) => {
     const res = manager.kickPlayer(room, pid);
     if (res.error) return cb?.({ ok: false, error: res.error });
     cb?.({ ok: true });
-    if (res.empty) return;
-    if (res.kicked?.socketId) {
+    const kicked = res.kicked;
+    // Kicked = leaving the room for good: clear voice flags (including host
+    // moderation) before the socket is detached.
+    const voiceChanged = kicked ? clearVoice(room, kicked, { broadcast: false }) : false;
+    if (kicked?.socketId) {
       // K2.S6: fully detach the kicked socket — it used to keep receiving
       // lobby/chat events until it disconnected on its own.
-      const ks = res.kicked.socketId;
+      const ks = kicked.socketId;
       sessions.delete(ks);
       io.sockets.sockets.get(ks)?.leave(room.code);
       io.to(ks).emit('room:kicked');
     }
+    // An empty room was deleted by kickPlayer — never broadcast into it.
+    if (res.empty) return;
+    if (voiceChanged) broadcastVoiceRoster(room);
     broadcastLobby(room);
   });
 
@@ -633,10 +890,12 @@ io.on('connection', (socket) => {
     room.continueVotes[kind] = set;
     const host = room.players.find(x => x.id === room.hostId);
     if (host?.socketId && host.id !== playerId) {
-      io.to(host.socketId).emit('chat:msg', {
+      // Host-only nudge: unicast and deliberately NOT persisted — it is not a
+      // room chat line and would leak the host UI into history.
+      pushChat(room, {
         from: 'النظام',
         text: `${p.name} عايز ${kind === 'rematch' ? 'مباراة جديدة' : 'الجولة التالية'} — أوصلك زرار التنفيذ`,
-      });
+      }, { to: host.socketId, persist: false });
     }
     broadcastGame(room);
   }
@@ -659,10 +918,11 @@ io.on('connection', (socket) => {
     room.nextHandVotes = room.nextHandVotes || new Set();
     if (room.nextHandVotes.has(playerId)) return;            // binding vote is idempotent
     room.nextHandVotes.add(playerId);
-    io.to(room.code).emit('chat:msg', {
+    // Transient vote counter — live only, never replayed from history.
+    pushChat(room, {
       from: 'النظام',
       text: `${me.name} عايز الجولة التالية (${room.nextHandVotes.size}/${humans.length})`,
-    });
+    }, { persist: false });
     // Unanimous minus the host (who can always act alone anyway).
     if (room.nextHandVotes.size >= humans.length - 1) doNextHand(room);
     else broadcastGame(room);
@@ -755,10 +1015,11 @@ io.on('connection', (socket) => {
     if (room.rematchVotes.has(playerId)) return;       // idempotent
     room.rematchVotes.add(playerId);
 
-    io.to(room.code).emit('chat:msg', {
+    // Transient vote counter — live only, never replayed from history.
+    pushChat(room, {
       from: 'النظام',
       text: `${me.name} عايز مباراة جديدة (${room.rematchVotes.size}/${humans.length})`,
-    });
+    }, { persist: false });
 
     // Unanimous minus the host (who can always act alone anyway).
     if (room.rematchVotes.size >= humans.length - 1) doRematch(room);
@@ -767,34 +1028,205 @@ io.on('connection', (socket) => {
 
   // ---- chat ----
 
-  // Simple per-socket rate limit: max 5 messages per 3 seconds (prevents spam floods).
+  // Per-socket rate limit: max 5 messages per 3 seconds (prevents spam floods).
+  // Only genuine post-validation, unmuted sends count; a dropped message gets
+  // exactly one Arabic chat:limited notice per window.
+  const CHAT_WINDOW_MS = 3000;
+  const CHAT_WINDOW_MAX = 5;
   let chatWindowStart = 0;
   let chatCount = 0;
+  let chatLimitedSent = false;
+
   socket.on('chat:send', ({ text, emoji } = {}) => {
-    const { room, playerId } = currentCtx(socket);
+    const ctx = currentCtx(socket);
+    const { room, playerId } = ctx;
     if (!room) return;
     const now = Date.now();
-    if (now - chatWindowStart > 3000) { chatWindowStart = now; chatCount = 0; }
-    if (++chatCount > 5) return;
-    room.lastActivityAt = now; // chat keeps an idle lobby alive
+    let msg;
     // Spectators may chat, visibly tagged so nobody mistakes them for players.
-    if (currentCtx(socket).spectating) {
-      const spec = (room.spectators || []).find(s => s.id === currentCtx(socket).spectatorId);
+    if (ctx.spectating) {
+      const spec = (room.spectators || []).find(s => s.id === ctx.spectatorId);
       if (!spec) return;
-      const msg = { from: '👁 ' + spec.name, pid: playerId, at: now, spectator: true };
-      if (typeof text === 'string' && text.trim()) msg.text = text.trim().slice(0, 200);
-      else if (typeof emoji === 'string' && emoji.length <= 8) msg.emoji = emoji;
-      else return;
-      return io.to(room.code).emit('chat:msg', msg);
+      const body = chatTextValue(text);
+      const emo = body ? null : chatEmojiValue(emoji);
+      if (!body && !emo) return;
+      msg = { from: '👁 ' + spec.name, pid: playerId, at: now, spectator: true };
+      if (body) msg.text = body; else msg.emoji = emo;
+    } else {
+      const p = room.players.find(x => x.id === playerId);
+      if (!p || p.isBot) return;
+      // Host-muted chat is dropped BEFORE the rate counter: moderation silence
+      // must not masquerade as a rate-limit notice.
+      if (p.chatMuted) return;
+      const body = chatTextValue(text);
+      const emo = body ? null : chatEmojiValue(emoji);
+      if (!body && !emo) return;
+      msg = { from: p.name, pid: p.id, at: now };
+      if (body) msg.text = body; else msg.emoji = emo;
     }
-    const p = room.players.find(p => p.id === playerId);
-    if (!p) return;
-    if (p.chatMuted) return; // host-muted chat — silently dropped
-    const msg = { from: p.name, pid: p.id, at: now };
-    if (typeof text === 'string' && text.trim()) msg.text = text.trim().slice(0, 200);
-    else if (typeof emoji === 'string' && emoji.length <= 8) msg.emoji = emoji;
-    else return;
-    io.to(room.code).emit('chat:msg', msg);
+    if (now - chatWindowStart > CHAT_WINDOW_MS) {
+      chatWindowStart = now;
+      chatCount = 0;
+      chatLimitedSent = false;
+    }
+    if (++chatCount > CHAT_WINDOW_MAX) {
+      if (!chatLimitedSent) {
+        chatLimitedSent = true;
+        socket.emit('chat:limited', {
+          message: 'استنى شوية — بتبعت رسايل كتير أوي.',
+          retryAfterMs: Math.max(0, chatWindowStart + CHAT_WINDOW_MS - now),
+        });
+      }
+      return;
+    }
+    room.lastActivityAt = now; // chat keeps an idle lobby alive
+    pushChat(room, msg);
+  });
+
+  // Typing pulse: identity is server-derived and the relay excludes the sender.
+  // One pulse per 1200 ms per socket; receivers age the indicator out locally.
+  const CHAT_TYPING_THROTTLE_MS = 1200;
+  let lastTypingAt = 0;
+  socket.on('chat:typing', () => {
+    const ctx = currentCtx(socket);
+    const { room, playerId } = ctx;
+    if (!room) return;
+    const now = Date.now();
+    if (now - lastTypingAt < CHAT_TYPING_THROTTLE_MS) return;
+    let out;
+    if (ctx.spectating) {
+      const spec = (room.spectators || []).find(s => s.id === ctx.spectatorId);
+      if (!spec) return;
+      out = { pid: playerId, name: spec.name, spectator: true };
+    } else {
+      const p = room.players.find(x => x.id === playerId);
+      if (!p || p.isBot) return;
+      if (p.chatMuted) return;   // host moderation also silences typing
+      out = { pid: playerId, name: p.name };
+    }
+    lastTypingAt = now;
+    socket.to(room.code).emit('chat:typing', out);
+  });
+
+  // ---- voice ----
+  // Signaling + moderation only: media is peer-to-peer and never reaches the
+  // server. Host mute is best-effort UI-level moderation, not a security
+  // boundary — receivers must also silence a hostMuted peer.
+
+  // Per-socket relay budget (signals are small but floodable).
+  let voiceSignalWindowStart = 0;
+  let voiceSignalCount = 0;
+
+  socket.on('voice:join', guarded((payload, ack) => {
+    const cb = typeof payload === 'function' ? payload : ack;
+    const { room, playerId, spectating } = currentCtx(socket);
+    if (!room) return cb?.({ ok: false, error: 'لازم تكون جوه غرفة.' });
+    if (spectating) return cb?.({ ok: false, error: 'المتفرجين مينفعش يشاركوا في الصوت.' });
+    const p = room.players.find(x => x.id === playerId);
+    if (!p) return cb?.({ ok: false, error: 'لازم تكون قاعد في الغرفة عشان تدخل الصوت.' });
+    if (p.isBot) return cb?.({ ok: false, error: 'البوتات مش بتتكلم.' });
+    if (!p.voiceJoined) {
+      p.voiceJoined = true;
+      p.voiceMuted = false;   // fresh join starts unmuted unless host-muted
+      room.lastActivityAt = Date.now();   // a voice-active lobby is not idle
+      // Roster first: peers must know the newcomer before the first offer.
+      broadcastVoiceRoster(room);
+    }
+    // A duplicate join keeps voiceMuted/hostMuted as they are (never unmutes).
+    cb?.({ ok: true, roster: voiceRoster(room), selfId: playerId });
+  }));
+
+  socket.on('voice:leave', guarded(() => {
+    const { room, playerId, spectating } = currentCtx(socket);
+    if (!room || spectating) return;
+    const p = room.players.find(x => x.id === playerId);
+    if (!p || p.isBot) return;
+    const wasJoined = !!p.voiceJoined;
+    p.voiceJoined = false;
+    p.voiceMuted = false;
+    // voiceHostMuted stays on the seat: leave/rejoin must not bypass host
+    // moderation (the seat is the moderation target, not the session).
+    if (!wasJoined) return;
+    room.lastActivityAt = Date.now();
+    broadcastVoiceRoster(room);
+  }));
+
+  socket.on('voice:mute', ({ muted } = {}) => {
+    const { room, playerId, spectating } = currentCtx(socket);
+    if (!room || spectating) return;
+    if (typeof muted !== 'boolean') return;
+    const p = room.players.find(x => x.id === playerId);
+    if (!p || p.isBot || !p.voiceJoined) return;
+    if (!muted && p.voiceHostMuted) return;   // host mute is authoritative
+    const wasMuted = !!(p.voiceMuted || p.voiceHostMuted);
+    if (!!p.voiceMuted === muted) return;
+    p.voiceMuted = muted;
+    // Self-mute while host-muted changes intent but not the roster — no emit.
+    if (wasMuted !== !!(p.voiceMuted || p.voiceHostMuted)) broadcastVoiceRoster(room);
+  });
+
+  socket.on('voice:moderate', guarded((payload, ack) => {
+    const cb = typeof payload === 'function' ? payload : ack;
+    const { pid, all, muted } = (payload && typeof payload === 'object') ? payload : {};
+    const { room, playerId } = currentCtx(socket);
+    if (!room) return cb?.({ ok: false, error: 'لازم تكون جوه غرفة.' });
+    const me = room.players.find(x => x.id === playerId);
+    if (!me || me.isBot) return cb?.({ ok: false, error: 'لازم تكون قاعد في الغرفة.' });
+    if (playerId !== room.hostId) return cb?.({ ok: false, error: 'فقط المضيف يمكنه كتم الصوت.' });
+    // Target shape before value: a single-target request with no pid is
+    // malformed whatever muted says, so report that first (the muted check
+    // still runs for every request that names its target).
+    const moderatingAll = all === true;
+    if (!moderatingAll && typeof pid !== 'string') return cb?.({ ok: false, error: 'لازم تحدد لاعب.' });
+    if (typeof muted !== 'boolean') return cb?.({ ok: false, error: 'قيمة الكتم غلط.' });
+    let targets;
+    if (moderatingAll) {
+      // One state change, one broadcast — never per-target.
+      targets = room.players.filter(x => !x.isBot && x.id !== room.hostId && x.voiceJoined);
+    } else {
+      const target = room.players.find(x => x.id === pid);
+      if (!target) return cb?.({ ok: false, error: 'اللاعب مش موجود في الغرفة.' });
+      if (target.isBot) return cb?.({ ok: false, error: 'البوتات مش بتتكلم.' });
+      if (target.id === room.hostId) return cb?.({ ok: false, error: 'مينفعش تكتم نفسك.' });
+      // Allowed even when the target is not voice-joined: they join muted later.
+      targets = [target];
+    }
+    let changed = false;
+    for (const t of targets) {
+      if (!!t.voiceHostMuted !== muted) {
+        t.voiceHostMuted = muted;
+        changed = true;
+      }
+    }
+    if (changed) {
+      room.lastActivityAt = Date.now();
+      broadcastVoiceRoster(room);
+    }
+    cb?.({ ok: true, roster: voiceRoster(room) });
+  }));
+
+  socket.on('voice:signal', ({ to, payload } = {}) => {
+    const { room, playerId, spectating } = currentCtx(socket);
+    if (!room || spectating) return;
+    const now = Date.now();
+    if (now - voiceSignalWindowStart > VOICE_SIGNAL_WINDOW_MS) {
+      voiceSignalWindowStart = now;
+      voiceSignalCount = 0;
+    }
+    if (++voiceSignalCount > VOICE_SIGNAL_MAX) return;
+    const from = room.players.find(x => x.id === playerId);
+    if (!from || from.isBot || !from.voiceJoined) return;
+    if (typeof to !== 'string' || !to || to === playerId) return;
+    // Seated, connected, voice-joined humans only — never spectators/outsiders.
+    const target = room.players.find(x => x.id === to);
+    if (!target || target.isBot || !target.voiceJoined ||
+        !target.connected || !target.socketId) return;
+    if (voiceSignalBytes(payload) > MAX_VOICE_SIGNAL_BYTES) return;
+    const clean = sanitizeVoiceSignal(payload);
+    if (!clean) return;
+    if (voiceSignalBytes(clean) > MAX_VOICE_SIGNAL_BYTES) return;
+    // `from` is server-derived; never trust a client-supplied sender id.
+    io.to(target.socketId).emit('voice:signal', { from: playerId, payload: clean });
   });
 
   // ---- disconnect ----
@@ -810,10 +1242,15 @@ io.on('connection', (socket) => {
     if (!p) return;
     p.connected = false;
     p.socketId = null;
-    p.chatMuted = false; // disconnect is a full cleanup — rejoiners start clean
+    // A transient disconnect must not wash away host moderation: chatMuted and
+    // voiceHostMuted stay on the seat (they clear on detach/kick). Only the
+    // live voice session state is dropped.
+    const voiceChanged = clearVoice(room, p, { broadcast: false, keepHostMuted: true });
 
     // In lobby: remove the player after grace period (allows quick page refresh)
     if (room.state === 'lobby') {
+      if (voiceChanged) broadcastVoiceRoster(room);
+      const prevHostId = room.hostId;
       setTimeout(() => {
         // S6: re-validate room identity — the room may have been deleted and its
         // CODE recycled by a brand-new room; removePlayer deletes by code, and
@@ -822,15 +1259,19 @@ io.on('connection', (socket) => {
         if (!p.connected) {
           const res = manager.removePlayer(room, p.id);
           if (res.empty) return;
+          liftNewHostVoiceMute(room, prevHostId);
           broadcastLobby(room);
         }
       }, 5000);
     } else {
       // host migration for ongoing games (a bot must never become host)
+      const prevHostId = room.hostId;
       if (room.hostId === p.id) {
         const next = room.players.find(x => x.connected && !x.isBot);
         if (next) room.hostId = next.id;
       }
+      const hostLifted = liftNewHostVoiceMute(room, prevHostId, { broadcast: false });
+      if (voiceChanged || hostLifted) broadcastVoiceRoster(room);
       if (room.players.every(x => !x.connected || x.isBot)) {
         setTimeout(() => {
           if (manager.getRoom(room.code) === room &&
