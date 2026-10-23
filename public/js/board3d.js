@@ -11,6 +11,20 @@ import {
 import {
   getEnvironment, loadEnvironmentTexture, disposeEnvironmentTexture,
 } from './environments3d.js?v=1';
+import { createRoom, disposeRoom } from '../room3d.js?v=1';
+
+// ── real 3D room (public/room3d.js) ──
+// Imported dynamically so a broken room module can never take the game board
+// down: on any failure this board falls back to the shipped 360° backdrop path
+// (DOM #gameEnv photo + HDRI PMREM) with only a console warning.
+let room3d = null;
+try {
+  room3d = await import('../room3d.js?v=2');
+} catch (err) {
+  console.warn('[board] room3d.js failed to load — 360° backdrop fallback stays active:',
+    err?.message || err);
+  room3d = null;
+}
 
 const TILE_W = 1, TILE_L = 2, TILE_H = 0.42, GAP = 0.07;
 const MAX_X = 9.5;              // table boundary along X before turning
@@ -31,6 +45,20 @@ const TABLE_TOP_Y = -TILE_H / 2;
 const SHADOW_Y = TABLE_TOP_Y + 0.012;
 // Low tier paints half-resolution faces (128×256) — a quarter of the pixels.
 const FACE_PX_HIGH = 256, FACE_PX_LOW = 128;
+
+// ── real 3D room sizing (measured from THIS table, not the demo's) ─────────
+// Measured table facts: the procedural felt top is a radius-17 cylinder, the
+// rim is radius 18.4, the felt surface sits at y = -TILE_H/2 with its underside
+// at -0.81 (rim to -0.97), and the boneyard sprawls to ~(12.5, 15.5). The room
+// is built in the room3d-authored "room metres" and uniformly scaled so the
+// real table sits inside with a walk-around ring — props keep their authored
+// proportions AND the felt/rim/tile ratios read true.
+const ROOM_SCALE = 6;                                  // world units per room metre
+const ROOM_DIMS = { width: 10, depth: 11, height: 3.35 };
+const ROOM_FRONT_OPENING = 7.4;                        // wide doorway on the +Z wall
+const ROOM_FLOOR_Y = -1.2;                             // below the felt underside (-0.97)
+const ROOM_TABLE_RADIUS = 18.4 / ROOM_SCALE + 0.05;    // keep-out radius, room metres
+const ROOM_STYLE_IDS = ['modern', 'cozy', 'billiard', 'playful'];
 
 // Theme-tinted table/side/bloom look. Kept small and explicit so every value the
 // material swap touches lives in one place.
@@ -93,6 +121,13 @@ export class Board3D {
     this._envLoadToken = 0;
     this._envLoadingId = null;
     this._hdriRT = null;
+    // Real 3D room state: 'off' → 'loading' → 'ready' | 'failed'. Any state
+    // other than 'ready' leaves the shipped 360° HDRI backdrop in charge.
+    this._roomMod = room3d;
+    this._roomGroup = null;
+    this._roomState = 'off';
+    this._roomStyle = 'modern';
+    this._roomClamp = null;
 
     const low = this._quality.tier === 'low';
     // Low tier renders at CSS resolution with no MSAA and no shadow pass. Those
@@ -121,8 +156,9 @@ export class Board3D {
     this._lastStep = 0;
 
     this.scene = new THREE.Scene();
-    // Deliberately transparent: #gameEnv shows the selected 360° environment
-    // photo behind the table (see applyEnvironmentBackdrop in app.js).
+    // With the real 3D room active the whole backdrop is WebGL geometry; the
+    // DOM `#gameEnv` photo layer behind the canvas is then hidden (see
+    // _syncEnvBackdrop) and comes back only on the fallback path.
     this.scene.background = null;
 
     // B3: one-time PMREM room environment — subtle realistic reflections on the
@@ -163,8 +199,14 @@ export class Board3D {
     // one finger rotate / pinch zoom on touch
     this.controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
     // lights — B3: warmer key, cooler fill (env map adds the ambient bounce)
-    this.scene.add(new THREE.AmbientLight(0x9fb8ff, 0.5));
-    const key = new THREE.DirectionalLight(0xffe8cf, 1.8);
+    // Base intensities are remembered so the room trim (_applyRoomLighting) can
+    // back them off while the room's own rig lights the scene, and restore them
+    // on the fallback path.
+    this._ambientBaseIntensity = 0.5;
+    this._keyBaseIntensity = 1.8;
+    this._ambient = new THREE.AmbientLight(0x9fb8ff, this._ambientBaseIntensity);
+    this.scene.add(this._ambient);
+    const key = new THREE.DirectionalLight(0xffe8cf, this._keyBaseIntensity);
     key.position.set(6, 18, 8);
     key.castShadow = true;
     key.shadow.mapSize.set(2048, 2048);
@@ -322,6 +364,11 @@ export class Board3D {
     // ratio to it. The live frame-time probe (quality.js) may downgrade later.
     this._unsubQuality = onQualityChange(q => this._applyQuality(q));
     startProbe('board');
+    // Deferred room boot: app.js calls setRoomStyle() synchronously right after
+    // the constructor, so the first build already uses the picked style.
+    setTimeout(() => {
+      if (this._roomState === 'off' && !this._disposed) this.setRoomStyle(this._roomStyle);
+    }, 0);
     this.resize();
     this._applyQuality(this._quality);
     this._updateLoop();
@@ -377,6 +424,10 @@ export class Board3D {
       this._texPx = px;
       this._reskin();          // rebuild face/back textures at the new budget
     }
+    // The room was built for the previous tier's budget; rebuild it when the
+    // tier flips (createRoom's signature check makes this a no-op unless the
+    // `low` option actually changed).
+    if (this._roomState === 'ready' && this._roomMod) this._buildRoom();
     // Direct transparent rendering: the board composites over the DOM
     // environment photo, and a bloom composer would write opaque alpha.
     this._applyThemeFx();
@@ -405,12 +456,57 @@ export class Board3D {
     rim.position.y = -0.42 - TILE_H / 2;
     this.scene.add(rim);
     this._tableRim = rim;
+    // The real 3D room replaces the flat-photo backdrop. Scale: the board rim
+    // is 36.8 units wide while the room was authored around a 2.36 felt, so the
+    // room group scales to wrap it; the floor sits just below the rim bottom so
+    // the table reads as standing on the ground when the camera orbits.
+    try {
+      const style = localStorage.getItem('domino_environment') || 'modern';
+      this._room3d = createRoom(this.scene, style, { table: false });
+      this._room3d.scale.setScalar(36.8 / 2.36);
+      this._room3d.position.y = rim.position.y - 0.75;
+      this._roomBuilt = true;
+      if (this.controls && Number.isFinite(this.controls.maxDistance)) {
+        this.controls.maxDistance = Math.min(this.controls.maxDistance, 30);
+      }
+    } catch (err) {
+      console.warn('[board3d] room build failed — flat backdrop fallback:', err?.message || err);
+      this._room3d = null;
+      this._roomBuilt = false;
+    }
     // The selected HDRI is the room AND the ground. A dark ground disc would
     // cover the photo and read as a hole, so the classic table now ends at its
     // rim (the play camera never sees the underside).
     this._tableFloor = null;
     this._floorMat = null;
     this._applyTableTheme();
+  }
+
+  hasRoom() {
+    return Boolean(this._room3d && this._roomBuilt && !this._disposed);
+  }
+
+  setRoomStyle(styleId) {
+    if (this._disposed) return false;
+    try {
+      if (this._room3d) {
+        this.scene.remove(this._room3d);
+        disposeRoom(this._room3d);
+      }
+      this._room3d = createRoom(this.scene, styleId, { table: false });
+      this._room3d.scale.setScalar(36.8 / 2.36);
+      this._room3d.position.y = (this._tableRim?.position.y ?? -0.63) - 0.75;
+      this._roomBuilt = true;
+      if (this.controls && Number.isFinite(this.controls.maxDistance)) {
+        this.controls.maxDistance = Math.min(this.controls.maxDistance, 30);
+      }
+      return this.hasRoom();
+    } catch (err) {
+      console.warn('[board3d] room style switch failed:', err?.message || err);
+      this._room3d = null;
+      this._roomBuilt = false;
+      return false;
+    }
   }
 
   _makeFeltTexture() {
@@ -497,6 +593,10 @@ export class Board3D {
    */
   setEnvironment(id, { force = false } = {}) {
     if (this._disposed) return;
+    // The real room replaces the 360° photo entirely — HDRI work is dropped
+    // for as long as the room is loading/ready. On 'failed' the fallback
+    // path (this method) is exactly what restores the old behaviour.
+    if (this._roomState === 'loading' || this._roomState === 'ready') return;
     const design = getEnvironment(id);
     const tier = this._quality.tier === 'low' ? 'low' : 'high';
     if (!force && design.id === this._environmentDesign
@@ -531,6 +631,172 @@ export class Board3D {
       if (token === this._envLoadToken) this._envLoadingId = null;
       console.warn('[environment] load failed:', design.id, err?.message || err);
     });
+  }
+
+  // ── real 3D room (room3d.js integration) ──
+  /** True while the real room is on screen (the DOM 360° photo is hidden). */
+  hasRoom() {
+    return this._roomState === 'ready' && !!this._roomGroup;
+  }
+
+  /**
+   * Pick one of the four room styles (modern/cozy/billiard/playful). The
+   * choice is persisted by app.js under the same legacy 'domino_environment'
+   * key the old 360° picker used. 'loading' needs no action: the pending build
+   * reads the latest style. Any failed attempt is retried on the next pick.
+   */
+  setRoomStyle(id) {
+    if (this._disposed) return;
+    this._roomStyle = ROOM_STYLE_IDS.includes(id) ? id : 'modern';
+    if (this._roomState === 'off' || this._roomState === 'failed') this._enterRoomMode();
+    else if (this._roomState === 'ready') this._buildRoom();
+  }
+
+  async _enterRoomMode() {
+    this._roomState = 'loading';
+    try {
+      if (!this._roomMod) this._roomMod = await import('../room3d.js?v=2');
+      if (this._disposed) return;
+      if (typeof this._roomMod?.createRoom !== 'function') {
+        throw new Error('room3d module unavailable');
+      }
+    } catch (err) {
+      console.warn('[board] real room unavailable — keeping the 360° backdrop fallback:',
+        err?.message || err);
+      this._roomState = 'failed';
+      this.setEnvironment(this._environmentDesign, { force: true });
+      return;
+    }
+    // The room replaces the 360° photo entirely: stop the pending HDRI work
+    // and release its PMREM before building.
+    this._dropHdriEnvironment();
+    this._roomState = 'ready';
+    this._buildRoom();
+  }
+
+  _dropHdriEnvironment() {
+    this._envLoadToken++;            // cancels any in-flight equirectangular load
+    this._envLoadingId = null;
+    if (this._hdriRT) {
+      if (this.scene.environment === this._hdriRT.texture) {
+        this.scene.environment = this._envRT?.texture || null;
+      }
+      this._hdriRT.dispose?.();
+      this._hdriRT = null;
+    }
+  }
+
+  _buildRoom() {
+    const mod = this._roomMod;
+    const styleId = this._roomStyle;
+    try {
+      const group = mod.createRoom(this.scene, styleId, {
+        table: false,                      // the real play table is already in the scene
+        scale: ROOM_SCALE,
+        room: { ...ROOM_DIMS },
+        tableRadius: ROOM_TABLE_RADIUS,    // props never clip the real felt
+        frontOpening: ROOM_FRONT_OPENING,
+        floorY: ROOM_FLOOR_Y,
+        low: this._quality.tier === 'low',
+        configureRenderer: false,          // the board owns the shadow-map config
+      });
+      // createRoom returns an empty group when its internal build failed —
+      // treat that exactly like a thrown error and fall back.
+      if (!group || !group.parent || !group.userData?.stats) {
+        throw new Error('createRoom returned an empty group');
+      }
+      this._roomGroup = group;
+      this._roomState = 'ready';
+      this._updateRoomClamp();
+      this._applyRoomLighting(true);
+      this._syncEnvBackdrop();
+      this._shadowDirty = true;
+      if (this.renderer.shadowMap.enabled) this.renderer.shadowMap.needsUpdate = true;
+    } catch (err) {
+      console.warn(`[board] room "${styleId}" failed — 360° backdrop fallback:`,
+        err?.message || err);
+      try { mod?.disposeRoom?.(this._roomGroup); } catch { /* already gone */ }
+      this._roomGroup = null;
+      this._roomState = 'failed';
+      this._updateRoomClamp();
+      this._applyRoomLighting(false);
+      this._syncEnvBackdrop();
+      this.setEnvironment(this._environmentDesign, { force: true });
+    }
+  }
+
+  /** #gameEnv (DOM 360° photo behind the transparent canvas) vs the real room. */
+  _syncEnvBackdrop() {
+    if (typeof document === 'undefined') return;
+    const el = document.getElementById('gameEnv');
+    if (!el) return;
+    el.style.opacity = this.hasRoom() ? '0' : '';
+  }
+
+  /**
+   * With the real room active its hemi/spot/chandelier rig lights the scene —
+   * the board's studio lights back off so the felt is not double-lit, and
+   * return to their base values on the fallback path.
+   */
+  _applyRoomLighting(roomOn) {
+    if (this._disposed) return;
+    if (this._ambient) this._ambient.intensity = this._ambientBaseIntensity * (roomOn ? 0.3 : 1);
+    if (this._key) this._key.intensity = this._keyBaseIntensity * (roomOn ? 0.62 : 1);
+  }
+
+  /**
+   * World-space camera walk bounds derived from the built room itself (no
+   * duplicated constants — the numbers come from the group's userData).
+   */
+  _updateRoomClamp() {
+    const info = this._roomGroup?.userData?.room;
+    if (!info) {
+      this._roomClamp = null;
+      return;
+    }
+    const s = info.scale || 1;
+    const floorY = info.floorY || 0;
+    const m = 0.55 * s;
+    const halfW = (info.width * s) / 2;
+    const halfD = (info.depth * s) / 2;
+    const openingHalf = (info.frontOpening / 2) * s;
+    this._roomClamp = {
+      minX: -halfW + m, maxX: halfW - m,
+      minZ: -halfD + m, maxZ: halfD - m,
+      minY: floorY + 0.4,
+      maxY: floorY + info.height * s - 1.2,
+      // The camera may travel out through the open doorway (+Z) — the overhang
+      // fades to zero at the doorway's edges, so the camera can never end up
+      // inside a wall box and whatever it sees is always the room.
+      corridorHalf: Math.max(2, openingHalf - 1.2),
+      corridorMaxZ: halfD + 26,
+    };
+  }
+
+  /**
+   * Adapted from room3d.js's clampCameraToRoom for the game's orbit: the
+   * position is clamped into the scaled room every frame and the pivot stays
+   * over the table area, so no orbit/zoom extreme can ever reveal the void
+   * outside the walls (no black screen, and the room truly surrounds the play).
+   */
+  _clampCameraToRoom() {
+    const b = this._roomClamp;
+    if (!b) return;
+    const p = this.camera.position;
+    p.x = clamp(p.x, b.minX, b.maxX);
+    p.y = clamp(p.y, b.minY, b.maxY);
+    const corridor = clamp((b.corridorHalf - Math.abs(p.x)) / b.corridorHalf, 0, 1);
+    const zMax = b.maxZ + (b.corridorMaxZ - b.maxZ) * corridor;
+    if (p.z > zMax) p.z = zMax;
+    else if (p.z < b.minZ) p.z = b.minZ;
+    const t = this.controls.target;
+    const tx = clamp(t.x, b.minX + 2, b.maxX - 2);
+    const ty = clamp(t.y, 0.2, 3);
+    const tz = clamp(t.z, b.minZ + 2, b.maxZ - 2);
+    if (tx !== t.x || ty !== t.y || tz !== t.z) {
+      t.set(tx, ty, tz);
+      this.camera.lookAt(t);
+    }
   }
 
   _clearTableModel() {
@@ -1950,6 +2216,11 @@ export class Board3D {
 
     this.controls.update();
 
+    // Real-room camera lock (adapted from clampCameraToRoom): applied every
+    // frame after the orbit step, so extreme drags/zoom can never push the
+    // camera through a wall or under the floor — the void stays unreachable.
+    if (this._roomClamp) this._clampCameraToRoom();
+
     // Shadow maps are on-demand: refresh while tiles move or after a sync that
     // changed geometry. Camera-only motion never needs a new shadow pass.
     if (this._anims.length > 0 || this._shadowDirty) {
@@ -1987,6 +2258,11 @@ export class Board3D {
     if (this._disposed) return;
     this._disposed = true;
     this.pauseLoop();
+    if (this._room3d) {
+      try { this.scene.remove(this._room3d); } catch { /* scene gone */ }
+      try { disposeRoom(this._room3d); } catch { /* already disposed */ }
+      this._room3d = null;
+    }
 
     if (this._io) { try { this._io.disconnect(); } catch { /* already gone */ } this._io = null; }
     for (const [target, type, fn, opts] of this._listeners) {
@@ -2031,6 +2307,17 @@ export class Board3D {
     // Selected table model.
     this._tableLoadToken++;
     this._clearTableModel();
+
+    // Real 3D room: it owns its own lights/materials/textures/geometries, and
+    // disposeRoom() removes it from the scene. The fallback backdrop element
+    // is un-hidden so a freshly built board starts from a clean slate.
+    if (this._roomGroup) {
+      try { (this._roomMod || room3d)?.disposeRoom?.(this._roomGroup); } catch { /* gone */ }
+      this._roomGroup = null;
+    }
+    this._roomClamp = null;
+    this._roomState = 'off';
+    this._syncEnvBackdrop();
 
     // Table meshes/materials/textures.
     for (const mesh of [this._tableTop, this._tableRim, this._tableFloor]) {

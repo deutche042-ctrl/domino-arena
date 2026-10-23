@@ -1,11 +1,12 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=37';
+import { Board3D } from './board3d.js?v=39';
 import { Home3D } from './home3d.js?v=7';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, setQuality, onQualityChange } from './quality.js?v=3';
 import { TABLE_DESIGNS, getTableDesign, loadTableDesign, saveTableDesign } from './tables3d.js?v=1';
 import { TablePreview } from './tablepreview.js?v=1';
-import { ENVIRONMENTS, getEnvironment, loadEnvironmentSelection, saveEnvironmentSelection } from './environments3d.js?v=1';
+import { getEnvironment } from './environments3d.js?v=1';
+import { ROOM_STYLES } from '../room3d-styles.js?v=1';
 import { EnvironmentPreview } from './envpreview.js?v=1';
 import { sfx } from './sfx.js?v=17';
 import { VoiceChat } from './voice.js?v=2';
@@ -135,8 +136,25 @@ let tileTheme = (() => {
 setTileTheme(tileTheme);
 // F4.5: selected 3D table design (classic felt or a vendored Poly Haven model).
 let tableDesign = loadTableDesign();
-// F4.6: selected 360° environment (Poly Haven HDRI, local to this device).
-let environmentDesign = loadEnvironmentSelection();
+// F4.6 → room3d: the picked REAL room style (room3d.js: modern/cozy/billiard/
+// playful). Stored under the same 'domino_environment' key the old 360° HDRI
+// picker used; a legacy HDRI id (from an older install) is not a room id, so it
+// resolves to the default room style and keeps serving as the fallback photo
+// if the real room ever fails to build.
+const ROOM_STYLE_IDS = new Set(ROOM_STYLES.map(s => s.id));
+const DEFAULT_ROOM_STYLE = ROOM_STYLES[0]?.id || 'modern';
+let legacyEnvBackdropId = (() => {
+  try {
+    const v = localStorage.getItem('domino_environment');
+    return v && !ROOM_STYLE_IDS.has(v) ? v : 'comfy_cafe';
+  } catch { return 'comfy_cafe'; }
+})();
+let environmentDesign = (() => {
+  try {
+    const v = localStorage.getItem('domino_environment');
+    return ROOM_STYLE_IDS.has(v) ? v : DEFAULT_ROOM_STYLE;
+  } catch { return DEFAULT_ROOM_STYLE; }
+})();
 
 function applyTheme(name) {
   if (!THEME_NAMES.includes(name)) return;
@@ -332,24 +350,36 @@ function initTablePicker() {
 let environmentPreview = null;
 let previewEnvId = environmentDesign;
 
-/** Paint the selected room photo behind the transparent WebGL canvas. */
-function applyEnvironmentBackdrop(design) {
+/**
+ * The transparent WebGL canvas needs exactly ONE backdrop source of truth:
+ * the real 3D room (WebGL geometry, #gameEnv hidden) or the shipped legacy
+ * 360° photo (#gameEnv painted, opacity restored — also the fallback when the
+ * room module fails to build).
+ */
+function applyEnvironmentBackdrop() {
   const el = $('gameEnv');
-  if (!el || !design?.bg) return;
-  if (el.dataset.env === design.id) return;
+  if (!el) return;
+  if (board?.hasRoom?.()) {
+    el.style.opacity = '0';                 // الغرفة 3D الحقيقية هي الخلفية
+    el.dataset.env = `room:${environmentDesign}`;
+    return;
+  }
+  el.style.opacity = '';
+  const design = getEnvironment(legacyEnvBackdropId);
+  if (!design?.bg || el.dataset.env === design.id) return;
   el.style.backgroundImage = `url("${design.bg}")`;
   el.dataset.env = design.id;
 }
 
 function selectEnvironment(id) {
-  const design = getEnvironment(id);
-  if (!design) return;
-  environmentDesign = design.id;
-  saveEnvironmentSelection(design.id);
-  applyEnvironmentBackdrop(design);
-  board?.setEnvironment?.(design.id);
+  const style = ROOM_STYLES.find(s => s.id === id);
+  if (!style) return;
+  environmentDesign = style.id;
+  try { localStorage.setItem('domino_environment', environmentDesign); } catch { /* private mode */ }
+  board?.setRoomStyle?.(environmentDesign);
+  applyEnvironmentBackdrop();
   document.querySelectorAll('#envChoices .table-choice').forEach((c) => {
-    const on = c.dataset.env === design.id;
+    const on = c.dataset.env === style.id;
     c.classList.toggle('active', on);
     c.setAttribute('aria-pressed', String(on));
   });
@@ -361,26 +391,21 @@ function renderEnvironmentChoices() {
   const wrap = $('envChoices');
   if (!wrap) return;
   wrap.innerHTML = '';
-  for (const d of ENVIRONMENTS) {
+  for (const d of ROOM_STYLES) {
+    const p = d.palette || {};
     const card = document.createElement('div');
     card.className = 'table-choice' + (d.id === environmentDesign ? ' active' : '');
     card.dataset.env = d.id;
     card.setAttribute('role', 'button');
     card.setAttribute('tabindex', '0');
     card.setAttribute('aria-pressed', String(d.id === environmentDesign));
+    // A room-style swatch from the style's own palette (wall → floor → wood);
+    // the real look is always the live 3D board, no photo thumbnail needed.
     card.innerHTML = `
-      <img class="tc-thumb" src="${d.thumb}" alt="" loading="lazy" draggable="false">
-      <span class="tc-name">${esc(d.name)}</span>
+      <span class="tc-thumb tc-room" style="background:linear-gradient(155deg, ${esc(p.wall || '#e9e6e0')} 0%, ${esc(p.floor || '#c9c2b6')} 58%, ${esc(p.wood || '#8a6a4a')} 100%)" aria-hidden="true"></span>
+      <span class="tc-name">${esc(d.label)}</span>
       <span class="tc-check" aria-hidden="true">✓</span>
     `;
-    const eye = document.createElement('button');
-    eye.type = 'button';
-    eye.className = 'tc-eye';
-    eye.title = 'معاينة البيئة';
-    eye.setAttribute('aria-label', `معاينة ${d.name}`);
-    eye.textContent = '👁';
-    eye.addEventListener('click', (e) => { e.stopPropagation(); openEnvironmentPreview(d.id); });
-    card.appendChild(eye);
     card.addEventListener('click', () => selectEnvironment(d.id));
     card.addEventListener('keydown', (e) => {
       if (e.target !== card) return;
@@ -440,9 +465,12 @@ function closeEnvironmentPreview(playSound = false) {
 
 function initEnvironmentPicker() {
   renderEnvironmentChoices();
-  applyEnvironmentBackdrop(getEnvironment(environmentDesign));
+  applyEnvironmentBackdrop();
   const previewBtn = $('btnEnvPreview');
-  if (previewBtn) previewBtn.onclick = () => openEnvironmentPreview(environmentDesign);
+  if (previewBtn) {
+    // الغرفة الحقيقية ملهاش معاينة 360° قديمة — الزر بيتخفى بدل ما يفضل ميت.
+    previewBtn.style.display = 'none';
+  }
   const closeBtn = $('btnEnvViewClose');
   if (closeBtn) closeBtn.onclick = () => closeEnvironmentPreview(true);
   const useBtn = $('btnEnvViewUse');
@@ -477,11 +505,11 @@ function showScreen(name) {
     closeEnvironmentPreview();
     if (environmentPreview) { environmentPreview.destroy(); environmentPreview = null; }
   }
-  if (name === 'game') applyEnvironmentBackdrop(getEnvironment(environmentDesign));
+  if (name === 'game') applyEnvironmentBackdrop();
   if (name === 'game' && !board) {
     board = createBoard($('table3d'), { onMarkerClick, onBoardMiss, onBoneyardClick: onBoneyardDraw });
     board?.setTable?.(tableDesign);
-    board?.setEnvironment?.(environmentDesign);
+    board?.setRoomStyle?.(environmentDesign);   // الغرفة ثلاثية الأبعاد الحقيقية
   }
   if (name === 'game') setTimeout(() => board?.resize(), 50);
   home3d?.setActive(name === 'home');
