@@ -2986,15 +2986,48 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 // a nearby device can reach and hand that out instead.
 const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
 function isLocalHostname(host) { return LOCAL_HOSTNAMES.has(String(host || '').toLowerCase()); }
-async function inviteBase() {
-  if (!isLocalHostname(location.hostname)) return location.origin;
+
+// Android app shell only. Capacitor serves the WebView from its own local
+// webserver (https://localhost) while the game server runs inside the app's
+// bundled Node runtime on 127.0.0.1:3000 (see mobile/node/index.cjs and
+// mobile/capacitor.config.json). Returns '' in a browser, where the page origin
+// IS the game server — every use below is guarded by this, so the web client
+// keeps talking to its own origin and nothing changes for it.
+function embeddedServerBase() {
+  return (typeof window !== 'undefined' && window.Capacitor) ? 'http://127.0.0.1:3000' : '';
+}
+
+// Android app shell only. mobile/capacitor.config.json sets the Capacitor Node.js
+// plugin to startMode "manual", so nothing on the native side starts the bundled
+// server — this call is what launches it (Capacitor's plugin refuses start() in
+// any other mode and never autostarts in this one). window.Capacitor.Plugins.Nodejs
+// is injected by the native bridge before page scripts run, so no import is needed;
+// PORT must stay 3000 to match embeddedServerBase() above.
+function startEmbeddedServer() {
+  if (!embeddedServerBase()) return;
   try {
-    const info = await (await fetch('/host-info')).json();
+    window.Capacitor.Plugins.Nodejs
+      .start({ script: 'index.cjs', env: { PORT: '3000' } })
+      .catch((err) => console.warn('[embedded] server start failed:', err?.message || err));
+  } catch (err) {
+    // A missing plugin object must never abort boot — the page stays usable.
+    console.warn('[embedded] could not reach the Node.js plugin:', err?.message || err);
+  }
+}
+
+async function inviteBase() {
+  // Inside the app the WebView origin is Capacitor's webserver, which has no
+  // /host-info — ask the embedded server instead.
+  const embedded = embeddedServerBase();
+  const origin = embedded || location.origin;
+  if (!embedded && !isLocalHostname(location.hostname)) return location.origin;
+  try {
+    const info = await (await fetch(origin + '/host-info')).json();
     const ip = info && Array.isArray(info.ips) ? info.ips[0] : null;
-    if (ip) return `${location.protocol}//${ip}:${info.port || location.port}`;
+    if (ip) return `${embedded ? 'http:' : location.protocol}//${ip}:${info.port || (embedded ? 3000 : location.port)}`;
   } catch { /* older server or no network — fall back to the origin */ }
   toast('⚠ الرابط ده هيفتح على الجهاز ده بس — شغّل السيرفر على الشبكة عشان تليفون تاني يقدر يدخل');
-  return location.origin;
+  return origin;
 }
 async function inviteUrl() {
   return (await inviteBase()) + '?room=' + (roomCode || '');
@@ -4056,7 +4089,12 @@ function startSocket(base) {
 function boot() {
   // Retired preference from the removed 2D-table mode — clean it up once.
   try { localStorage.removeItem('domino_force2d'); } catch { /* storage blocked */ }
-  startSocket('');
+  // empty base in the browser (same-origin; see startSocket below), or the
+  // embedded server address when running inside the Android app shell.
+  // Start the bundled server first (manual start mode — see startEmbeddedServer);
+  // socket.io keeps retrying until it answers, so the order is not load-bearing.
+  startEmbeddedServer();
+  startSocket(embeddedServerBase());
   initHome(); initLobby(); initGameUI();
   try { initVoiceUI(); } catch (err) {
     // Voice is an enhancement: a broken panel must never stop the game booting.
