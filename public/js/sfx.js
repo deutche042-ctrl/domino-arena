@@ -330,22 +330,6 @@ export const sfx = {
     o.stop(t + 0.14);
   },
 
-  micOn() {
-    // two rising blips — the classic "you're live" cue
-    const a = ac();
-    const t = a.currentTime + 0.005;
-    ping(t, 660, 0.06, 0.14, 0, 0.08);
-    ping(t + 0.09, 990, 0.08, 0.14, 0, 0.08);
-  },
-
-  micOff() {
-    // same pair falling — "you're muted"
-    const a = ac();
-    const t = a.currentTime + 0.005;
-    ping(t, 990, 0.06, 0.13, 0, 0.08);
-    ping(t + 0.09, 660, 0.09, 0.13, 0, 0.08);
-  },
-
   // quiet felt-room bed: a seamless low room-tone loop that starts with the
   // match and stops on leaving — gives the table a sense of place
   ambient(on) {

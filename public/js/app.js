@@ -1,12 +1,19 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=27';
-import { DomBoard, webglAvailable } from './domboard.js?v=3';
-import { Home3D } from './home3d.js?v=4';
-import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=14';
-import { getQuality, setQuality } from './quality.js?v=1';
-import { sfx } from './sfx.js?v=16';
+import { Board3D } from './board3d.js?v=29';
+import { DomBoard, webglAvailable } from './domboard.js?v=5';
+import { Home3D } from './home3d.js?v=6';
+import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
+import { getQuality, setQuality } from './quality.js?v=2';
+import { sfx } from './sfx.js?v=17';
+import { VoiceChat } from './voice.js?v=2';
 
 const $ = id => document.getElementById(id);
+// Guarded event binding: a missing chat node must never abort boot.
+function bindEl(id, ev, fn, opts) {
+  const el = $(id);
+  if (el) el.addEventListener(ev, fn, opts);
+  return el;
+}
 const VARIANT_DESC = {
   block: 'عادي (Block): بدون سحب — لا تملك حركة متطابقة؟ تمرير (باص). الفائز بالجولة يكسب مجموع نقاط كروت الخصوم المتبقية.',
   draw: 'سحب (Draw): عند عدم امتلاك كارت متطابق، تسحب من السحابة حتى تجد كارت يمكن لعبه. نفس قواعد احتساب النقاط.',
@@ -23,6 +30,53 @@ let board = null;
 let home3d = null, lobby3d = null;
 let lastActionKey = '';
 let chatOpen = false, unread = 0, emojiPopOpen = false;
+
+// ── chat session state ──
+// `mid` is the server-assigned, room-scoped message id — the dedupe key that
+// keeps a chat:history replay and a live chat:msg from drawing the same message
+// twice. `at` is the server clock and is the only source for day/grouping
+// comparisons (the local clock may be skewed).
+const CHAT_SEEN_MAX = 500;
+const CHAT_GROUP_MS = 3 * 60 * 1000;
+const CHAT_TYPING_TTL_MS = 3000;
+const CHAT_TYPING_THROTTLE_MS = 1200;
+const chatSeen = new Set();
+let chatSeenOrder = [];
+let chatLastAt = 0;              // msg.at of the previous rendered message
+let chatLastWho = '';            // pid (or name fallback) of the previous user message
+let chatLastDay = '';            // local day key derived from msg.at
+let chatLastWasUser = false;
+let chatUnreadDividerShown = false;
+let chatScrolledUp = false;
+let chatTypingSentAt = 0;
+const chatTypers = new Map();    // pid -> { name, timer }
+let chatHintTimer = null;
+
+// ── voice session state ──
+// The engine (js/voice.js) owns media + signaling; this module only renders it.
+// One engine instance exists per live socket, is disposed with the room, and is
+// recreated lazily on the next join. `voiceSelf` mirrors the engine's onSelf
+// snapshot so re-renders (lobby/game state) never need to poke the engine.
+let voiceEngine = null;
+let voiceInitFailed = false;
+let voiceSelf = { joined: false, muted: false, hostMuted: false, speaking: false, status: 'idle', error: null };
+let voicePeerList = [];
+const voiceSpeaking = new Set();          // pids currently speaking (self included)
+const voicePeerRows = new Map();          // pid -> { row, ...refs }
+let voicePeerOrderKey = '';
+let voicePanelOpen = false;
+let voicePttPref = (() => {
+  try { return localStorage.getItem('domino_voice_ptt') === '1'; } catch { return false; }
+})();
+let voiceFabHeld = false;
+let voiceHeldAt = 0;
+let voicePttDown = false;      // local PTT intent (the engine exposes speaking, not talking)
+let voiceDevices = [];
+let voiceDeviceBusy = false;
+let voiceSelectedDevice = 'default';
+let voiceDeviceKey = '';
+let voiceLiveSeen = false;
+const VOICE_IDLE = Object.freeze({ joined: false, muted: false, hostMuted: false, speaking: false, status: 'idle', error: null });
 
 // ── chat content ──
 const CHAT_PHRASES = [
@@ -107,7 +161,14 @@ function createBoard(canvas, cbs) {
 // ══════════ screens ══════════
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  $(`screen-${name}`).classList.add('active');
+  const target = $(`screen-${name}`);
+  if (target) target.classList.add('active');
+  // The chat cluster is global (body-level) and must only exist while seated in
+  // a room — it rides along on lobby AND game, never on home.
+  document.body.classList.toggle('in-room', name !== 'home' && !!roomCode);
+  // Layout hook: the fixed chat/voice rail is repositioned on the lobby (mobile)
+  // so it never sits on top of the host-config controls.
+  document.body.classList.toggle('in-lobby', name === 'lobby');
   // Self-heal: whenever the lobby becomes visible the code box must show a
   // code — repaint from the freshest known source in case an earlier paint
   // was missed, stale, or rendered while roomCode was still unset.
@@ -118,6 +179,9 @@ function showScreen(name) {
   if (name === 'game') setTimeout(() => board?.resize(), 50);
   home3d?.setActive(name === 'home');
   lobby3d?.setActive(name === 'lobby');
+  // The board owns a single rAF loop; pause it while another screen is shown.
+  board?.setActive?.(name === 'game');
+  syncVoiceVisibility();
 }
 
 // ══════════ home & lobby effects ══════════
@@ -318,8 +382,16 @@ function getName() {
 function homeError(msg) { $('homeError').textContent = msg || ''; }
 
 function afterJoin(res, name) {
-  myId = res.playerId || null; myToken = res.token || null; myName = name; roomCode = res.code;
+  // Spectator joins carry no playerId, but the server stamps their chat with
+  // "spectator:<id>" — mirror that so their own bubbles/typing are recognised.
+  myId = res.playerId || (res.spectatorId ? 'spectator:' + res.spectatorId : null);
+  myToken = res.token || null; myName = name; roomCode = res.code;
   myReady = false;
+  // `res.spectating` is the authority on every attach path (create/join/auto-
+  // rejoin); the caller mirrors it too, but voice visibility must not depend on
+  // call-site ordering.
+  if (typeof res.spectating === 'boolean') spectating = res.spectating;
+  document.body.classList.add('in-room');
   // Spectator joins carry no token — never persist "undefined" as a token or
   // the next auto-rejoin sends a garbage token string. Storage can also throw
   // (blocked cookies/private mode) — it must never stop the lobby painting.
@@ -334,11 +406,18 @@ function afterJoin(res, name) {
   paintLobbyCode();
   const chip = $('chatRoomChip');
   if (chip) chip.textContent = 'غرفة ' + roomCode;
+  // Fresh attachment (create / join / reconnect): rebuild the transcript from
+  // scratch — the server unicasts chat:history right after this ack.
+  resetChatTranscript();
   if (res.lobby) {
     renderLobby(res.lobby);
   } else if (lastLobbyState) {
     renderLobby(lastLobbyState);
   }
+  // Fresh seat (join / create / reconnect): tell the voice engine who we are.
+  // A reconnect re-runs this, which is what re-binds voice to the new socket
+  // identity without ever opening the mic on its own.
+  syncVoiceForRoom();
 }
 
 // ══════════ lobby ══════════
@@ -370,6 +449,10 @@ function renderLobby(st) {
   for (const p of (st.players || [])) {
     const li = document.createElement('li');
     if (p.id === myId) li.className = 'me';
+    // pid mapping for the voice speaking ring (voicePeerRows never touches DOM
+    // nodes we do not own — it only toggles a class here).
+    li.dataset.pid = p.id;
+    if (voiceSpeaking.has(String(p.id))) li.classList.add('voice-speaking');
     const nameSpan = document.createElement('span');
     nameSpan.className = 'name';
     // F4.2: label a seated bot with its difficulty + personality.
@@ -472,6 +555,8 @@ function renderLobby(st) {
     $('variantDesc').textContent = VARIANT_DESC[st.config.variant] || '';
     renderRulesSummary(st.config);
   }
+  // Voice roster / strip / entry points follow the same lobby paint.
+  renderVoiceUI();
 }
 
 // A compact human-readable echo of the active house rules — visible to everyone
@@ -505,7 +590,11 @@ function initLobby() {
   $('btnCopyLink').onclick = () => {
     const url = location.origin + '?room=' + roomCode;
     if (navigator.share) {
-      navigator.share({ title: 'دومينو أرينا', text: `ادخل غرفتي بالكود ${roomCode}`, url }).catch(() => {});
+      navigator.share({ title: 'دومينو أرينا', text: `ادخل غرفتي بالكود ${roomCode}`, url })
+        .then(() => toast('✅ اتبعتت الدعوة لأصحابك'))
+        // A user-cancelled share sheet is NOT a failure — swallow it silently.
+        // Anything else (no share support, denied) falls back to the clipboard.
+        .catch((err) => { if (err?.name !== 'AbortError') copyText(url, 'تم نسخ رابط الدعوة!'); });
     } else {
       copyText(url, 'تم نسخ رابط الدعوة!');
     }
@@ -594,14 +683,19 @@ function takeSeat() {
 }
 
 // ── leaving the room (lobby button or in-game exit) ──
-function leaveRoom() {
-  // Stop auto-rejoin BEFORE telling the server, so a fast reconnect can't pull us back in.
+// Reset every piece of per-room client state and go home. `leaveRoom` also tells
+// the server; `resetToHome` is the same teardown WITHOUT the emit, for the cases
+// where the server already detached us (kicked, superseded, failed auto-rejoin)
+// and a stray room:leave would race the new state.
+function teardownRoom() {
+  // Stop the mic before the seat is gone, then dispose the engine with the
+  // room: the next room lazily builds a fresh one from the same socket.
+  stopVoiceForLeave();
   if (roomCode) {
     sessionStorage.removeItem('domino_token_' + roomCode);
     localStorage.removeItem('domino_token_' + roomCode);
   }
   localStorage.removeItem('domino_last_code');
-  emit('room:leave').catch(() => {});
   myId = myToken = roomCode = null;
   myReady = false;
   isHost = false;
@@ -610,22 +704,67 @@ function leaveRoom() {
   selectedTile = null;
   spectating = false;
   clearTimeout(autoPlayTimer);
+  clearBannerHold();
+  bannerOverride = null;
   stopTurnAlert();
   board?.clearMarkers();
-  closeChat();
-  unread = 0;
-  updateBadge();
-  const msgs = $('chatMsgs');
-  if (msgs) msgs.innerHTML = '';
+  endChatSession();
+  disposeVoice();
   sfx.ambient(false);
   closeLeaveConfirm();
+  $('modalSettings')?.classList.add('hidden');
   history.replaceState(null, '', location.pathname);
-  homeError('');
   showScreen('home');
+}
+function leaveRoom() {
+  // Leave the voice channel while the seat still exists on the server, then
+  // stop auto-rejoin BEFORE telling the server, so a fast reconnect can't pull
+  // us back in.
+  stopVoiceForLeave();
+  emit('room:leave').catch(() => {});
+  teardownRoom();
   sfx.click();
+}
+function resetToHome(message) {
+  teardownRoom();
+  homeError(message || '');
+  showScreen('home');
 }
 function openLeaveConfirm() { $('modalLeave').classList.remove('hidden'); }
 function closeLeaveConfirm() { $('modalLeave').classList.add('hidden'); }
+
+// 1.9: connection state as a first-class visual, not just a coloured dot.
+function setConn(ok) {
+  const pill = $('connPill');
+  if (pill) pill.className = ok ? 'ok' : 'bad';
+  document.body.classList.toggle('offline', !ok);
+  const card = $('connBanner');
+  if (card) {
+    card.textContent = ok ? '' : 'محاولة إعادة الاتصال…';
+    card.classList.toggle('hidden', ok);
+  }
+}
+
+// 0.2: map the engine/server's English rule errors to Egyptian Arabic.
+const SERVER_ERR_AR = {
+  'not your turn': 'مش دورك — استنى لحد ما ييجي دورك',
+  'cannot draw now': 'مفيش سحب دلوقتي',
+  'cannot pass now': 'مفيش باص مسموح في اللعبة دي',
+  'tile not in hand': 'الكارت ده مش في إيدك',
+  'end not open': 'الطرف ده مقفول',
+  'hand is over': 'الجولة خلصت',
+};
+function translateServerError(msg) {
+  if (!msg) return 'حصل خطأ — حاول تاني';
+  const key = String(msg).toLowerCase();
+  if (SERVER_ERR_AR[key]) return SERVER_ERR_AR[key];
+  const illegal = key.match(/^illegal play .+ on (.+)$/);
+  if (illegal) return 'مش هينفع تلعب الكارت ده على الطرف ده';
+  // Server-authored messages are already Arabic (room/lobby rules) — pass them
+  // through untouched instead of mangling a perfectly good sentence.
+  if (/[؀-ۿ]/.test(msg)) return msg;
+  return 'حصل خطأ — حاول تاني';
+}
 
 // ══════════ game rendering ══════════
 function renderGame() {
@@ -665,6 +804,10 @@ function renderOpponents() {
     const connected = view.connected?.[pid] !== false;
     const card = document.createElement('div');
     card.className = 'opp-card' + (isTurn ? ' turn' : '') + (!connected ? ' off' : '');
+    // The card is rebuilt on every game:state, so the speaking ring is painted
+    // from the live set instead of relying on a previous class edit.
+    card.dataset.pid = pid;
+    if (voiceSpeaking.has(String(pid))) card.classList.add('voice-speaking');
     const avCol = document.createElement('div');
     avCol.className = 'opp-avatar-col';
     const av = document.createElement('div');
@@ -717,8 +860,16 @@ function renderOpponents() {
 
 // ── hand sorting: 7 tiles in draw order cost 5-10s of scanning per turn, which
 // eats the 30s clock. Four modes, persisted per device. ──
+// 'deal' is the smart default: playable-first while it IS my turn (so the
+// card I can actually drop is the first one I see), stable deal order otherwise
+// so the hand never reshuffles itself every 20s during opponents' turns (1.3).
 const SORT_MODES = ['deal', 'pips', 'playable', 'doubles'];
-const SORT_LABELS = { deal: '🂠 ترتيب السحب', pips: '⚖ ثقيل أولاً', playable: '✅ المتاح أولاً', doubles: '🎲 الدبل أولاً' };
+const SORT_LABELS = {
+  deal: '🔀 رتّب: كما وصلني',
+  pips: '⚖ الأتقل أولًا',
+  playable: '✅ المتاح أولًا',
+  doubles: '🎲 الدبل أولًا',
+};
 let sortMode = (() => {
   try {
     const v = localStorage.getItem('domino_sort');
@@ -726,9 +877,23 @@ let sortMode = (() => {
   } catch { return 'deal'; }
 })();
 
+function paintSortBtn() {
+  const btn = $('btnSort');
+  if (!btn) return;
+  btn.textContent = SORT_LABELS[sortMode];
+  btn.title = 'ترتيب اليد: ' + SORT_LABELS[sortMode];
+}
+
 function sortedHand() {
   const h = [...(view.hand || [])];
-  if (sortMode === 'deal') return h;
+  const myTurn = !spectating && view.turn === myId && view.status === 'playing';
+  const playable = new Set(myTurn ? (view.legalMoves || []).map(m => m.tileId) : []);
+  // stable partition: playable first, deal order preserved inside each group
+  const playableFirst = arr => [
+    ...arr.filter(t => playable.has(t.id)),
+    ...arr.filter(t => !playable.has(t.id)),
+  ];
+  if (sortMode === 'deal') return (myTurn && playable.size) ? playableFirst(h) : h;
   const pipsOf = t => t.a + t.b;
   // One shared tie-break for every pip-based mode: heaviest first, then the
   // largest tile (same total) first. Keeps 'pips' and 'playable' visually
@@ -740,7 +905,6 @@ function sortedHand() {
   }
   // 'playable' — a legal move first. Only meaningful on my turn; other players
   // get legalMoves = [] so this degrades to pips order, which is fine.
-  const playable = new Set((view.legalMoves || []).map(m => m.tileId));
   return h.sort((x, y) => (playable.has(y.id) - playable.has(x.id)) || byPips(x, y));
 }
 
@@ -748,8 +912,7 @@ function cycleSort() {
   const i = SORT_MODES.indexOf(sortMode);
   sortMode = SORT_MODES[(i + 1) % SORT_MODES.length];
   try { localStorage.setItem('domino_sort', sortMode); } catch { /* no storage */ }
-  const btn = $('btnSort');
-  if (btn) { btn.textContent = SORT_LABELS[sortMode]; btn.title = 'ترتيب اليد: ' + SORT_LABELS[sortMode]; }
+  paintSortBtn();
   sfx.click();
   renderHand();
 }
@@ -761,7 +924,8 @@ function renderHand() {
   hand.classList.toggle('my-turn', myTurn);
   hand.innerHTML = '';
   const playableIds = new Set(myTurn ? (view.legalMoves || []).map(m => m.tileId) : []);
-  for (const t of sortedHand()) {
+  const handList = sortedHand();
+  for (const t of handList) {
     const el = document.createElement('div');
     el.className = 'tile-h';
     if (newlyDrawnTileId && t.id === newlyDrawnTileId) {
@@ -787,18 +951,35 @@ function renderHand() {
     }
     hand.appendChild(el);
   }
+  // 1.2: "what can I play" as a number, not an inference. Only meaningful on my
+  // turn — during opponents' turns every tile would read as "dead".
+  const cnt = $('handCount');
+  if (cnt) {
+    const playableN = playableIds.size;
+    const deadN = myTurn ? handList.length - playableN : 0;
+    cnt.textContent = myTurn ? `${playableN} متاح · ${deadN} ميت` : '';
+    cnt.classList.toggle('hidden', !myTurn || !handList.length);
+  }
 }
 
 function renderActions() {
   const myTurn = !spectating && view.turn === myId && view.status === 'playing';
   $('btnDraw').classList.toggle('hidden', spectating || !(myTurn && view.canDraw));
-  $('boneyardCount').textContent = `(${view.boneyardCount})`;
+  // 0.13: the boneyard count is a standing HUD chip now — for ~75% of a match the
+  // draw button is hidden, and the pile size is real information the whole time.
+  const chip = $('boneChip');
+  if (chip) {
+    const n = view.boneyardCount ?? 0;
+    chip.classList.toggle('hidden', view.status !== 'playing' || n <= 0);
+    $('boneChipN').textContent = String(n);
+  }
   $('btnPass').classList.toggle('hidden', spectating || !(myTurn && view.canPass));
   // Hint only makes sense when it's my turn AND there is something to suggest.
   $('btnHint').classList.toggle('hidden', !myTurn || (view.legalMoves || []).length === 0);
   const pill = $('endsPill');
   if (view.variant === 'allfives' && view.moves.length) {
     pill.classList.remove('hidden');
+    pill.title = 'مجموع أرقام أطراف السلسلة — لو قابل القسمة على 5 بتكسب نقاط فورًا';
     $('endsTotal').textContent = view.endsTotal;
     pill.classList.toggle('hot', view.endsTotal > 0 && view.endsTotal % 5 === 0);
   } else pill.classList.add('hidden');
@@ -842,14 +1023,21 @@ function renderScoreCard() {
     card.appendChild(row);
   });
   // F4.4: roll each score up from its previous value. Runs AFTER the rows are in
-  // the DOM so the rAF writes land on the live elements.
+  // the DOM so the rAF writes land on the live elements — and (1.7) after a short
+  // delay so the number starts moving when the tile LANDS, not when the state
+  // broadcast arrived ~280ms earlier. The `from` values are snapshotted NOW,
+  // before _scorePrev advances below.
   if (!prefersReducedMotion()) {
-    card.querySelectorAll('.sc-row').forEach((row, i) => {
-      const pid = ranked[i];
-      const to = view.scores[pid] || 0;
-      const from = _scorePrev.get(pid);
-      if (from !== undefined && from !== to) rollNumber(row.querySelector('.sc-pts'), from, to);
-    });
+    const prevSnapshot = ranked.map(pid => _scorePrev.get(pid));
+    setTimeout(() => {
+      if (!view) return;
+      card.querySelectorAll('.sc-row').forEach((row, i) => {
+        const pid = ranked[i];
+        const to = (view.scores?.[pid]) || 0;
+        const from = prevSnapshot[i];
+        if (from !== undefined && from !== to) rollNumber(row.querySelector('.sc-pts'), from, to);
+      });
+    }, 280);
   }
   for (const pid of ranked) _scorePrev.set(pid, view.scores[pid] || 0);
   // Drop stale keys so the map cannot grow across many rooms.
@@ -866,9 +1054,35 @@ function renderScoreCard() {
   }
 }
 
+// The coaching banner (turn instructions) has exactly one writer: renderTurnBanner.
+// Anything that needs to say something ELSE — "pick the green dot", "the server
+// played for you", "you reconnected" — sets an OVERRIDE with a hold, and the
+// canonical line comes back on its own when the hold expires (bug 0.17).
+let bannerOverride = null;
+let bannerHoldTimer = null;
 function setBanner(text, cls) {
+  const el = $('turnBanner');
+  if (!el) return;
   $('turnBannerText').textContent = text;
-  $('turnBanner').className = cls || '';
+  el.className = cls || '';
+}
+/** Say something for `ms`, then restore the normal turn instruction. */
+function setBannerHold(text, cls, ms = 2600) {
+  bannerOverride = { text, cls };
+  setBanner(text, cls);
+  clearTimeout(bannerHoldTimer);
+  bannerHoldTimer = setTimeout(() => {
+    bannerHoldTimer = null;
+    bannerOverride = null;
+    renderTurnBanner();
+  }, ms);
+}
+function clearBannerHold() {
+  if (!bannerOverride) return;
+  bannerOverride = null;
+  clearTimeout(bannerHoldTimer);
+  bannerHoldTimer = null;
+  renderTurnBanner();
 }
 
 // ══════════ F3.3 performance overlay ══════════
@@ -1059,6 +1273,7 @@ function previewEndsTotal(tileId, end) {
 }
 
 function renderTurnBanner() {
+  if (bannerOverride) return;   // a coaching/notice line is holding the banner
   if (spectating) {
     const nm = view.names?.[view.turn] || '';
     setBanner(view.status === 'playing' ? `👁 بتتفرج — دور ${nm}` : '👁 بتتفرج', 'spect');
@@ -1102,8 +1317,11 @@ function updateTurnTimer() {
   if (remainMs <= 0) { wrap.classList.add('hidden'); return; } // server will advance the turn shortly
   const secs = Math.ceil(remainMs / 1000);
   wrap.classList.remove('hidden');
-  wrap.classList.toggle('warn', remainMs <= 10000);
-  wrap.classList.toggle('danger', remainMs <= 5000);
+  // 0.16: the alarm escalation is only for YOUR clock. A 130px red number over
+  // the board while you have no legal move is anxiety with no action available.
+  const mine = view.turn === myId && !spectating;
+  wrap.classList.toggle('warn', mine && remainMs <= 10000);
+  wrap.classList.toggle('danger', mine && remainMs <= 5000);
   // C: conic-gradient ring progress (0–100) read by the CSS
   wrap.style.setProperty('--p', Math.max(0, Math.min(100, (remainMs / view.turnMs) * 100)).toFixed(1));
   $('turnTimerSecs').textContent = secs;
@@ -1230,13 +1448,15 @@ function renderModals() {
     const nhVotes = view.nextHandVotes;
     const nhBtn = $('btnNextHand');
     nhBtn.classList.toggle('hidden', !isHost);
-    if (isHost && nhVotes?.count) nhBtn.textContent = `الجولة التالية (${nhVotes.count}/${nhVotes.humans} يطلبوا)`;
-    else nhBtn.textContent = 'الجولة التالية';
+    // 1.4: the host ACTS (▶), a guest VOTES (✋) — two different verbs that used
+    // to look like the same button.
+    if (isHost && nhVotes?.count) nhBtn.textContent = `▶ الجولة التالية (${nhVotes.count}/${nhVotes.humans} يطلبوا)`;
+    else nhBtn.textContent = '▶ الجولة التالية';
     const nhVoteBtn = $('btnNextHandVote');
     nhVoteBtn.classList.toggle('hidden', isHost);
     if (!isHost) {
       const already = nhVotes?.count ? ' ✓ تم الإرسال' : '';
-      nhVoteBtn.textContent = `أطلب الجولة التالية${nhVotes?.count ? ` (${nhVotes.count}/${nhVotes.humans})` : ''}${already}`;
+      nhVoteBtn.textContent = `✋ أطلب الجولة التالية${nhVotes?.count ? ` (${nhVotes.count}/${nhVotes.humans})` : ''}${already}`;
       nhVoteBtn.disabled = !!nhVotes?.count;
     }
     $('handWait').classList.toggle('hidden', isHost);
@@ -1274,12 +1494,12 @@ function renderModals() {
     const rmBtn = $('btnRematch');
     rmBtn.classList.toggle('hidden', !isHost);
     rmBtn.textContent = rmVotes.length
-      ? `مباراة جديدة (${rmVotes.length}/${humans} وافقوا)`
-      : 'مباراة جديدة';
+      ? `▶ مباراة جديدة (${rmVotes.length}/${humans} وافقوا)`
+      : '▶ مباراة جديدة';
     const rmVoteBtn = $('btnRematchVote');
     rmVoteBtn.classList.toggle('hidden', isHost);
     if (!isHost) {
-      rmVoteBtn.textContent = iVoted ? '✓ طلبت مباراة جديدة' : 'أطلب مباراة جديدة';
+      rmVoteBtn.textContent = iVoted ? '✓ طلبت مباراة جديدة' : '✋ أطلب مباراة جديدة';
       rmVoteBtn.disabled = iVoted;
     }
     // Show WHICH players are in, so the table can see who is holding things up.
@@ -1330,6 +1550,8 @@ function playActionSounds() {
   else if (la.type === 'skip') {
     sfx.pass();
     floatText(la.pid === myId ? '⏰ انتهى وقتك!' : `⏰ ${view.names[la.pid] || 'لاعب'}: انتهى وقته`);
+    // 1.6: name the situation in the banner too — the float alone scrolls away.
+    setBannerHold(la.pid === myId ? '⏰ اتقضى وقتك — اتخطّينا دورك' : `⏰ اتقضى وقت ${view.names[la.pid] || 'اللاعب'}`, '', 3600);
   }
   else if (la.type === 'handEnd') sfx.handWin();
   else if (la.type === 'matchEnd') sfx.matchWin();
@@ -1389,34 +1611,42 @@ function onTileClick(tile, el) {
     el.classList.add('shake'); setTimeout(() => el.classList.remove('shake'), 300);
     return;
   }
-  sfx.select();
-  if (moves[0].end === null) {                    // lead move — play immediately
-    socket.emit('game:play', { tileId: tile.id, end: null });
+  const uniqueEnds = [...new Set(moves.map(m => m.end))];
+  // 1.1: one legal end is not a choice — play it. The old tap-tile → tap-marker
+  // dance cost a tap on the most common move in the game and made a lone marker
+  // look like a button you were missing.
+  if (uniqueEnds.length === 1) {
+    sfx.select();
+    socket.emit('game:play', { tileId: tile.id, end: uniqueEnds[0] });
     selectedTile = null;
+    board.clearMarkers();
+    renderHand();
     return;
   }
   if (selectedTile === tile.id) {
-    // If tile has only 1 legal end, tapping again plays it
-    if (moves.length === 1) {
-      socket.emit('game:play', { tileId: tile.id, end: moves[0].end });
-      selectedTile = null;
-      board.clearMarkers();
-      return;
-    }
     selectedTile = null; board.clearMarkers(); renderHand();
+    clearBannerHold();
     return;
   }
+  sfx.select();
   selectedTile = tile.id;
-  const uniqueEnds = [...new Set(moves.map(m => m.end))];
   const previews = {};
   if (view.variant === 'allfives') {
-    for (const e of uniqueEnds) previews[e] = previewEndsTotal(tile.id, e);
+    for (const e of uniqueEnds) previews[e] = endsDeltaLabel(previewEndsTotal(tile.id, e));
   }
   board.showMarkers(uniqueEnds, view.variant === 'allfives' ? previews : null);
   renderHand();
-  if (uniqueEnds.length > 1) {
-    setBanner('اختر النقطة الخضراء للطرف الذي تريد اللعب عليه!', 'mine');
-  }
+  setBannerHold('اختر الطرف اللي عايز تلعب عليه — النقطة الخضراء', 'mine');
+}
+
+// 1.5: an All-Fives marker badge used to print the raw projected total as "+22",
+// which reads like a bonus. Show the actual change instead, and stay silent when
+// the play is worth nothing.
+function endsDeltaLabel(after) {
+  if (after == null) return null;
+  const before = view?.endsTotal ?? 0;
+  if (after === before) return null;         // "+0" told the player nothing
+  return after > before ? `+${after - before}` : `${before} → ${after}`;
 }
 
 function onMarkerClick(end) {
@@ -1424,27 +1654,55 @@ function onMarkerClick(end) {
   socket.emit('game:play', { tileId: selectedTile, end });
   selectedTile = null;
   board.clearMarkers();
+  clearBannerHold();
   renderHand();
 }
 
-// ── drag & drop: pull a playable tile from the hand and drop it on a board end ──
+// ── drag & drop: hold a playable tile, then drop it on a board end ──
+// 0.14: the hand scrolls horizontally (every tile is `pan-x`), so a touch drag
+// has to be disambiguated from a swipe. Mouse/pen drags start immediately; a
+// touch needs a short HOLD — which is also exactly what the scroller needs us to
+// prove before we steal the gesture.
+const TOUCH_HOLD_MS = 180;
 let tileDrag = null;
 function startTileDrag(e, tile, el) {
   if (e.button !== undefined && e.button !== 0) return;
   if (!view || view.status !== 'playing' || view.turn !== myId) return;
   const moves = (view.legalMoves || []).filter(m => m.tileId === tile.id);
   if (!moves.length) return;
+  const touch = e.pointerType === 'touch';
   // The lead move has no drop target, but the drag must still be tracked: a
   // plain tap reaches endTileDrag → onTileClick, which plays the lead at once.
   // Bailing out here left the first tile of a hand unplayable (tap AND drag dead).
-  tileDrag = { tile, el, startX: e.clientX, startY: e.clientY, moved: false, ghost: null, over: null, noDrop: moves[0].end === null };
-  try { el.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
+  tileDrag = {
+    tile, el, startX: e.clientX, startY: e.clientY, moved: false, ghost: null, over: null,
+    noDrop: moves[0].end === null, armed: !touch, cancelled: false,
+    holdTimer: null,
+  };
+  if (touch) {
+    tileDrag.holdTimer = setTimeout(() => {
+      if (!tileDrag || tileDrag.cancelled) return;
+      armTileDrag();
+    }, TOUCH_HOLD_MS);
+  } else {
+    armTileDrag();
+  }
+  function armTileDrag() {
+    if (!tileDrag) return;
+    tileDrag.armed = true;
+    try { tileDrag.el.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
+    if (navigator.vibrate && vibrationOn()) { try { navigator.vibrate(8); } catch { /* unsupported */ } }
+  }
 }
 function moveTileDrag(e) {
-  if (!tileDrag || tileDrag.noDrop) return;
-  if (!tileDrag.moved && Math.hypot(e.clientX - tileDrag.startX, e.clientY - tileDrag.startY) < 8) return;
-  if (!tileDrag.moved) {
+  if (!tileDrag) return;
+  if (Math.hypot(e.clientX - tileDrag.startX, e.clientY - tileDrag.startY) > 8) {
+    // Not held yet on touch → the user is swiping the hand, let the scroller win.
+    if (!tileDrag.armed) { cancelTileDrag(); return; }
     tileDrag.moved = true;
+  }
+  if (!tileDrag.armed || tileDrag.noDrop || !tileDrag.moved) return;
+  if (!tileDrag.ghost) {
     tileDrag.ghost = document.createElement('div');
     tileDrag.ghost.className = 'drag-ghost';
     tileDrag.ghost.style.backgroundImage = `url(${tileImage(tileDrag.tile.a, tileDrag.tile.b)})`;
@@ -1456,11 +1714,13 @@ function moveTileDrag(e) {
       const uniqueEnds = [...new Set(moves.map(m => m.end))];
       const previews = {};
       if (view.variant === 'allfives') {
-        for (const en of uniqueEnds) previews[en] = previewEndsTotal(tileDrag.tile.id, en);
+        for (const en of uniqueEnds) previews[en] = endsDeltaLabel(previewEndsTotal(tileDrag.tile.id, en));
       }
       board.showMarkers(uniqueEnds, view.variant === 'allfives' ? previews : null);
     }
   }
+  // 0.15 is handled in CSS (`.drag-ghost { translate: -50% -110% }` lifts the
+  // ghost above the fingertip); this only feeds it the raw pointer position.
   tileDrag.ghost.style.transform = `translate(${e.clientX}px, ${e.clientY}px)`;
   const over = board?.endFromPoint?.(e.clientX, e.clientY) ?? null;
   if (over !== tileDrag.over) {
@@ -1468,18 +1728,31 @@ function moveTileDrag(e) {
     board?.highlightEnd?.(over);
   }
 }
+// The browser took the gesture for a scroll — drop everything, play nothing.
+function cancelTileDrag() {
+  const d = tileDrag;
+  tileDrag = null;
+  if (!d) return;
+  clearTimeout(d.holdTimer);
+  d.ghost?.remove();
+  if (board?.controls) board.controls.enabled = true;
+  board?.highlightEnd?.(null);
+}
 function endTileDrag(e) {
   if (!tileDrag) return;
   const d = tileDrag;
   tileDrag = null;
+  clearTimeout(d.holdTimer);
   try { d.el.releasePointerCapture(e.pointerId); } catch { /* noop */ }
   d.ghost?.remove();
   if (board?.controls) board.controls.enabled = true;
   board?.highlightEnd?.(null);
+  if (e.type === 'pointercancel' || d.cancelled) return;   // scrolled away — no tap
   if (d.moved && d.over) {
     socket.emit('game:play', { tileId: d.tile.id, end: d.over });
     selectedTile = null;
     board.clearMarkers();
+    clearBannerHold();
     renderHand();
   } else if (d.moved) {
     // dropped nowhere — clean up the markers we revealed (unless tap-selected)
@@ -1524,29 +1797,44 @@ function initGameUI() {
   $('btnPass').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:pass'); sfx.click(); }); };
   $('btnHint').onclick = requestHint;
   $('btnSort').onclick = cycleSort;
-  $('btnSort').textContent = SORT_LABELS[sortMode];
-  $('btnSort').title = 'ترتيب اليد: ' + SORT_LABELS[sortMode];
-  // btnSettings markup is not shipped yet — guard so a missing
-  // element can never abort initGameUI and orphan every handler after it.
-  const btnSettings = $('btnSettings');
-  if (btnSettings) btnSettings.onclick = () => { openSettings(); sfx.click(); };
+  paintSortBtn();
+  // The in-game gear owns the settings modal. It MUST NOT reuse the home screen's
+  // `#btnSettings` — both screens are up at once and the last bind used to win,
+  // which silently killed the home play-settings toggle (bug 0.1).
+  const btnGameSettings = $('btnGameSettings');
+  if (btnGameSettings) btnGameSettings.onclick = () => { openSettings(); sfx.click(); };
   $('btnNextHand').onclick = () => socket.emit('game:nextHand');
   $('btnRematch').onclick = () => socket.emit('game:rematch');
   $('btnNextHandVote').onclick = () => { socket.emit('game:nextHandVote'); sfx.click(); };
   $('btnRematchVote').onclick = () => { socket.emit('game:rematchVote'); sfx.click(); };
-  $('btnChat').onclick = (e) => {
+  bindEl('btnChat', 'click', (e) => {
     e.stopPropagation();
     chatOpen ? closeChat() : openChat();
-  };
-  $('chatClose').onclick = (e) => {
+  });
+  bindEl('chatClose', 'click', (e) => {
     e.stopPropagation();
     closeChat();
-  };
+  });
+  bindEl('chatScrollPill', 'click', (e) => {
+    e.stopPropagation();
+    scrollChatToBottom();
+    unread = 0;
+    updateBadge();
+  });
+  bindEl('chatMsgs', 'scroll', onChatScroll, { passive: true });
   document.addEventListener('click', (e) => {
-    if (chatOpen && !$('chatDrawer').contains(e.target) && !$('btnChat').contains(e.target)) {
+    const drawer = $('chatDrawer');
+    const fab = $('btnChat');
+    const toasts = $('chatToasts');
+    const onChatUi = (drawer && drawer.contains(e.target))
+      || (fab && fab.contains(e.target))
+      || (toasts && toasts.contains(e.target));
+    if (chatOpen && !onChatUi) {
       closeChat();
-    } else if (emojiPopOpen && !$('emojiPop').contains(e.target) && !$('btnEmoji').contains(e.target)) {
-      closeEmojiPop();
+    } else if (emojiPopOpen) {
+      const pop = $('emojiPop');
+      const emojiBtn = $('btnEmoji');
+      if (pop && !pop.contains(e.target) && !(emojiBtn && emojiBtn.contains(e.target))) closeEmojiPop();
     }
   });
   document.addEventListener('keydown', (e) => {
@@ -1559,23 +1847,31 @@ function initGameUI() {
       return;
     }
     if (e.key === 'Escape') {
-      if (!$('modalLeave').classList.contains('hidden')) {
+      if (!$('modalSettings')?.classList.contains('hidden')) {
+        sfx.click();
+        $('modalSettings').classList.add('hidden');
+      } else if (!$('modalLeave').classList.contains('hidden')) {
         sfx.click();
         closeLeaveConfirm();
       } else if (emojiPopOpen) {
         closeEmojiPop();
       } else if (chatOpen) {
         closeChat();
+      } else if (voicePanelOpen) {
+        closeVoicePanel();
       }
     }
   });
-  $('btnEmoji').onclick = (e) => {
+  bindEl('btnEmoji', 'click', (e) => {
     e.stopPropagation();
     emojiPopOpen ? closeEmojiPop() : openEmojiPop();
-  };
-  $('chatSend').onclick = sendChat;
-  $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
-  $('chatInput').addEventListener('input', updateChatCount);
+  });
+  bindEl('chatSend', 'click', sendChat);
+  bindEl('chatInput', 'keydown', e => { if (e.key === 'Enter') sendChat(); });
+  bindEl('chatInput', 'input', () => {
+    updateChatCount();
+    maybeSendChatTyping();
+  });
   buildChatWidgets();
   updateChatCount();
   const btnFs = $('btnFullscreen');
@@ -1636,13 +1932,16 @@ function openSettings() {
   const modal = $('modalSettings');
   if (!modal) return;
   const rng = $('rngVolume');
-  if (rng) rng.value = String(Math.round((sfx.getVolume?.() ?? 1) * 100));
+  const vol = Math.round((sfx.getVolume?.() ?? 1) * 100);
+  if (rng) rng.value = String(vol);
+  const vv = $('volVal');
+  if (vv) vv.textContent = vol + '%';
   const f2 = $('chkForce2d');
   if (f2) f2.checked = force2d();
   const cf = $('chkConfirm');
   if (cf) cf.checked = confirmEnabled();
   const vb = $('chkVibrate');
-  if (vb) vb.checked = (() => { try { return localStorage.getItem('domino_vibrate') !== '0'; } catch { return true; } })();
+  if (vb) vb.checked = vibrationOn();
   modal.classList.remove('hidden');
 }
 function initSettingsModal() {
@@ -1654,7 +1953,11 @@ function initSettingsModal() {
   });
   const rng = $('rngVolume');
   if (rng) {
-    rng.oninput = () => { sfx.setVolume?.(Number(rng.value) / 100); };
+    rng.oninput = () => {
+      sfx.setVolume?.(Number(rng.value) / 100);
+      const vv = $('volVal');
+      if (vv) vv.textContent = rng.value + '%';
+    };
     rng.onchange = () => sfx.click();
   }
   const f2 = $('chkForce2d');
@@ -1711,6 +2014,7 @@ function updateFullscreenState() {
 
 function sendChat() {
   const inp = $('chatInput');
+  if (!inp || !socket || !roomCode) return;
   const text = inp.value.trim();
   if (!text) return;
   socket.emit('chat:send', { text });
@@ -1732,8 +2036,201 @@ function updateChatCount() {
 }
 
 function sendEmoji(em) {
+  if (!socket || !roomCode) return;
   socket.emit('chat:send', { emoji: em });
   sfx.select();
+}
+
+// Client-side half of the typing throttle; the server throttles again at
+// 1200 ms per socket and excludes the sender from its relay.
+function maybeSendChatTyping() {
+  if (!socket || !roomCode || !chatOpen) return;
+  const now = Date.now();
+  if (now - chatTypingSentAt < CHAT_TYPING_THROTTLE_MS) return;
+  chatTypingSentAt = now;
+  try { socket.emit('chat:typing'); } catch { /* disconnected */ }
+}
+
+// ── typing indicator ──
+function onChatTyping(t) {
+  if (!t || typeof t !== 'object' || !roomCode) return;
+  const pid = t.pid ? String(t.pid) : '';
+  if (!pid || pid === myId) return;
+  const name = (typeof t.name === 'string' && t.name.trim()) ? t.name.trim() : 'لاعب';
+  const prev = chatTypers.get(pid);
+  if (prev?.timer) clearTimeout(prev.timer);
+  const timer = setTimeout(() => {
+    chatTypers.delete(pid);
+    renderChatTyping();
+  }, CHAT_TYPING_TTL_MS);
+  chatTypers.set(pid, { name, timer });
+  renderChatTyping();
+}
+
+function clearChatTyping(pid) {
+  const entry = chatTypers.get(pid);
+  if (!entry) return;
+  if (entry.timer) clearTimeout(entry.timer);
+  chatTypers.delete(pid);
+  renderChatTyping();
+}
+
+function clearChatTypers() {
+  for (const entry of chatTypers.values()) {
+    if (entry.timer) clearTimeout(entry.timer);
+  }
+  chatTypers.clear();
+  renderChatTyping();
+}
+
+function renderChatTyping() {
+  const el = $('chatTyping');
+  if (!el) return;
+  const names = [...chatTypers.values()].map(v => v.name);
+  let text = '';
+  if (names.length === 1) text = `${names[0]} بيكتب…`;
+  else if (names.length > 1) text = `${names[0]} وآخر بيكتبوا…`;
+  el.textContent = text;
+  el.classList.toggle('hidden', !text);
+}
+
+// ── rate-limit hint (inline, auto-hides, never a modal) ──
+function clearChatHint() {
+  clearTimeout(chatHintTimer);
+  chatHintTimer = null;
+  const hint = $('chatHint');
+  if (hint) {
+    hint.textContent = '';
+    hint.classList.add('hidden');
+  }
+}
+
+function onChatLimited(payload) {
+  if (!roomCode) return;
+  const hint = $('chatHint');
+  if (!hint) return;
+  const msg = (payload && typeof payload.message === 'string' && payload.message.trim())
+    ? payload.message.trim()
+    : 'استنى شوية — بتبعت رسايل كتير أوي.';
+  hint.textContent = msg;
+  hint.classList.remove('hidden');
+  clearTimeout(chatHintTimer);
+  chatHintTimer = setTimeout(() => hint.classList.add('hidden'), 3000);
+}
+
+// ── transcript helpers ──
+function chatBox() { return $('chatMsgs'); }
+
+// `msg.at` drives every time comparison. Local wall-clock time is only used to
+// LABEL a timestamp for display.
+function chatDayKey(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function chatDayLabel(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  const startOf = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((startOf(now) - startOf(d)) / 86400000);
+  if (diffDays === 0) return 'النهارده';
+  if (diffDays === 1) return 'امبارح';
+  try {
+    return d.toLocaleDateString('ar-EG', {
+      day: 'numeric',
+      month: 'long',
+      ...(d.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {}),
+    });
+  } catch { return d.toLocaleDateString(); }
+}
+
+function chatTimeLabel(ts) {
+  try { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+  catch { return ''; }
+}
+
+function isSystemMsg(msg) {
+  return !!msg && !msg.pid && msg.from === 'النظام';
+}
+
+function isChatPinned() {
+  const box = chatBox();
+  if (!box) return true;
+  return box.scrollHeight - box.scrollTop - box.clientHeight < 48;
+}
+
+function scrollChatToBottom() {
+  const box = chatBox();
+  if (!box) return;
+  box.scrollTop = box.scrollHeight;
+  chatScrolledUp = false;
+}
+
+function onChatScroll() {
+  const box = chatBox();
+  if (!box) return;
+  const pinned = isChatPinned();
+  chatScrolledUp = !pinned;
+  if (pinned && unread) {
+    unread = 0;
+    updateBadge();
+  }
+}
+
+// Bounded dedupe set: ids are shared by history and live events, so the window
+// only has to outlive the server's 80-message log.
+function markChatSeen(mid) {
+  if (!mid) return false;
+  if (chatSeen.has(mid)) return true;
+  chatSeen.add(mid);
+  chatSeenOrder.push(mid);
+  if (chatSeenOrder.length > CHAT_SEEN_MAX) {
+    const old = chatSeenOrder.shift();
+    chatSeen.delete(old);
+  }
+  return false;
+}
+
+function clearChatUnreadDivider() {
+  const box = chatBox();
+  if (box) box.querySelectorAll('.chat-unread').forEach(el => el.remove());
+  chatUnreadDividerShown = false;
+}
+
+function resetChatTranscript() {
+  const box = chatBox();
+  if (box) box.innerHTML = '';
+  chatSeen.clear();
+  chatSeenOrder = [];
+  chatLastAt = 0;
+  chatLastWho = '';
+  chatLastDay = '';
+  chatLastWasUser = false;
+  chatUnreadDividerShown = false;
+  chatScrolledUp = false;
+  unread = 0;
+  clearChatTypers();
+  clearChatHint();
+  // Only paint the empty placeholder while a room is attached; teardown must
+  // leave the (hidden) transcript genuinely empty.
+  if (roomCode) renderChatEmpty();
+  updateBadge();
+}
+
+// Full per-room chat cleanup: drawer closed, transcript/typing/unread gone,
+// body gate off so nothing floats over the home screen.
+function endChatSession() {
+  closeChat();
+  resetChatTranscript();
+  // A half-typed line must not leak into the next room.
+  const inp = $('chatInput');
+  if (inp) {
+    inp.value = '';
+    updateChatCount();
+  }
+  document.body.classList.remove('in-room');
+  const chip = $('chatRoomChip');
+  if (chip) chip.textContent = 'غرفة ----';
 }
 
 function buildChatWidgets() {
@@ -1760,7 +2257,11 @@ function buildChatWidgets() {
       chip.type = 'button';
       chip.className = 'chat-chip';
       chip.textContent = phrase;
-      chip.onclick = () => { socket.emit('chat:send', { text: phrase }); sfx.select(); };
+      chip.onclick = () => {
+        if (!socket || !roomCode) return;
+        socket.emit('chat:send', { text: phrase });
+        sfx.select();
+      };
       phrases.appendChild(chip);
     }
     pop.appendChild(phrases);
@@ -1792,6 +2293,14 @@ function isEmojiOnly(s) {
   return !!s && !!EMOJI_ONLY_RE && EMOJI_ONLY_RE.test(s);
 }
 
+// First whole character for an avatar chip. `charAt(0)` split astral emoji
+// (the server prefixes spectator names with "👁 ") into a lone high surrogate,
+// which painted as U+FFFD — take the full code point instead.
+function avatarGlyph(name) {
+  const s = String(name || '؟').trim();
+  return (Array.from(s)[0] || '؟').toUpperCase();
+}
+
 function isMineMsg(msg) {
   return msg.pid ? msg.pid === myId : msg.from === myName;
 }
@@ -1806,14 +2315,16 @@ function chatColor(pid) {
 }
 
 function openChat() {
+  // Chat only exists for a room attachment; the FAB is hidden outside one.
+  if (!roomCode) return;
   chatOpen = true;
+  closeVoicePanel();      // one floating panel at a time, same corner
   $('chatDrawer')?.classList.remove('hidden');
   closeEmojiPop();
   renderChatEmpty();
   unread = 0;
   updateBadge();
-  const box = $('chatMsgs');
-  if (box) box.scrollTop = box.scrollHeight;
+  scrollChatToBottom();
   setTimeout(() => $('chatInput')?.focus(), 80);
 }
 
@@ -1821,6 +2332,11 @@ function closeChat() {
   chatOpen = false;
   $('chatDrawer')?.classList.add('hidden');
   closeEmojiPop();
+  // A new closed period gets a fresh "رسائل جديدة" divider; the old one has
+  // served its purpose once the user has seen it.
+  clearChatUnreadDivider();
+  chatScrolledUp = false;
+  updateBadge();
 }
 
 function openEmojiPop() {
@@ -1848,30 +2364,65 @@ function renderChatEmpty() {
   box.appendChild(el);
 }
 
-function appendChatMsg(msg) {
-  const box = $('chatMsgs');
-  if (!box) return;
-  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 48;
+// Draw one message. `opts.historical` renders a chat:history entry without any
+// live side effects (no unread bump, no divider, no auto-scroll).
+function appendChatMsg(msg, opts = {}) {
+  const box = chatBox();
+  if (!box || !msg || typeof msg !== 'object') return;
+  const historical = opts.historical === true;
+  const mine = isMineMsg(msg);
+  const sys = isSystemMsg(msg);
+  const atNum = Number(msg.at);
+  const at = Number.isFinite(atNum) ? atNum : Date.now();
+  const day = chatDayKey(at);
+  const who = msg.pid || ('name:' + (msg.from || ''));
+
+  // Read the pinned state BEFORE the DOM grows.
+  const pinned = isChatPinned();
   box.querySelector('.chat-empty')?.remove();
 
-  const mine = isMineMsg(msg);
-  const sys = !msg.pid && msg.from === 'النظام';
+  // ── day separator: only when the calendar day (derived from msg.at) changes ──
+  if (chatLastDay && day !== chatLastDay) {
+    const sep = document.createElement('div');
+    sep.className = 'chat-day';
+    sep.textContent = chatDayLabel(at);
+    box.appendChild(sep);
+    chatLastWasUser = false;
+    chatLastWho = '';
+  }
+  chatLastDay = day;
 
   if (sys) {
     const el = document.createElement('div');
     el.className = 'chat-sys';
     el.textContent = msg.text || '';
     box.appendChild(el);
+    chatLastWasUser = false;
+    chatLastWho = '';
+    chatLastAt = at;
   } else {
-    const prev = box.lastElementChild;
-    const grouped = !!prev && prev.classList.contains(mine ? 'mine' : 'other')
-      && prev.dataset.pid === (msg.pid || '')
-      && Date.now() - (Number(prev.dataset.at) || 0) < 3 * 60 * 1000;
+    // 3-minute grouping compares server timestamps — never Date.now().
+    const delta = at - chatLastAt;
+    let grouped = chatLastWasUser && chatLastWho === who && delta >= 0 && delta < CHAT_GROUP_MS;
+
+    // "New messages" divider goes before the first message that arrived while
+    // the drawer was closed (day separator, when present, stays above it). It
+    // also restarts grouping so that first unread message shows its sender.
+    if (!historical && !mine && !chatOpen && !chatUnreadDividerShown) {
+      const div = document.createElement('div');
+      div.className = 'chat-unread';
+      div.textContent = 'رسائل جديدة';
+      box.appendChild(div);
+      chatUnreadDividerShown = true;
+      grouped = false;
+    }
 
     const row = document.createElement('div');
     row.className = 'chat-row ' + (mine ? 'mine' : 'other') + (grouped ? ' grouped' : '');
     row.dataset.pid = msg.pid || '';
-    row.dataset.at = String(msg.at || Date.now());
+    row.dataset.who = who;
+    row.dataset.at = String(at);
+    if (msg.pid && voiceSpeaking.has(String(msg.pid))) row.classList.add('voice-speaking');
 
     const col = document.createElement('div');
     col.className = 'chat-col';
@@ -1879,7 +2430,7 @@ function appendChatMsg(msg) {
     if (!grouped) {
       const meta = document.createElement('span');
       meta.className = 'chat-meta';
-      const timeStr = new Date(msg.at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const timeStr = chatTimeLabel(at);
       if (mine) {
         meta.textContent = timeStr;
       } else {
@@ -1908,16 +2459,35 @@ function appendChatMsg(msg) {
       const rgb = chatColor(msg.pid);
       const av = document.createElement('span');
       av.className = 'chat-av';
-      av.textContent = (msg.from || '؟').trim().charAt(0).toUpperCase();
+      av.textContent = avatarGlyph(msg.from);
       av.style.setProperty('--av-bg', 'rgba(' + rgb + ',.18)');
       av.style.setProperty('--av-fg', 'rgb(' + rgb + ')');
       row.appendChild(av);
     }
     row.appendChild(col);
     box.appendChild(row);
+
+    chatLastWasUser = true;
+    chatLastWho = who;
+    chatLastAt = at;
   }
 
-  if (atBottom || (mine && !sys)) box.scrollTop = box.scrollHeight;
+  if (historical) return;
+
+  // ── scroll + unread ──
+  if (chatOpen) {
+    if (pinned || (mine && !sys)) {
+      scrollChatToBottom();
+      if (unread) { unread = 0; updateBadge(); }
+    } else {
+      chatScrolledUp = true;
+      unread++;
+      updateBadge();
+    }
+  } else {
+    unread++;
+    updateBadge();
+  }
 }
 
 function showChatToast(msg) {
@@ -1938,6 +2508,8 @@ function showChatToast(msg) {
     const round = document.createElement('button');
     round.type = 'button';
     round.className = 'chat-toast emoji-toast' + (mine ? ' mine' : '');
+    round.dataset.pid = msg.pid || '';
+    if (msg.pid && voiceSpeaking.has(String(msg.pid))) round.classList.add('voice-speaking');
     round.title = (mine ? 'أنت' : (msg.from || '')) + ' · ' + (msg.emoji || (msg.text || '').trim());
     round.addEventListener('click', openChat);
     const em = document.createElement('span');
@@ -1955,13 +2527,15 @@ function showChatToast(msg) {
   const toast = document.createElement('button');
   toast.type = 'button';
   toast.className = 'chat-toast' + (mine ? ' mine' : '');
+  toast.dataset.pid = msg.pid || '';
+  if (msg.pid && voiceSpeaking.has(String(msg.pid))) toast.classList.add('voice-speaking');
   toast.addEventListener('click', openChat);
 
   const av = document.createElement('span');
   av.className = 'chat-av';
   av.style.setProperty('--av-bg', 'rgba(' + rgb + ',.18)');
   av.style.setProperty('--av-fg', 'rgb(' + rgb + ')');
-  av.textContent = (msg.from || '؟').trim().charAt(0).toUpperCase();
+  av.textContent = avatarGlyph(msg.from);
   toast.appendChild(av);
 
   const body = document.createElement('span');
@@ -1992,24 +2566,75 @@ function showChatToast(msg) {
   }, 5000);
 }
 
+// chat:history — unicast right after room:create / room:join. Rebuild the whole
+// transcript in server order; ids already rendered are skipped so a live
+// chat:msg that raced ahead of the replay is never drawn twice.
+function onChatHistory(payload) {
+  if (!payload || typeof payload !== 'object' || !roomCode) return;
+  if (payload.code && payload.code !== roomCode) return;
+  const list = Array.isArray(payload.messages) ? payload.messages : [];
+  resetChatTranscript();
+  for (const m of list) {
+    if (!m || typeof m !== 'object') continue;
+    if (markChatSeen(m.mid)) continue;
+    appendChatMsg(m, { historical: true });
+  }
+  renderChatEmpty();
+  if (chatOpen) scrollChatToBottom();
+  updateBadge();
+}
+
 function onChatMsg(msg) {
+  if (!msg || typeof msg !== 'object') return;
+  if (!roomCode) return;                 // late event after teardown
+  if (markChatSeen(msg.mid)) return;     // already painted from history
   showChatToast(msg);
   appendChatMsg(msg);
-  if (msg.pid && msg.pid !== myId) sfx.chatPop();
-  if (!chatOpen) {
-    unread++;
-    updateBadge();
+  // Their message landed — stop showing their typing pulse.
+  if (msg.pid) clearChatTyping(msg.pid);
+  // 1.6: timeout force-skip / auto-draw / auto-pass arrive as a system chat line
+  // plus a raw state change. These are the exact moments a player most needs an
+  // explanation, so they also get a held banner instead of a silent jump.
+  if (isSystemMsg(msg) && /^⏰/.test(msg.text || '')) {
+    const mine = msg.text.includes(myName || '\u0000');
+    setBannerHold(mine ? `⏰ ${msg.text} — اتقضى وقتك` : msg.text, '', 4200);
   }
+  if (msg.pid && msg.pid !== myId) sfx.chatPop();
 }
 
 function updateBadge() {
+  // FAB badge = unread while the drawer is closed. While it is open the
+  // in-transcript scroll pill carries the same count instead.
   const badge = $('chatBadge');
-  if (!badge) return;
-  badge.textContent = unread > 9 ? '9+' : String(unread);
-  badge.classList.toggle('hidden', !unread);
+  if (badge) {
+    badge.textContent = unread > 9 ? '9+' : String(unread);
+    badge.classList.toggle('hidden', !unread || chatOpen);
+  }
+  const pill = $('chatScrollPill');
+  if (pill) {
+    const show = chatOpen && unread > 0 && chatScrolledUp;
+    pill.classList.toggle('hidden', !show);
+    const count = $('chatScrollPillCount');
+    if (count) count.textContent = unread > 9 ? '9+' : String(unread);
+  }
 }
 
 // ══════════ effects ══════════
+// A transient, screen-centred notice (connection state, share confirmation).
+// Distinct from floatText (score pops on the board) and from chat toasts.
+let toastTimer = null;
+function toast(txt, ms = 2200) {
+  const layer = $('toastLayer');
+  if (!layer) return;
+  layer.innerHTML = '';
+  const el = document.createElement('div');
+  el.className = 'toast-msg';
+  el.textContent = txt;
+  layer.appendChild(el);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 320); }, ms);
+}
+
 function floatText(txt, isEmoji = false) {
   const layer = $('floatLayer');
   const el = document.createElement('div');
@@ -2101,14 +2726,909 @@ function emit(event, payload) {
   return new Promise(resolve => socket.emit(event, payload, resolve));
 }
 
+// ══════════ voice UI ══════════
+// Thin, defensive presentation layer over js/voice.js. The engine owns capture,
+// signaling and the Arabic failure strings. Everything here is idempotent
+// rendering; no hook, click or teardown path may throw into a socket callback
+// or abort boot, and nothing calls getUserMedia until the user taps the mic.
+const VOICE_AR = Object.freeze({
+  noEngine: 'الصوت مش متاح دلوقتي.',
+  unsupported: 'الصوت مش مدعوم في المتصفح ده.',
+  insecure: 'الصوت محتاج اتصال آمن (HTTPS).',
+  noRoom: 'ادخل غرفة الأول عشان تشغّل الصوت.',
+  requesting: 'بنطلب إذن الميكروفون…',
+  connecting: 'بنتوصل باللاعبين…',
+  live: 'صوتك شغال — الكل بيسمعك.',
+  muted: 'أنت مكتوم — المايك مقفول.',
+  hostMuted: 'المضيف كتم صوتك.',
+  pttIdle: 'اضغط مطولاً على المايك أو على V عشان تتكلم.',
+  pttLive: 'بتتكلم دلوقتي — سيب الزرار عشان تقفل.',
+  idle: 'الصوت مقفول — اضغط المايك عشان تدخل.',
+  failed: 'الصوت اتوقف — جرّب تاني.',
+  autoplay: 'المتصفح قافل صوت اللاعبين — دوس ▶ عشان تسمعهم.',
+  spectator: 'المتفرجين ميعرفوش يشاركوا في الصوت.',
+  pttLocked: 'اقفل وضع PTT الأول عشان تستخدم الكتم.',
+});
+
+const VOICE_SPEAKER_SVG = '<svg class="voice-spk-on" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>'
+  + '<svg class="voice-spk-off" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>';
+
+function voiceGuard(fn) {
+  try {
+    const result = fn();
+    if (result && typeof result.catch === 'function') result.catch(() => {});
+  } catch (err) {
+    console.warn('[voice] ui hook failed:', err?.message || err);
+  }
+}
+
+function ensureVoice() {
+  if (voiceEngine) return voiceEngine;
+  if (voiceInitFailed || !socket) return null;
+  try {
+    voiceEngine = new VoiceChat(socket, {
+      onSelf: (snapshot) => voiceGuard(() => onVoiceSelf(snapshot)),
+      onPeers: (list) => voiceGuard(() => onVoicePeers(list)),
+      onSpeaking: (pid, on) => voiceGuard(() => onVoiceSpeaking(pid, on)),
+      onError: (message) => voiceGuard(() => onVoiceError(message)),
+      onInfo: (message) => voiceGuard(() => onVoiceInfo(message)),
+    });
+    try { voiceEngine.setPushToTalk(voicePttPref); } catch { /* local pref only */ }
+    return voiceEngine;
+  } catch (err) {
+    voiceInitFailed = true;
+    console.warn('[voice] engine unavailable:', err?.message || err);
+    return null;
+  }
+}
+
+function voiceBlockedReason() {
+  if (!voiceEngine || voiceInitFailed) return VOICE_AR.noEngine;
+  try {
+    if (!voiceEngine.supported) return VOICE_AR.unsupported;
+    if (!voiceEngine.secure) return VOICE_AR.insecure;
+  } catch {
+    return VOICE_AR.noEngine;
+  }
+  return '';
+}
+
+function voiceStatusInfo() {
+  if (spectating) return { text: VOICE_AR.spectator, tone: 'danger' };
+  if (!roomCode) return { text: VOICE_AR.noRoom, tone: '' };
+  const blocked = voiceBlockedReason();
+  if (blocked) return { text: blocked, tone: 'danger' };
+  if (voiceSelf.status === 'requesting') return { text: VOICE_AR.requesting, tone: 'busy' };
+  if (voiceSelf.status === 'connecting') return { text: VOICE_AR.connecting, tone: 'busy' };
+  if (voiceSelf.status === 'failed') return { text: voiceSelf.error || VOICE_AR.failed, tone: 'danger' };
+  if (voiceSelf.hostMuted) return { text: VOICE_AR.hostMuted, tone: 'danger' };
+  if (voiceSelf.joined) {
+    if (voicePeerList.some(p => p.playBlocked)) return { text: VOICE_AR.autoplay, tone: 'warn' };
+    if (voicePttPref) {
+      if (voiceSelf.speaking) return { text: VOICE_AR.pttLive, tone: 'live' };
+      if (voicePttDown) return { text: 'المايك مفتوح — اتكلم.', tone: 'live' };
+      return { text: VOICE_AR.pttIdle, tone: '' };
+    }
+    if (voiceSelf.muted) return { text: VOICE_AR.muted, tone: 'warn' };
+    return { text: VOICE_AR.live, tone: 'live' };
+  }
+  return { text: VOICE_AR.idle, tone: '' };
+}
+
+function voiceSetText(id, text) {
+  const el = $(id);
+  if (el) el.textContent = text;
+}
+
+function voiceBadge(text, tone) {
+  const el = document.createElement('span');
+  el.className = 'voice-badge' + (tone ? ' ' + tone : '');
+  el.textContent = text;
+  return el;
+}
+
+function renderVoiceBadges(container, items) {
+  if (!container) return;
+  container.innerHTML = '';
+  for (const [text, tone] of items) container.appendChild(voiceBadge(text, tone));
+}
+
+function voiceNameFallback(pid) {
+  const peer = voicePeerList.find(p => String(p.id) === String(pid));
+  if (peer && peer.name) return peer.name;
+  const fromView = view?.names?.[pid];
+  if (fromView) return fromView;
+  const fromLobby = lastLobbyState?.players?.find(p => String(p.id) === String(pid));
+  if (fromLobby && fromLobby.name) return fromLobby.name;
+  return 'لاعب';
+}
+
+function voiceSelfKey() {
+  return myId === null || myId === undefined ? '' : String(myId);
+}
+
+function onVoiceSelf(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return;
+  const wasLive = voiceLiveSeen;
+  voiceSelf = {
+    joined: snapshot.joined === true,
+    muted: snapshot.muted === true,
+    hostMuted: snapshot.hostMuted === true,
+    speaking: snapshot.speaking === true,
+    status: typeof snapshot.status === 'string' ? snapshot.status : 'idle',
+    error: typeof snapshot.error === 'string' ? snapshot.error : null,
+  };
+  voiceLiveSeen = voiceSelf.joined && voiceSelf.status === 'live';
+  if (voiceLiveSeen && !wasLive) refreshVoiceDevices();
+  const selfKey = voiceSelfKey();
+  if (selfKey && voiceSelf.speaking) voiceSpeaking.add(selfKey);
+  else if (selfKey) voiceSpeaking.delete(selfKey);
+  renderVoiceUI();
+}
+
+function onVoicePeers(list) {
+  voicePeerList = Array.isArray(list)
+    ? list.filter(p => p && typeof p === 'object' && p.id !== null && p.id !== undefined)
+    : [];
+  const ids = new Set(voicePeerList.map(p => String(p.id)));
+  for (const peer of voicePeerList) {
+    const pid = String(peer.id);
+    if (peer.speaking) voiceSpeaking.add(pid);
+    else voiceSpeaking.delete(pid);
+  }
+  const selfKey = voiceSelfKey();
+  for (const pid of Array.from(voiceSpeaking)) {
+    if (pid === selfKey) continue;
+    if (!ids.has(pid)) voiceSpeaking.delete(pid);
+  }
+  applyVoiceSpeakingToDom();
+  renderVoiceUI();
+}
+
+function onVoiceSpeaking(pid, on) {
+  const id = pid === null || pid === undefined ? '' : String(pid);
+  if (!id) return;
+  if (on) voiceSpeaking.add(id);
+  else voiceSpeaking.delete(id);
+  applyVoiceSpeakingToDom();
+  renderVoiceUI();
+}
+
+function onVoiceError(message) {
+  if (typeof message !== 'string' || !message.trim()) return;
+  toast('🎙 ' + message.trim());
+  renderVoiceUI();
+}
+
+function onVoiceInfo(message) {
+  if (typeof message !== 'string' || !message.trim()) return;
+  toast('🎙 ' + message.trim());
+  renderVoiceUI();
+}
+
+// Paint (or clear) the speaking ring on opponent cards, lobby rows, chat rows,
+// avatars and toasts. Elements are matched by dataset.pid, so a missing row is
+// simply skipped — chat that has scrolled out of the DOM cannot break this.
+function applyVoiceSpeakingToDom() {
+  try {
+    document.querySelectorAll('.voice-speaking').forEach(el => el.classList.remove('voice-speaking'));
+    const mark = (selector) => {
+      document.querySelectorAll(selector).forEach(el => {
+        const pid = el.dataset ? el.dataset.pid : '';
+        if (pid && voiceSpeaking.has(String(pid))) el.classList.add('voice-speaking');
+      });
+    };
+    mark('#opponents .opp-card');
+    mark('#chatMsgs .chat-row');
+    mark('#chatToasts .chat-toast');
+    mark('#lobbyPlayers li');
+    mark('#voicePeers .voice-peer-row');
+    const selfKey = voiceSelfKey();
+    if (selfKey && voiceSpeaking.has(selfKey)) $('voiceSelf')?.classList.add('voice-speaking');
+    if (voiceSelf.speaking) $('voiceSelf')?.classList.add('voice-speaking');
+  } catch (err) {
+    console.warn('[voice] speaking paint failed:', err?.message || err);
+  }
+}
+
+function createVoicePeerRow(pid) {
+  const row = document.createElement('div');
+  row.className = 'voice-peer-row';
+  row.dataset.pid = pid;
+
+  const avatar = document.createElement('span');
+  avatar.className = 'voice-avatar';
+  avatar.setAttribute('aria-hidden', 'true');
+
+  const who = document.createElement('div');
+  who.className = 'voice-who';
+  const nameLine = document.createElement('span');
+  nameLine.className = 'voice-name-line';
+  const conn = document.createElement('span');
+  conn.className = 'voice-conn';
+  conn.dataset.conn = 'new';
+  const name = document.createElement('span');
+  name.className = 'voice-name';
+  nameLine.appendChild(conn);
+  nameLine.appendChild(name);
+  const badges = document.createElement('span');
+  badges.className = 'voice-badges';
+  who.appendChild(nameLine);
+  who.appendChild(badges);
+
+  const volWrap = document.createElement('label');
+  volWrap.className = 'voice-vol';
+  const vol = document.createElement('input');
+  vol.type = 'range';
+  vol.min = '0';
+  vol.max = '100';
+  vol.step = '5';
+  vol.value = '100';
+  vol.className = 'voice-vol-range';
+  vol.dir = 'ltr';
+  vol.setAttribute('aria-label', 'مستوى صوت اللاعب');
+  volWrap.appendChild(vol);
+
+  const mute = document.createElement('button');
+  mute.type = 'button';
+  mute.className = 'voice-peer-mute';
+  mute.setAttribute('aria-pressed', 'false');
+  mute.innerHTML = VOICE_SPEAKER_SVG;
+
+  row.appendChild(avatar);
+  row.appendChild(who);
+  row.appendChild(volWrap);
+  row.appendChild(mute);
+
+  vol.addEventListener('input', () => {
+    try {
+      const engine = ensureVoice();
+      if (engine) engine.setPeerVolume(pid, Number(vol.value) / 100);
+    } catch (err) {
+      console.warn('[voice] peer volume failed:', err?.message || err);
+    }
+  });
+  mute.addEventListener('click', () => {
+    try {
+      const engine = ensureVoice();
+      if (!engine) return;
+      engine.setPeerMuted(pid, !mute.classList.contains('on'));
+      sfx.click();
+    } catch (err) {
+      console.warn('[voice] peer mute failed:', err?.message || err);
+    }
+  });
+
+  return { row, avatar, conn, name, badges, vol, mute };
+}
+
+function renderVoicePeers() {
+  const wrap = $('voicePeers');
+  if (!wrap) return;
+  const ids = new Set();
+  for (const peer of voicePeerList) {
+    const pid = String(peer.id);
+    ids.add(pid);
+    let entry = voicePeerRows.get(pid);
+    if (!entry) {
+      entry = createVoicePeerRow(pid);
+      voicePeerRows.set(pid, entry);
+      wrap.appendChild(entry.row);
+    }
+    const name = typeof peer.name === 'string' && peer.name.trim()
+      ? peer.name.trim()
+      : voiceNameFallback(pid);
+    entry.name.textContent = name;
+    entry.avatar.textContent = name.trim().charAt(0).toUpperCase() || '؟';
+
+    const items = [];
+    if (peer.hostMuted) items.push(['المضيف كتمه', 'danger']);
+    else if (peer.muted) items.push(['مكتوم', 'muted']);
+    if (peer.localMuted) items.push(['مكتوم عندك', 'local']);
+    renderVoiceBadges(entry.badges, items);
+
+    const conn = peer.connection === 'connected' || peer.connection === 'connecting' || peer.connection === 'failed'
+      ? peer.connection
+      : 'new';
+    entry.conn.dataset.conn = conn;
+    entry.conn.title = conn === 'connected' ? 'متصل'
+      : conn === 'connecting' ? 'بيتصل…'
+        : conn === 'failed' ? 'تعذر الاتصال'
+          : 'لسه بيبدأ';
+
+    const localMuted = peer.localMuted === true;
+    entry.mute.classList.toggle('on', localMuted);
+    entry.mute.setAttribute('aria-pressed', String(localMuted));
+    entry.mute.title = localMuted ? `تشغيل صوت ${name}` : `كتم صوت ${name} عندك`;
+    entry.mute.setAttribute('aria-label', entry.mute.title);
+
+    const volume = Number.isFinite(Number(peer.volume)) ? Math.min(1, Math.max(0, Number(peer.volume))) : 1;
+    const pct = Math.round(volume * 100);
+    if (document.activeElement !== entry.vol) entry.vol.value = String(pct);
+    entry.vol.title = `مستوى صوت ${name}: ${pct}%`;
+    entry.vol.setAttribute('aria-label', `مستوى صوت ${name}`);
+  }
+  for (const [pid, entry] of Array.from(voicePeerRows)) {
+    if (!ids.has(pid)) {
+      entry.row.remove();
+      voicePeerRows.delete(pid);
+    }
+  }
+  const orderKey = voicePeerList.map(p => String(p.id)).join('|');
+  if (orderKey !== voicePeerOrderKey) {
+    voicePeerOrderKey = orderKey;
+    for (const peer of voicePeerList) {
+      const entry = voicePeerRows.get(String(peer.id));
+      if (entry) wrap.appendChild(entry.row);
+    }
+  }
+}
+
+function renderVoiceDevices() {
+  const row = $('voiceDeviceRow');
+  const select = $('voiceDevice');
+  if (!row || !select) return;
+  const show = voiceSelf.joined && voiceDevices.length > 0;
+  row.classList.toggle('hidden', !show);
+  if (!show) return;
+  const key = voiceDevices.map(d => d.deviceId).join('|');
+  if (key !== voiceDeviceKey) {
+    voiceDeviceKey = key;
+    select.innerHTML = '';
+    const def = document.createElement('option');
+    def.value = 'default';
+    def.textContent = 'الميكروفون الافتراضي';
+    select.appendChild(def);
+    for (const device of voiceDevices) {
+      const opt = document.createElement('option');
+      opt.value = device.deviceId;
+      opt.textContent = device.label || 'ميكروفون';
+      select.appendChild(opt);
+    }
+  }
+  if (document.activeElement !== select) {
+    const has = Array.from(select.options).some(o => o.value === voiceSelectedDevice);
+    select.value = has ? voiceSelectedDevice : 'default';
+  }
+}
+
+async function refreshVoiceDevices() {
+  if (voiceDeviceBusy) return;
+  const engine = ensureVoice();
+  if (!engine) return;
+  voiceDeviceBusy = true;
+  try {
+    const list = await engine.listInputDevices();
+    voiceDevices = Array.isArray(list) ? list : [];
+    renderVoiceDevices();
+  } catch (err) {
+    console.warn('[voice] device list failed:', err?.message || err);
+  } finally {
+    voiceDeviceBusy = false;
+  }
+}
+
+function renderVoiceStrip() {
+  const strip = $('voiceStrip');
+  if (!strip) return;
+  const show = !!roomCode && !spectating;
+  strip.classList.toggle('hidden', !show);
+  if (!show) return;
+  const busy = voiceSelf.status === 'requesting' || voiceSelf.status === 'connecting';
+  let text;
+  if (busy) {
+    text = voiceSelf.status === 'requesting' ? VOICE_AR.requesting : VOICE_AR.connecting;
+  } else if (voiceSelf.status === 'failed' && !voiceSelf.joined) {
+    text = voiceSelf.error || VOICE_AR.failed;
+  } else {
+    const names = [];
+    if (voiceSelf.joined) names.push('أنت');
+    for (const peer of voicePeerList) names.push(peer.name || voiceNameFallback(peer.id));
+    if (names.length > 1) text = '🎙 في الصوت: ' + names.join('، ');
+    else if (names.length === 1) text = '🎙 أنت في الصوت لوحدك — استنى حد يدخل';
+    else text = 'اتكلم مع اللاعبين بالصوت';
+  }
+  const reason = voiceBlockedReason();
+  if (reason) text = reason;   // unsupported / insecure is visible, not just a tooltip
+  voiceSetText('voiceStripText', text);
+
+  const btn = $('voiceStripBtn');
+  if (!btn) return;
+  btn.disabled = !!(reason || busy);
+  btn.classList.toggle('on', voiceSelf.joined && !voiceSelf.muted && !voiceSelf.hostMuted && !voicePttPref);
+  if (voiceSelf.hostMuted) btn.textContent = 'المضيف كتمك';
+  else if (voiceSelf.joined && voicePttPref) btn.textContent = 'إعدادات الصوت';
+  else if (voiceSelf.joined) btn.textContent = voiceSelf.muted ? 'شغّل المايك' : 'اكتم';
+  else btn.textContent = 'ادخل الصوت';
+  btn.title = reason || (voiceSelf.joined
+    ? (voicePttPref ? 'افتح لوحة الصوت' : 'كتم/تشغيل المايك')
+    : 'ادخل قناة الصوت');
+}
+
+// Rendering is called from lobby/game paint paths, so a stray DOM assumption
+// must never escape into the main UI. The wrapper is the only entry point.
+function renderVoiceUI() {
+  try {
+    renderVoiceUIInner();
+  } catch (err) {
+    console.warn('[voice] render failed:', err?.message || err);
+  }
+}
+
+function renderVoiceUIInner() {
+  const blocked = !roomCode || spectating;
+  const reason = voiceBlockedReason();
+  const busy = voiceSelf.status === 'requesting' || voiceSelf.status === 'connecting';
+  const available = !reason;
+  const micOpen = voiceSelf.joined && !voiceSelf.hostMuted
+    && (voicePttPref ? (voicePttDown || voiceSelf.speaking) : !voiceSelf.muted);
+  const peerCount = voicePeerList.length;
+
+  const fab = $('voiceFab');
+  if (fab) {
+    fab.classList.toggle('hidden', blocked);
+    fab.classList.toggle('is-live', voiceSelf.joined);
+    fab.classList.toggle('is-muted', voiceSelf.joined && !micOpen);
+    fab.classList.toggle('is-speaking', voiceSelf.joined && voiceSelf.speaking);
+    fab.classList.toggle('is-busy', busy);
+    fab.classList.toggle('is-failed', voiceSelf.status === 'failed');
+    fab.dataset.state = voiceSelf.status;
+    fab.disabled = blocked || busy || !available;
+    fab.setAttribute('aria-pressed', String(micOpen));
+    let title = 'ادخل الصوت';
+    if (!available) title = reason;
+    else if (busy) title = voiceSelf.status === 'requesting' ? VOICE_AR.requesting : VOICE_AR.connecting;
+    else if (voiceSelf.joined) {
+      title = voiceSelf.hostMuted ? VOICE_AR.hostMuted
+        : voicePttPref ? 'اضغط مطولاً على المايك أو على V عشان تتكلم'
+          : voiceSelf.muted ? 'شغّل المايك' : 'اكتم المايك';
+    }
+    fab.title = title;
+    fab.setAttribute('aria-label', title);
+  }
+  const fabBadge = $('voiceFabBadge');
+  if (fabBadge) {
+    fabBadge.textContent = peerCount > 9 ? '9+' : String(peerCount);
+    fabBadge.classList.toggle('hidden', !voiceSelf.joined || peerCount === 0);
+  }
+
+  const panelBtn = $('voicePanelBtn');
+  if (panelBtn) {
+    panelBtn.classList.toggle('hidden', blocked);
+    panelBtn.setAttribute('aria-expanded', String(voicePanelOpen));
+    panelBtn.classList.toggle('open', voicePanelOpen);
+  }
+  const panel = $('voicePanel');
+  if (panel) {
+    if (blocked) {
+      panel.classList.add('hidden');
+      voicePanelOpen = false;
+    }
+    panel.setAttribute('aria-hidden', String(!voicePanelOpen));
+  }
+
+  const info = voiceStatusInfo();
+  const statusEl = $('voiceStatus');
+  if (statusEl) {
+    statusEl.textContent = info.text;
+    statusEl.className = 'voice-status' + (info.tone ? ' ' + info.tone : '');
+  }
+  const inVoiceCount = (voiceSelf.joined ? 1 : 0) + peerCount;
+  voiceSetText('voiceCount', inVoiceCount ? `${inVoiceCount} في الصوت` : 'مفيش حد في الصوت');
+
+  const autoplayBtn = $('voiceAutoplay');
+  if (autoplayBtn) {
+    const blockedPlayback = voiceSelf.joined && voicePeerList.some(p => p.playBlocked);
+    autoplayBtn.classList.toggle('hidden', !blockedPlayback);
+  }
+
+  const selfRow = $('voiceSelf');
+  if (selfRow) {
+    selfRow.classList.toggle('is-idle', !voiceSelf.joined);
+    selfRow.classList.toggle('is-host-muted', voiceSelf.hostMuted);
+    voiceSetText('voiceSelfName', myName ? `أنت (${myName})` : 'أنت');
+    const selfAvatar = $('voiceSelfAvatar');
+    if (selfAvatar) selfAvatar.textContent = (myName || 'أ').trim().charAt(0).toUpperCase() || 'أ';
+    const selfBadges = [];
+    if (!voiceSelf.joined) {
+      selfBadges.push([voiceSelf.status === 'failed' ? 'اتوقف' : 'برّه الصوت', voiceSelf.status === 'failed' ? 'danger' : '']);
+    } else if (voiceSelf.hostMuted) {
+      selfBadges.push(['المضيف كتمك', 'danger']);
+    } else if (voicePttPref) {
+      const open = voiceSelf.speaking || voicePttDown;
+      selfBadges.push([open ? 'بتتكلم' : 'PTT', open ? 'live' : '']);
+    } else if (voiceSelf.muted) {
+      selfBadges.push(['مكتوم', 'muted']);
+    } else {
+      selfBadges.push(['مايك مفتوح', 'live']);
+    }
+    renderVoiceBadges($('voiceSelfBadges'), selfBadges);
+  }
+
+  const joinBtn = $('voicePanelJoin');
+  if (joinBtn) {
+    const canJoin = !blocked && !voiceSelf.joined && !busy;
+    joinBtn.classList.toggle('hidden', !canJoin);
+    joinBtn.disabled = !available;
+  }
+
+  const muteBtn = $('voiceMuteSelf');
+  if (muteBtn) {
+    muteBtn.disabled = !voiceSelf.joined || voiceSelf.hostMuted || voicePttPref;
+    muteBtn.title = voicePttPref && voiceSelf.joined ? VOICE_AR.pttLocked : '';
+    muteBtn.textContent = voiceSelf.hostMuted ? 'مكتوم بواسطة المضيف'
+      : voiceSelf.muted ? 'شغّل المايك' : 'كتم نفسي';
+  }
+
+  const leaveBtn = $('voiceLeave');
+  if (leaveBtn) leaveBtn.disabled = !(voiceSelf.joined || busy);
+
+  const pttBtn = $('voicePtt');
+  if (pttBtn) {
+    pttBtn.classList.toggle('on', voicePttPref);
+    pttBtn.setAttribute('aria-checked', String(voicePttPref));
+    pttBtn.disabled = !voiceEngine;
+  }
+
+  const modAll = $('voiceModAll');
+  if (modAll) {
+    const visible = isHost && voiceSelf.joined && !!roomCode && !spectating;
+    modAll.classList.toggle('hidden', !visible);
+    const allMuted = peerCount > 0 && voicePeerList.every(p => p.hostMuted);
+    modAll.textContent = allMuted ? 'فك كتم الكل' : 'كتم الكل';
+    modAll.disabled = peerCount === 0;
+  }
+
+  const empty = $('voiceEmpty');
+  if (empty) {
+    empty.classList.toggle('hidden', !voiceSelf.joined || peerCount > 0);
+    empty.textContent = voiceSelf.joined ? 'مفيش حد تاني في الصوت لسه.' : 'ادخل الصوت عشان تشوف اللاعبين.';
+  }
+
+  renderVoicePeers();
+  renderVoiceDevices();
+  renderVoiceStrip();
+  applyVoiceSpeakingToDom();
+}
+
+function syncVoiceForRoom() {
+  const engine = ensureVoice();
+  if (engine) {
+    const unseated = spectating || !myId || String(myId).startsWith('spectator:');
+    try {
+      if (unseated || !roomCode) {
+        engine.setSelf(null, '');
+        engine.leave();
+      } else {
+        engine.setSelf(myId, myName || '');
+      }
+    } catch (err) {
+      console.warn('[voice] self sync failed:', err?.message || err);
+    }
+  }
+  renderVoiceUI();
+}
+
+function syncVoiceVisibility() {
+  renderVoiceUI();
+}
+
+// Room leave/teardown: stop capture + signaling and clear the presentation.
+function stopVoiceForLeave() {
+  try {
+    if (voiceEngine) voiceEngine.leave();
+  } catch (err) {
+    console.warn('[voice] leave failed:', err?.message || err);
+  }
+  voiceSelf = { ...VOICE_IDLE };
+  voicePeerList = [];
+  voiceSpeaking.clear();
+  voicePeerRows.clear();
+  voicePeerOrderKey = '';
+  voiceLiveSeen = false;
+  voiceFabHeld = false;
+  voicePttDown = false;
+  const wrap = $('voicePeers');
+  if (wrap) wrap.innerHTML = '';
+  renderVoiceUI();
+}
+
+// The room is gone: release the engine itself. A later join builds a fresh one.
+function disposeVoice() {
+  try {
+    if (voiceEngine) voiceEngine.dispose();
+  } catch (err) {
+    console.warn('[voice] dispose failed:', err?.message || err);
+  }
+  voiceEngine = null;
+  voiceInitFailed = false;
+  voiceSelf = { ...VOICE_IDLE };
+  voicePeerList = [];
+  voiceSpeaking.clear();
+  voicePeerRows.clear();
+  voicePeerOrderKey = '';
+  voiceDevices = [];
+  voiceDeviceKey = '';
+  voiceLiveSeen = false;
+  voicePanelOpen = false;
+  voiceFabHeld = false;
+  voicePttDown = false;
+  const wrap = $('voicePeers');
+  if (wrap) wrap.innerHTML = '';
+  $('voicePanel')?.classList.add('hidden');
+  renderVoiceUI();
+}
+
+function voiceJoin() {
+  if (spectating || !roomCode) return;
+  const engine = ensureVoice();
+  if (!engine) {
+    toast('🎙 ' + VOICE_AR.noEngine);
+    renderVoiceUI();
+    return;
+  }
+  const reason = voiceBlockedReason();
+  if (reason) {
+    toast('🎙 ' + reason);
+    renderVoiceUI();
+    return;
+  }
+  if (engine.joined || voiceSelf.status === 'requesting' || voiceSelf.status === 'connecting') return;
+  sfx.click();
+  try {
+    Promise.resolve(engine.join()).catch(() => {});
+  } catch (err) {
+    console.warn('[voice] join failed:', err?.message || err);
+    toast('🎙 ' + VOICE_AR.failed);
+  }
+}
+
+function voiceToggle() {
+  if (spectating || !roomCode) return;
+  const engine = ensureVoice();
+  if (!engine) {
+    toast('🎙 ' + VOICE_AR.noEngine);
+    renderVoiceUI();
+    return;
+  }
+  const reason = voiceBlockedReason();
+  if (reason) {
+    toast('🎙 ' + reason);
+    renderVoiceUI();
+    return;
+  }
+  if (voiceSelf.status === 'requesting' || voiceSelf.status === 'connecting') return;
+  if (engine.joined) {
+    // Under PTT the press-and-hold (FAB / V) is the mic control; the strip and
+    // any programmatic toggle route here to the panel instead of a mute that
+    // the engine would correctly ignore.
+    if (voicePttPref) {
+      openVoicePanel();
+      return;
+    }
+    try { engine.toggleMute(); } catch (err) { console.warn('[voice] mute failed:', err?.message || err); }
+    sfx.click();
+    return;
+  }
+  voiceJoin();
+}
+
+function voiceToggleSelfMute() {
+  const engine = ensureVoice();
+  if (!engine || !engine.joined) return;
+  if (voicePttPref) {
+    toast('🎙 ' + VOICE_AR.pttLocked);
+    return;
+  }
+  try { engine.setMuted(!voiceSelf.muted); } catch (err) { console.warn('[voice] mute failed:', err?.message || err); }
+  sfx.click();
+}
+
+function voiceSetTalking(on) {
+  voicePttDown = on === true;
+  const engine = voiceEngine;
+  if (!engine || !engine.joined || !voicePttPref) return;
+  try { engine.setTalking(on === true); } catch (err) { console.warn('[voice] talk failed:', err?.message || err); }
+  renderVoiceUI();
+}
+
+function voiceLeaveNow() {
+  stopVoiceForLeave();
+  closeVoicePanel();
+  sfx.click();
+}
+
+function voiceTogglePtt() {
+  voicePttPref = !voicePttPref;
+  voicePttDown = false;
+  try { localStorage.setItem('domino_voice_ptt', voicePttPref ? '1' : '0'); } catch { /* no storage */ }
+  try { voiceEngine?.setPushToTalk(voicePttPref); } catch (err) { console.warn('[voice] ptt failed:', err?.message || err); }
+  if (!voicePttPref) {
+    try { voiceEngine?.setTalking(false); } catch { /* engine guards */ }
+  }
+  sfx.click();
+  renderVoiceUI();
+}
+
+async function voiceHostMuteAll() {
+  const engine = ensureVoice();
+  if (!engine || !engine.joined || !isHost) return;
+  // Any unmuted participant means the action mutes everyone; otherwise unmute.
+  const muted = voicePeerList.some(p => !p.hostMuted);
+  try {
+    const ok = await engine.hostMute({ all: true, muted });
+    if (ok) sfx.click();
+  } catch (err) {
+    console.warn('[voice] host mute failed:', err?.message || err);
+  }
+  renderVoiceUI();
+}
+
+function voiceResumePlayback() {
+  try { voiceEngine?.resumeAudio(); } catch (err) { console.warn('[voice] resume failed:', err?.message || err); }
+  sfx.click();
+  setTimeout(() => voiceGuard(() => renderVoiceUI()), 350);
+}
+
+function voiceDeviceChanged() {
+  const select = $('voiceDevice');
+  if (!select) return;
+  voiceSelectedDevice = select.value || 'default';
+  const engine = ensureVoice();
+  if (!engine) return;
+  const target = voiceSelectedDevice === 'default' ? null : voiceSelectedDevice;
+  try {
+    Promise.resolve(engine.setInputDevice(target)).catch(() => {});
+  } catch (err) {
+    console.warn('[voice] input device failed:', err?.message || err);
+  }
+  sfx.click();
+}
+
+function openVoicePanel() {
+  if (!roomCode || spectating) return;
+  voicePanelOpen = true;
+  closeChat();
+  closeEmojiPop();
+  $('voicePanel')?.classList.remove('hidden');
+  $('voicePanelBtn')?.classList.add('open');
+  $('voicePanelBtn')?.setAttribute('aria-expanded', 'true');
+  refreshVoiceDevices();
+  renderVoiceUI();
+  sfx.click();
+}
+
+function closeVoicePanel() {
+  voicePanelOpen = false;
+  $('voicePanel')?.classList.add('hidden');
+  $('voicePanelBtn')?.classList.remove('open');
+  $('voicePanelBtn')?.setAttribute('aria-expanded', 'false');
+}
+
+function startVoiceFabHold(e) {
+  if (e.button !== undefined && e.button !== 0) return;
+  if (!voicePttPref || !voiceEngine || !voiceEngine.joined) return;
+  voiceFabHeld = true;
+  voiceHeldAt = Date.now();
+  try { $('voiceFab')?.setPointerCapture?.(e.pointerId); } catch { /* older engines */ }
+  voiceSetTalking(true);
+}
+
+function stopVoiceFabHold() {
+  if (!voiceFabHeld) return;
+  voiceFabHeld = false;
+  voiceHeldAt = Date.now();
+  voiceSetTalking(false);
+}
+
+function voicePttKeyDown(e) {
+  if (e.key !== 'v' && e.key !== 'V') return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const target = e.target;
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+    || target.tagName === 'SELECT' || target.isContentEditable)) return;
+  if (!voicePttPref || !voiceEngine || !voiceEngine.joined) return;
+  if (e.repeat) return;
+  try { e.preventDefault(); } catch { /* passive listener */ }
+  voiceSetTalking(true);
+}
+
+function voicePttKeyUp(e) {
+  if (e.key !== 'v' && e.key !== 'V') return;
+  voiceSetTalking(false);
+}
+
+function initVoiceUI() {
+  const fab = $('voiceFab');
+  if (fab) {
+    fab.addEventListener('pointerdown', startVoiceFabHold);
+    fab.addEventListener('pointerup', stopVoiceFabHold);
+    fab.addEventListener('pointercancel', stopVoiceFabHold);
+    fab.addEventListener('click', () => {
+      // Under PTT the press itself is the action; a click must not toggle mute.
+      if (voicePttPref && voiceEngine?.joined) return;
+      if (Date.now() - voiceHeldAt < 400) return;
+      voiceToggle();
+    });
+  }
+  bindEl('voicePanelBtn', 'click', () => {
+    if (voicePanelOpen) {
+      closeVoicePanel();
+      sfx.click();
+    } else {
+      openVoicePanel();
+    }
+  });
+  bindEl('voicePanelClose', 'click', () => { closeVoicePanel(); sfx.click(); });
+  bindEl('voicePanelJoin', 'click', voiceJoin);
+  bindEl('voiceMuteSelf', 'click', voiceToggleSelfMute);
+  bindEl('voiceLeave', 'click', voiceLeaveNow);
+  bindEl('voicePtt', 'click', voiceTogglePtt);
+  bindEl('voiceModAll', 'click', () => { voiceGuard(() => voiceHostMuteAll()); });
+  bindEl('voiceAutoplay', 'click', voiceResumePlayback);
+  bindEl('voiceStripBtn', 'click', voiceToggle);
+  bindEl('voiceDevice', 'change', voiceDeviceChanged);
+
+  // A release outside the FAB must close the PTT gate.
+  window.addEventListener('pointerup', stopVoiceFabHold);
+  window.addEventListener('pointercancel', stopVoiceFabHold);
+
+  document.addEventListener('click', (e) => {
+    if (!voicePanelOpen) return;
+    const panel = $('voicePanel');
+    const btn = $('voicePanelBtn');
+    const fabEl = $('voiceFab');
+    const strip = $('voiceStrip');
+    // The lobby strip both joins and (under PTT) opens this panel; its click
+    // must not immediately close the panel it just opened.
+    const inside = (panel && panel.contains(e.target))
+      || (btn && btn.contains(e.target))
+      || (fabEl && fabEl.contains(e.target))
+      || (strip && strip.contains(e.target));
+    if (!inside) closeVoicePanel();
+  });
+  document.addEventListener('keydown', voicePttKeyDown);
+  document.addEventListener('keyup', voicePttKeyUp);
+
+  // Losing focus mid-hold must close the PTT gate locally too (the engine
+  // already silences the track; this keeps the UI badge honest).
+  const releasePtt = () => {
+    voiceFabHeld = false;
+    voicePttDown = false;
+    if (voicePttPref && voiceEngine?.joined) {
+      try { voiceEngine.setTalking(false); } catch { /* engine guards */ }
+    }
+    renderVoiceUI();
+  };
+  window.addEventListener('blur', releasePtt);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) releasePtt(); });
+
+  try {
+    navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+      if (voiceSelf.joined) refreshVoiceDevices();
+    });
+  } catch { /* devicechange is optional */ }
+
+  renderVoiceUI();
+}
+
 // ══════════ boot ══════════
 // Same-origin connection (browser / Render / Cloudflare Tunnel).
 
 function startSocket(base) {
   socket = io(base || undefined, { transports: ['websocket', 'polling'] });
+  // The engine binds its own socket listeners; create it once the socket
+  // exists but keep everything non-fatal so a voice failure can never abort
+  // boot. It does no media work until the user taps the mic.
+  ensureVoice();
 
+  let everConnected = false;
   socket.on('connect', () => {
-    $('connPill').className = 'ok';
+    setConn(true);
+    // 1.9: a reconnect deserves a visible "we're back" beat — but only after a
+    // real drop, never on the very first connect.
+    if (everConnected) toast('✅ رجعنا — الاتصال رجع تاني');
+    everConnected = true;
     // auto-rejoin after a dropped connection or page refresh
     const urlCode = new URLSearchParams(location.search).get('room')?.toUpperCase();
     const targetCode = roomCode || urlCode || localStorage.getItem('domino_last_code');
@@ -2127,14 +3647,28 @@ function startSocket(base) {
             // Prefer the freshly assigned local view; fall back to the ack payload.
             const g = (view && view.playerId === res.playerId) ? view : null;
             const myTurnNow = g ? (g.turn === myId) : !!res.youAreUp;
-            setBanner(myTurnNow ? 'اتصلت من جديد — دورك الآن' : 'اتصلت من جديد', myTurnNow ? 'mine' : '');
+            setBannerHold(myTurnNow ? 'اتصلت من جديد — دورك الآن' : 'اتصلت من جديد — مستني الدور',
+              myTurnNow ? 'mine' : '', 3200);
             if (myTurnNow) startTurnAlert();
           }
+        } else {
+          // 0.10: a swallowed failure here is a dead game screen with no reason.
+          resetToHome(res?.error || 'مش قادرين نرجّعك للغرفة — اتصل تاني أو ادخل بالكود.');
         }
       });
     }
   });
-  socket.on('disconnect', () => { $('connPill').className = 'bad'; });
+  // 1.9: a dropped socket in a 30-second-turn game is the #1 killer of the
+  // session. Say it out loud, dim the table, and say it again when it's back.
+  socket.on('disconnect', () => {
+    setConn(false);
+    toast('⚠️ الاتصال اتقطع — بحاول أرجع');
+    if (view) setBannerHold('⚠️ الاتصال اتقطع — بحاول أرجع', '', 6000);
+  });
+  socket.io.on('reconnect_attempt', () => {
+    setConn(false);
+    if (view) setBannerHold('⚠️ الاتصال اتقطع — بحاول أرجع', '', 6000);
+  });
   socket.on('lobby:state', renderLobby);
   socket.on('game:started', () => {
     // Fresh match: clear per-game transient UI state so a rematch starts clean.
@@ -2152,6 +3686,9 @@ function startSocket(base) {
     view = st; isHost = st.hostId === myId; renderGame();
   });
   socket.on('chat:msg', onChatMsg);
+  socket.on('chat:history', onChatHistory);
+  socket.on('chat:typing', onChatTyping);
+  socket.on('chat:limited', onChatLimited);
   socket.on('lobby:closed', () => {
     // the server swept this idle lobby — back home with a note
     leaveRoom();
@@ -2180,14 +3717,25 @@ function startSocket(base) {
     leaveRoom();
     homeError('تم طردك من الغرفة.');
   });
+  // 0.7: the server emits this when the SAME seat is re-joined from another tab.
+  // Without a listener the old tab sat there forever, playing a dead board.
+  socket.on('room:superseded', () => {
+    resetToHome('اللعبة اتفتحت في نافذة تانية — النافذة دي اتقفلت. تابع من النافذة الجديدة.');
+  });
   socket.on('error', (e) => {
-    setBanner('⚠ ' + (e.message || 'خطأ'), '');
+    // 0.2: the engine speaks English; the banner must not. Anything unrecognised
+    // falls back to a generic Arabic line rather than leaking `not your turn`.
+    setBanner('⚠ ' + translateServerError(e?.message), 'error');
   });
 }
 
 function boot() {
   startSocket('');
   initHome(); initLobby(); initGameUI();
+  try { initVoiceUI(); } catch (err) {
+    // Voice is an enhancement: a broken panel must never stop the game booting.
+    console.warn('[voice] init failed:', err?.message || err);
+  }
   // F1.3: skip the countdown tick entirely while the tab is hidden — it is pure
   // DOM work nobody can see, and it keeps SFX (alarm/tick) from firing in a
   // background tab. The state render on return catches the clock up instantly.
