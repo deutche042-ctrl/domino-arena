@@ -24,7 +24,10 @@ are black-box (socket.io-client) and end with a watchdog that exits non-zero on 
 Env knobs: `PORT` (server, default 3000), `TURN_TIME_MS` (per-turn limit, default 30000, min 1000),
 `MAX_ROOMS` (room-create cap, default 50 — server memory guard), and the optional voice TURN relay
 `TURN_URLS` (comma-separated `turn:`/`turns:` URLs) plus `TURN_USER`/`TURN_PASS`; `TURN_SECRET`
-(and optional `TURN_TTL`) mints short-lived coturn credentials instead. With no TURN configured,
+(and optional `TURN_TTL`) mints short-lived coturn credentials instead; `CF_TURN_KEY_ID` + `CF_TURN_KEY_TOKEN`
+mint Cloudflare Realtime TURN credentials through its API (the Worker answers `/voice-config`
+itself so the secrets stay out of `process.env`). STUN-only voice works on a LAN but is silent
+across different NATs — that is why a relay is required. With no TURN configured,
 `/voice-config` returns an empty list and clients keep their built-in STUN defaults.
 
 There is no linter or formatter configured; do not introduce one or add build tooling.

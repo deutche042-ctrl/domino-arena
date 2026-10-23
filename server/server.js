@@ -1,7 +1,6 @@
 // server/server.js — Express static host + Socket.IO realtime game server
 import express from 'express';
 import { createServer } from 'node:http';
-import { createHmac } from 'node:crypto';
 import os from 'node:os';
 import { Server } from 'socket.io';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +8,7 @@ import path from 'node:path';
 import { RoomManager, TURN_MS } from './rooms.js';
 import { IllegalMove } from '../engine/game.js';
 import { chooseAction } from '../engine/bot.js';
+import { iceServers } from './ice.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -57,26 +57,8 @@ const VOICE_CONFIG_WINDOW_MS = 60000;
 const VOICE_CONFIG_MAX_HITS = 20;
 const voiceConfigHits = new Map();   // ip -> request timestamps[]
 
-function turnIceServers() {
-  const raw = typeof process.env.TURN_URLS === 'string' ? process.env.TURN_URLS : '';
-  const urls = raw.split(',')
-    .map(u => u.trim())
-    .filter(u => /^turns?:[^\s,]+$/i.test(u));
-  if (!urls.length) return [];
-  const secret = process.env.TURN_SECRET;
-  if (secret) {
-    const ttl = Math.min(3600, Math.max(60, Number(process.env.TURN_TTL) || 600));
-    const username = `${Math.floor(Date.now() / 1000) + ttl}:domino`;
-    const credential = createHmac('sha1', secret).update(username).digest('base64');
-    return [{ urls, username, credential }];
-  }
-  const username = (process.env.TURN_USER || '').trim();
-  const credential = (process.env.TURN_PASS || '').trim();
-  if (!username || !credential) return [];
-  return [{ urls, username, credential }];
-}
 
-app.get('/voice-config', (req, res) => {
+app.get('/voice-config', async (req, res) => {
   const ip = req.ip || req.socket?.remoteAddress || '?';
   const now = Date.now();
   const hits = (voiceConfigHits.get(ip) || []).filter(t => now - t < VOICE_CONFIG_WINDOW_MS);
@@ -85,7 +67,12 @@ app.get('/voice-config', (req, res) => {
   }
   hits.push(now);
   voiceConfigHits.set(ip, hits);
-  res.json({ iceServers: turnIceServers() });
+  try {
+    res.json({ iceServers: await iceServers(process.env) });
+  } catch (err) {
+    console.warn('[voice-config] ice server build failed:', err?.message || err);
+    res.json({ iceServers: [] });
+  }
 });
 
 app.use(express.static(process.env.DOMINO_PUBLIC_DIR || path.join(here, '..', 'public'), { etag: false, maxAge: 0 }));

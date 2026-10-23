@@ -99,6 +99,9 @@ PORT=3100 npm start
 | `CLOUDFLARE_WORKER_NAME` | مرجعي | `domino-arena` (الاسم الفعلي في `worker/wrangler.toml`). |
 | `CLOUDFLARE_WORKERS_SUBDOMAIN` | مرجعي | الـsubdomain بتاعك في `workers.dev` لتكوين الرابط. |
 | `DOMINO_URL` | للاختبار | رابط الـWorker المنشور، لاختبار e2e عن بُعد. |
+| `CF_TURN_KEY_ID` | نعم للصوت بين شبكات مختلفة | TURN Key ID من Cloudflare → Realtime → TURN. |
+| `CF_TURN_KEY_TOKEN` | نعم مع اللي فوق | الـAPI token بتاع نفس الـTURN key — سريه، بيتحط Worker secret. |
+| `TURN_URLS` / `TURN_SECRET` / `TURN_USER` / `TURN_PASS` | بديل | لو بتستخدم coturn بتاعك بدل Cloudflare TURN. |
 
 ### تحميل `.env` قبل أوامر النشر
 
