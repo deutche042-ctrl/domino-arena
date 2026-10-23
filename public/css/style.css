@@ -1191,18 +1191,11 @@ body.offline #table3d { filter: grayscale(.55) brightness(.62); }
 #perfOverlay .perf-row b { color: #fff; font-weight: 600; font-variant-numeric: tabular-nums; }
 #perfOverlay .perf-dim { color: #7c8ba1; font-weight: 400; }
 
-/* floating pill action buttons (draw / pass / hint / sort) */
+/* floating pill action buttons (draw / pass) */
 #actionBar { position: absolute; right: 16px; bottom: 150px; display: flex; flex-direction: column; gap: 10px; z-index: 5; }
 #actionBar .btn { border-radius: 999px; box-shadow: var(--sh-2); backdrop-filter: var(--glass); }
 
 #btnDraw { min-width: 118px; }
-.btn.sort-btn, .btn.hint-btn {
-  font-size: 12px; padding: 7px 14px; line-height: 1.2;
-  background: var(--panel); border: 1px solid var(--panel-border);
-  color: var(--text); box-shadow: none;
-}
-.btn.sort-btn:hover, .btn.hint-btn:hover { border-color: var(--mint); }
-.btn.hint-btn { border-color: rgba(247, 179, 43, .45); }
 .btn:disabled { opacity: .5; cursor: default; }
 
 /* ── hand tray — glass dock ── */
@@ -2820,9 +2813,7 @@ body:not(.in-room) #voicePanel {
   backdrop-filter: blur(16px) saturate(1.12);
   max-width: calc(100vw - 32px);
 }
-#actionBar .btn,
-#actionBar .btn.sort-btn,
-#actionBar .btn.hint-btn {
+#actionBar .btn {
   height: 36px;
   min-width: 0;
   padding: 0 12px;
@@ -2848,9 +2839,6 @@ body:not(.in-room) #voicePanel {
 #actionBar .btn svg { width: 15px; height: 15px; flex: 0 0 auto; }
 #btnDraw { background: rgba(46, 230, 168, .14); border-color: rgba(46, 230, 168, .30); color: var(--mint-2); }
 #btnDraw:hover { background: rgba(46, 230, 168, .20); border-color: rgba(46, 230, 168, .45); }
-#btnHint { color: var(--gold-2); }
-#btnHint:hover { background: rgba(247, 179, 43, .10); border-color: rgba(247, 179, 43, .28); }
-#btnSort { color: var(--muted); }
 
 /* ── scorecard: floating rows over the felt, no panel ── */
 .score-card {
@@ -3099,35 +3087,51 @@ body:not(.in-room) #voicePanel {
     height: 40px;
   }
 
-  /* scores: one four-up strip + compact room code */
+  /* scores: compact vertical leaderboard above the action bar. Stacking the
+     rows frees the width that the old four-up strip stole from the table, and
+     keeps the hand from covering the last player. */
   .score-card {
-    bottom: calc(170px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(282px + env(safe-area-inset-bottom, 0px));
     left: 8px;
-    right: 8px;
-    width: auto;
+    right: auto;
+    width: 154px;
     min-width: 0;
-    max-width: none;
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 3px;
+    max-width: 154px;
+    display: flex;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 2px;
     padding: 4px;
-    border-radius: 12px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, rgba(10, 16, 32, .82), rgba(4, 8, 18, .88));
+    border: 1px solid rgba(46, 230, 168, .16);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
   }
-  .sc-row { padding: 3px; gap: 3px; font-size: 10px; border-radius: 6px; }
-  .sc-rank { width: 14px; height: 14px; font-size: 8px; }
-  .sc-name { gap: 2px; font-size: 10px; }
-  .sc-name .icon-bot { display: none; }
-  .sc-who { max-width: 52px; }
-  .sc-pts { font-size: 10.5px; }
-  .sc-code {
-    grid-column: 1 / -1;
-    margin-top: 1px;
-    padding-top: 3px;
+  .score-card .sc-row {
+    padding: 3px 5px;
+    gap: 4px;
+    font-size: 10px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, .035);
+  }
+  .score-card .sc-row.me { background: rgba(46, 230, 168, .14); }
+  .score-card .sc-rank { width: 14px; height: 14px; font-size: 8px; }
+  .score-card .sc-name { max-width: none; gap: 2px; font-size: 10px; }
+  .score-card .sc-name .icon-bot { display: none; }
+  .score-card .sc-who { max-width: none; }
+  .score-card .sc-pts { font-size: 10.5px; }
+  .score-card .sc-code {
+    flex: 0 0 auto;
+    width: 100%;
+    margin-top: 0;
+    padding: 3px 2px 2px;
     font-size: 8.5px;
     gap: 4px;
   }
-  .sc-code b { font-size: 8.5px; padding: 0 4px; }
-  .sc-code .icon-copy { width: 9px; height: 9px; }
+  .score-card .sc-code b { font-size: 8.5px; padding: 0 4px; }
+  .score-card .sc-code .icon-copy { width: 9px; height: 9px; }
 
   #chatDrawer { bottom: calc(232px + env(safe-area-inset-bottom, 0px)); }
 }

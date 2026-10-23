@@ -852,65 +852,20 @@ function renderOpponents() {
   }
 }
 
-// ── hand sorting: 7 tiles in draw order cost 5-10s of scanning per turn, which
-// eats the 30s clock. Four modes, persisted per device. ──
-// 'deal' is the smart default: playable-first while it IS my turn (so the
-// card I can actually drop is the first one I see), stable deal order otherwise
-// so the hand never reshuffles itself every 20s during opponents' turns (1.3).
-const SORT_MODES = ['deal', 'pips', 'playable', 'doubles'];
-const SORT_TITLES = {
-  deal: 'كما وصلني',
-  pips: 'الأتقل أولًا',
-  playable: 'المتاح أولًا',
-  doubles: 'الدبل أولًا',
-};
-let sortMode = (() => {
-  try {
-    const v = localStorage.getItem('domino_sort');
-    return SORT_MODES.includes(v) ? v : 'deal';
-  } catch { return 'deal'; }
-})();
-
-function paintSortBtn() {
-  const btn = $('btnSort');
-  if (!btn) return;
-  const label = $('sortLabel');
-  if (label) label.textContent = 'ترتيب';
-  btn.title = 'ترتيب اليد: ' + SORT_TITLES[sortMode];
-  btn.setAttribute('aria-label', btn.title);
-}
-
+// ── hand order: scanning 7 tiles in raw deal order costs seconds per turn.
+// Playable tiles move to the front while it is my turn (stable deal order is
+// preserved inside each group); during opponents' turns the order never
+// reshuffles, so the hand stays put between broadcasts. ──
 function sortedHand() {
   const h = [...(view.hand || [])];
   const myTurn = !spectating && view.turn === myId && view.status === 'playing';
   const playable = new Set(myTurn ? (view.legalMoves || []).map(m => m.tileId) : []);
-  // stable partition: playable first, deal order preserved inside each group
-  const playableFirst = arr => [
-    ...arr.filter(t => playable.has(t.id)),
-    ...arr.filter(t => !playable.has(t.id)),
+  if (!myTurn || !playable.size) return h;
+  // Playable tiles first, deal order preserved inside each group.
+  return [
+    ...h.filter(t => playable.has(t.id)),
+    ...h.filter(t => !playable.has(t.id)),
   ];
-  if (sortMode === 'deal') return (myTurn && playable.size) ? playableFirst(h) : h;
-  const pipsOf = t => t.a + t.b;
-  // One shared tie-break for every pip-based mode: heaviest first, then the
-  // largest tile (same total) first. Keeps 'pips' and 'playable' visually
-  // consistent and makes the order fully deterministic.
-  const byPips = (x, y) => pipsOf(y) - pipsOf(x) || (y.b - x.b) || (y.a - x.a);
-  if (sortMode === 'pips') return h.sort(byPips);
-  if (sortMode === 'doubles') {
-    return h.sort((x, y) => ((y.a === y.b) - (x.a === x.b)) || byPips(x, y));
-  }
-  // 'playable' — a legal move first. Only meaningful on my turn; other players
-  // get legalMoves = [] so this degrades to pips order, which is fine.
-  return h.sort((x, y) => (playable.has(y.id) - playable.has(x.id)) || byPips(x, y));
-}
-
-function cycleSort() {
-  const i = SORT_MODES.indexOf(sortMode);
-  sortMode = SORT_MODES[(i + 1) % SORT_MODES.length];
-  try { localStorage.setItem('domino_sort', sortMode); } catch { /* no storage */ }
-  paintSortBtn();
-  sfx.click();
-  renderHand();
 }
 
 function renderHand() {
@@ -974,8 +929,14 @@ function renderActions() {
     $('boneChipN').textContent = String(n);
   }
   $('btnPass').classList.toggle('hidden', spectating || !(myTurn && view.canPass));
-  // Hint only makes sense when it's my turn AND there is something to suggest.
-  $('btnHint').classList.toggle('hidden', !myTurn || (view.legalMoves || []).length === 0);
+  // The toolbar only carries draw/pass now; an empty capsule would just float
+  // over the table, so hide the bar when neither action is available.
+  const bar = $('actionBar');
+  if (bar) {
+    const empty = $('btnDraw').classList.contains('hidden')
+      && $('btnPass').classList.contains('hidden');
+    bar.classList.toggle('hidden', empty);
+  }
   const pill = $('endsPill');
   if (view.variant === 'allfives' && view.moves.length) {
     pill.classList.remove('hidden');
@@ -1576,37 +1537,6 @@ function playActionSounds() {
 let prevTurnKey = null;
 
 // ══════════ interaction ══════════
-// Server-side hint (AD-2): the bot brain needs real engine methods (cloneGame),
-// so we ask the server and it replies with ONLY { type, tileId, end } — never
-// any opponent hand data. See game:hint in server.js.
-let hintPending = false;
-async function requestHint() {
-  if (hintPending || !view || view.status !== 'playing' || view.turn !== myId) return;
-  hintPending = true;
-  const btn = $('btnHint');
-  btn.disabled = true;
-  sfx.click();
-  try {
-    const res = await emit('game:hint');
-    if (!res?.ok || res.type !== 'play') {
-      floatText(res?.type === 'draw' ? '💡 مفيش حركة — اسحب كارت'
-        : res?.type === 'pass' ? '💡 مفيش حركة — مرّر' : 'مفيش تلميح متاح دلوقتي');
-      return;
-    }
-    selectedTile = res.tileId;
-    if (board) {
-      const moves = (view.legalMoves || []).filter(m => m.tileId === res.tileId);
-      const ends = moves.map(m => m.end).filter(e => e != null);
-      if (ends.length) board?.showMarkers(ends);
-    }
-    renderHand();
-    sfx.select();
-  } finally {
-    hintPending = false;
-    btn.disabled = false;
-  }
-}
-
 function onBoneyardDraw(targetMesh) {
   if (!view || view.status !== 'playing' || view.turn !== myId || !view.canDraw) return;
   socket.emit('game:draw');
@@ -1819,9 +1749,6 @@ function withConfirm(btn, fn) {
 function initGameUI() {
   $('btnDraw').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:draw'); sfx.click(); }); };
   $('btnPass').onclick = (e) => { withConfirm(e.currentTarget, () => { socket.emit('game:pass'); sfx.click(); }); };
-  $('btnHint').onclick = requestHint;
-  $('btnSort').onclick = cycleSort;
-  paintSortBtn();
   // The in-game gear owns the settings modal. It MUST NOT reuse the home screen's
   // `#btnSettings` — both screens are up at once and the last bind used to win,
   // which silently killed the home play-settings toggle (bug 0.1).
