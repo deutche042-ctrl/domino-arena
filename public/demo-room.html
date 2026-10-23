@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>دومينو أرينا — غرفة ثلاثية الأبعاد</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1120; color: #f8fafc;
+    font-family: Arial, "Segoe UI", Tahoma, sans-serif; }
+  #scene { position: fixed; inset: 0; display: block; touch-action: none; }
+  #ui { position: fixed; inset-inline: 0; top: 0; padding: 14px 14px 0;
+    display: flex; flex-direction: column; gap: 10px; align-items: center; pointer-events: none; }
+  h1 { margin: 0; font-size: 17px; font-weight: 800; }
+  p.hint { margin: 0; font-size: 12.5px; opacity: .78; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; pointer-events: auto; }
+  button { pointer-events: auto; cursor: pointer; border: 1px solid rgba(255,255,255,.16);
+    background: rgba(15,23,42,.72); color: #f8fafc; font: inherit; font-size: 13px; font-weight: 700;
+    padding: 9px 14px; border-radius: 999px; backdrop-filter: blur(8px); }
+  button.active { background: #f7b32b; color: #0b1120; border-color: #f7b32b; }
+  .group { display: flex; flex-direction: column; gap: 6px; align-items: center;
+    background: rgba(2,6,23,.45); border: 1px solid rgba(255,255,255,.10); border-radius: 14px;
+    padding: 8px 12px; pointer-events: auto; }
+  .group span.lbl { font-size: 11px; opacity: .7; }
+  #stats { position: fixed; bottom: 10px; inset-inline-start: 12px; font-size: 11px; opacity: .65; }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; font-size: 14px;
+    background: #0b1120; transition: opacity .3s; }
+  #loading.done { opacity: 0; pointer-events: none; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/160.0/build/three.module.js",
+    "three/addons/": "./vendor/three/160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="loading">بجهّز المشهد…</div>
+<script>
+  window.__errs = [];
+  window.__sceneErrorShown = false;
+  function __showSceneError(text) {
+    const el = document.getElementById('loading');
+    if (!el) return;
+    window.__sceneErrorShown = true;
+    el.classList.remove('done');
+    el.style.color = '#fca5a5';
+    el.textContent = 'حصل خطأ في المشهد: ' + text;
+  }
+  addEventListener('error', (e) => {
+    const text = String((e.error && e.error.stack) || e.message || 'خطأ غير معروف');
+    window.__errs.push(text.slice(0, 300));
+    __showSceneError(text.slice(0, 200));
+  });
+  addEventListener('unhandledrejection', (e) => {
+    const text = 'rej: ' + String((e.reason && e.reason.message) || e.reason);
+    window.__errs.push(text.slice(0, 300));
+    __showSceneError(text.slice(0, 200));
+  });
+  // لو موديول الغرفة ما اشتغلش خالص (ملف ناقص/خطأ في الاستيراد) نوري رسالة عربية واضحة
+  setTimeout(() => {
+    if (!window.__roomDemoStarted && window.__errs.length === 0) {
+      __showSceneError('تعذّر تحميل ملف الغرفة room3d.js');
+    }
+  }, 5000);
+</script>
+
+<div id="ui">
+  <h1>دومينو أرينا — غرفة ثلاثية الأبعاد</h1>
+  <p class="hint">اسحب بالفأرة أو بإصبعك لتلفّ حوالين الطرابيزة، وبدّل شكل الغرفة من الأزرار</p>
+  <div class="group">
+    <span class="lbl">شكل الغرفة</span>
+    <div class="row" id="styleRow"></div>
+  </div>
+  <div class="group">
+    <span class="lbl">الكاميرا</span>
+    <div class="row">
+      <button id="autoRotateBtn" type="button" aria-pressed="false">لفّة تلقائية</button>
+    </div>
+  </div>
+</div>
+<div id="stats"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { createRoom, clampCameraToRoom } from './room3d.js';
+import { ROOM_STYLES, getStyle } from './room3d-styles.js';
+
+// علامة إن الموديول اشتغل فعلاً (بيستخدمها فحص التحميل في الأعلى)
+window.__roomDemoStarted = true;
+
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.setClearColor(0x0b1120, 1);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(64, 1, 0.1, 120);
+// The room is 9 x 7 x 3.2 m; start inside it, in front of the table.
+camera.position.set(0, 2.55, 2.85);
+
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 1.15, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.enablePan = false;
+controls.minDistance = 1.7;
+controls.maxDistance = 5.6;
+// أقل من 90° عشان الكاميرا ما تنزلش تحت الأرضية
+controls.maxPolarAngle = Math.PI * 0.495;
+controls.autoRotateSpeed = 0.8;
+controls.update();
+
+function showError(err) {
+  const text = String((err && (err.stack || err.message)) || err || 'خطأ غير معروف');
+  const el = document.getElementById('loading');
+  if (el) {
+    window.__sceneErrorShown = true;
+    el.classList.remove('done');
+    el.style.color = '#fca5a5';
+    el.textContent = 'تعذّر تجهيز الغرفة: ' + text.slice(0, 220);
+  }
+  console.error('room3d demo:', err);
+}
+
+// لو room3d.js ما رجّعش أي إضاءة، نضيف إضاءة احتياطية عشان المشهد ما يبقاش أسود.
+function ensureLights() {
+  let lights = 0;
+  scene.traverse((obj) => { if (obj.isLight) lights++; });
+  if (lights > 0) return;
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x334155, 1.1);
+  const key = new THREE.DirectionalLight(0xfff2d5, 2.2);
+  key.position.set(2.6, 4.6, 3.2);
+  key.castShadow = true;
+  key.shadow.mapSize.set(1024, 1024);
+  key.shadow.bias = -0.0012;
+  scene.add(hemi, key);
+}
+
+// لو الغرفة رجعت فاضية تمامًا (مفيش أي mesh)، نرسم بديل بسيط بدل شاشة فاضية.
+function ensureVisibleContent() {
+  let meshes = 0;
+  scene.traverse((obj) => { if (obj.isMesh) meshes++; });
+  if (meshes > 0) return;
+
+  const placeholder = new THREE.Group();
+  const floor = new THREE.Mesh(
+    new THREE.CircleGeometry(9, 48),
+    new THREE.MeshStandardMaterial({ color: 0x5b6890, roughness: 0.95 }),
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.receiveShadow = true;
+  placeholder.add(floor);
+
+  const wood = new THREE.MeshStandardMaterial({ color: 0x6b3f22, roughness: 0.55, metalness: 0.05 });
+  const felt = new THREE.MeshStandardMaterial({ color: 0x146b3a, roughness: 0.92 });
+  const top = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.12, 2.6), wood);
+  top.position.y = 0.72;
+  top.castShadow = true;
+  top.receiveShadow = true;
+  placeholder.add(top);
+  const feltTop = new THREE.Mesh(new THREE.BoxGeometry(2.36, 0.03, 2.36), felt);
+  feltTop.position.y = 0.795;
+  feltTop.receiveShadow = true;
+  placeholder.add(feltTop);
+  scene.add(placeholder);
+}
+
+let currentStyleId = null;
+
+function applyStyle(id) {
+  const style = getStyle(id);
+  if (!style) {
+    showError(new Error('مفيش أي نمط متاح في room3d-styles.js'));
+    return;
+  }
+  currentStyleId = style.id;
+
+  try {
+    // كل تبديل يمسح المشهد القديم بالكامل ثم يبني الغرفة الجديدة
+    scene.clear();
+    const group = createRoom(scene, style.id, { table: true });
+    // بعض نسخ createRoom بترجّع group من غير ما تضيفه بنفسها
+    if (group && group.isObject3D && !group.parent) scene.add(group);
+
+    ensureLights();
+    ensureVisibleContent();
+
+    // لون الخلفية من لوحة النمط (يظهر من النوافذ/الفراغات بس)
+    if (style.palette && style.palette.ceiling) {
+      renderer.setClearColor(new THREE.Color(style.palette.ceiling), 1);
+    }
+  } catch (err) {
+    showError(err);
+  }
+
+  for (const b of document.querySelectorAll('#styleRow button')) {
+    const on = b.dataset.style === style.id;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+}
+
+// ── أزرار الأنماط ──
+const styleRow = document.getElementById('styleRow');
+if (Array.isArray(ROOM_STYLES) && ROOM_STYLES.length > 0) {
+  for (const style of ROOM_STYLES) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = style.label;
+    b.dataset.style = style.id;
+    b.setAttribute('aria-pressed', 'false');
+    b.onclick = () => applyStyle(style.id);
+    styleRow.appendChild(b);
+  }
+} else {
+  showError(new Error('قائمة الأنماط ROOM_STYLES فاضية'));
+}
+
+// ── لفّة تلقائية ──
+const rotateBtn = document.getElementById('autoRotateBtn');
+rotateBtn.onclick = () => {
+  controls.autoRotate = !controls.autoRotate;
+  rotateBtn.classList.toggle('active', controls.autoRotate);
+  rotateBtn.setAttribute('aria-pressed', controls.autoRotate ? 'true' : 'false');
+};
+
+// ── الحلقة ──
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+resize();
+
+const statsEl = document.getElementById('stats');
+let frames = 0, lastFpsAt = performance.now(), fps = 0, firstFrameShown = false;
+
+function tick() {
+  requestAnimationFrame(tick);
+  controls.update();
+  // Hard guarantee: the camera never leaves the room, even at max zoom.
+  clampCameraToRoom(camera, controls);
+  renderer.render(scene, camera);
+
+  if (!firstFrameShown) {
+    firstFrameShown = true;
+    // ما نغطيش رسالة الخطأ لو ظهرت
+    if (!window.__sceneErrorShown) document.getElementById('loading').classList.add('done');
+  }
+
+  frames++;
+  const now = performance.now();
+  if (now - lastFpsAt > 500) {
+    fps = Math.round((frames * 1000) / (now - lastFpsAt));
+    frames = 0; lastFpsAt = now;
+    statsEl.textContent = `${fps} إطار/ثانية · ${renderer.info.render.triangles.toLocaleString('ar-EG')} مثلث`;
+  }
+}
+
+if (ROOM_STYLES.length > 0) applyStyle(ROOM_STYLES[0].id);
+tick();
+</script>
+</body>
+</html>
