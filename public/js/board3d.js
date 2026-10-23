@@ -29,7 +29,7 @@ try {
 const TILE_W = 1, TILE_L = 2, TILE_H = 0.42, GAP = 0.07;
 // Height the play surface sits above the room floor, in board units. The room
 // is scaled ~15.6x to wrap the rim, so 11 units reads as a real ~0.73 m table.
-const TABLE_HEIGHT_UNITS = 11;
+const TABLE_HEIGHT_UNITS = 24;
 const MAX_X = 9.5;              // table boundary along X before turning
 const MAX_Z = 6.0;              // table boundary along Z before turning
 const adv = isDbl => (isDbl ? TILE_W : TILE_L) + GAP;
@@ -492,15 +492,27 @@ export class Board3D {
 
   _addTableLegs(rim) {
     if (this._roomLegs) return;
-    const material = new THREE.MeshStandardMaterial({ color: 0x4a2f1d, roughness: 0.55, metalness: 0.12 });
+    const material = new THREE.MeshStandardMaterial({ color: 0x7a5230, roughness: 0.5, metalness: 0.1 });
     const top = rim.position.y - 0.35;                     // underside of the rim
     const floor = rim.position.y - 0.75 - TABLE_HEIGHT_UNITS;
+    // A bare disc reads as a floating coin from the play camera, so the table
+    // gets a thick wooden apron under the rim plus four legs down to the floor.
+    const apronHeight = Math.min(9, (top - floor) * 0.42);
+    const apron = new THREE.Mesh(
+      new THREE.CylinderGeometry(18.1, 17.7, apronHeight, this._quality?.tier === 'high' ? 64 : 32),
+      material,
+    );
+    apron.position.y = top - apronHeight / 2;
+    apron.castShadow = true;
+    apron.receiveShadow = true;
+    this.scene.add(apron);
     const height = top - floor;
-    const geometry = new THREE.CylinderGeometry(1.15, 0.95, height, 16);
-    this._roomLegs = [];
+    const geometry = new THREE.CylinderGeometry(1.7, 1.35, height, 16);
+    this._roomLegs = [apron];
+    apron.userData.tableLeg = true;
     for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
       const leg = new THREE.Mesh(geometry, material);
-      leg.position.set(sx * 13.2, floor + height / 2, sz * 13.2);
+      leg.position.set(sx * 12.4, floor + height / 2, sz * 12.4);
       leg.castShadow = true;
       leg.receiveShadow = true;
       this.scene.add(leg);
