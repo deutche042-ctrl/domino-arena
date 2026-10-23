@@ -18,7 +18,7 @@ import {
 // (DOM #gameEnv photo + HDRI PMREM) with only a console warning.
 let room3d = null;
 try {
-  room3d = await import('../room3d.js?v=3');
+  room3d = await import('../room3d.js?v=4');
 } catch (err) {
   console.warn('[board] room3d.js failed to load — 360° backdrop fallback stays active:',
     err?.message || err);
@@ -53,7 +53,7 @@ const FACE_PX_HIGH = 256, FACE_PX_LOW = 128;
 // real table sits inside with a walk-around ring — props keep their authored
 // proportions AND the felt/rim/tile ratios read true.
 const ROOM_SCALE = 6;                                  // world units per room metre
-const ROOM_DIMS = { width: 10, depth: 11, height: 4.2 };   // tall hall: the auto-fit needs headroom
+const ROOM_DIMS = { width: 15, depth: 16, height: 4.8 };   // hall sized around the table, like the demo
 const ROOM_FRONT_OPENING = 7.4;                        // wide doorway on the +Z wall
 const ROOM_FLOOR_Y = -4.8;                             // felt top (-0.21) sits 4.6 units ≈ 0.77 m above it
 const ROOM_TABLE_RADIUS = 18.4 / ROOM_SCALE + 0.05;    // keep-out radius, room metres
@@ -61,8 +61,11 @@ const ROOM_STYLE_IDS = ['modern', 'cozy', 'billiard', 'playful'];
 // Closest the auto-fit camera may come to the chain. Sized against the 36.8-unit
 // felt: any closer and the camera hovers over the play surface. Portrait
 // windows are narrower, so they need a longer throw to frame the same table.
-const CAM_MIN_DIST = 32;
-const CAM_MIN_DIST_PORTRAIT = 40;
+// How long a manual orbit keeps the auto-fit out of the way. Short enough to
+// feel like light tracking, long enough that the camera never fights a drag.
+const USER_ORBIT_HOLD_MS = 6000;
+const CAM_MIN_DIST = 42;
+const CAM_MIN_DIST_PORTRAIT = 56;
 
 // Theme-tinted table/side/bloom look. Kept small and explicit so every value the
 // material swap touches lives in one place.
@@ -189,11 +192,12 @@ export class Board3D {
     // Once the player orbits by hand, auto-fit stops moving the camera until the
     // next hand / reconnect (invalidate) — otherwise every move fights the drag.
     this._userOrbited = false;
+    this._userOrbitAt = 0;
     this._orbiting = false;
 
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enablePan = false;
-    this.controls.minDistance = 9;
+    this.controls.minDistance = 14;
     this.controls.maxDistance = 46;
     this.controls.maxPolarAngle = Math.PI * 0.42;
     this.controls.minPolarAngle = Math.PI * 0.18;
@@ -340,7 +344,13 @@ export class Board3D {
       const moved = this._orbitFrom ? this._orbitFrom.distanceToSquared(this.camera.position) > 1e-4 : false;
       const targetMoved = this._orbitTargetFrom
         ? this._orbitTargetFrom.distanceToSquared(this.controls.target) > 1e-4 : false;
-      if (moved || targetMoved) this._userOrbited = true;
+      if (moved || targetMoved) {
+        this._userOrbited = true;
+        // Light tracking: the player owns the camera only while they are using
+        // it. After a short idle the auto-fit resumes, so the view can never
+        // stay stuck in a corner for the rest of the hand.
+        this._userOrbitAt = performance.now();
+      }
     };
 
     this._addListener(canvas, 'pointerdown', onDown);
@@ -578,7 +588,9 @@ export class Board3D {
         return;
       }
       const root = gltf.scene;
-      placeTableModel(root, { targetSpan: 34, minSpan: 24, playY: TABLE_TOP_Y });
+      placeTableModel(root, {
+        targetSpan: 34, minSpan: 24, playY: TABLE_TOP_Y, floorY: ROOM_FLOOR_Y,
+      });
       applyTableMaterials(root, { anisotropy: this._maxAniso || 4, tone: design.tone || 1 });
       const old = this._tableModel;
       this._tableModel = root;
@@ -674,7 +686,7 @@ export class Board3D {
   async _enterRoomMode() {
     this._roomState = 'loading';
     try {
-      if (!this._roomMod) this._roomMod = await import('../room3d.js?v=3');
+      if (!this._roomMod) this._roomMod = await import('../room3d.js?v=4');
       if (this._disposed) return;
       if (typeof this._roomMod?.createRoom !== 'function') {
         throw new Error('room3d module unavailable');
@@ -1673,7 +1685,7 @@ export class Board3D {
       this._camTargetGoal = { x: 0, y: 0, z: 0 };
       // Lower than the old top-down default: the room must be visible
       // above/behind the table, not just a green felt filling the frame.
-      this._camGoal = { x: 0, y: 18, z: (this.camera.aspect || 1) < 0.95 ? 36 : 27 };
+      this._camGoal = { x: 0, y: 21, z: (this.camera.aspect || 1) < 0.95 ? 50 : 36 };
       this._applyCameraGoal();
       return;
     }
@@ -1709,14 +1721,14 @@ export class Board3D {
     const minDist = portrait ? CAM_MIN_DIST_PORTRAIT : CAM_MIN_DIST;
     const maxDist = aspect < 0.85 ? 72 : 48;
     const dist = clamp(Math.max(distH, distV, minDist), minDist, maxDist);
-    this.controls.maxDistance = Math.max(46, Math.min(90, dist * 1.3));
+    this.controls.maxDistance = Math.max(60, Math.min(120, dist * 1.4));
     // ~35° above the felt in landscape, ~25° when portrait: dominoes stay
     // readable while the room shows behind the far edge of the table. The
     // camera stays under the ceiling (the room clamp in _clampCameraToRoom
     // would otherwise flatten the shot).
     this._camGoal = portrait
-      ? { x: cx, y: dist * 0.42, z: cz + dist * 0.91 }
-      : { x: cx, y: dist * 0.56, z: cz + dist * 0.83 };
+      ? { x: cx, y: dist * 0.40, z: cz + dist * 0.90 }
+      : { x: cx, y: dist * 0.50, z: cz + dist * 0.86 };
     this._camTargetGoal = { x: cx, y: 0, z: cz };
     this._applyCameraGoal();
   }
@@ -2062,9 +2074,8 @@ export class Board3D {
     // If the tab was hidden while a fit was in flight, its wall-clock window
     // expired and the camera would stay at the old position forever. Re-arm it
     // on resume so returning to the game still settles onto the table.
-    if (this._camGoal && !this._userOrbited && !this._reducedMotion && now >= (this._camUntil || 0)) {
+    if (this._camGoal && !this._userOrbited && !this._reducedMotion) {
       this._camStartAt = now;
-      this._camUntil = now + 2000;
     }
     this._startLoop();
   }
@@ -2223,12 +2234,17 @@ export class Board3D {
       return false;
     });
 
-    // camera easing toward fit — B3: critically damped spring, active for a
-    // short window after each auto-fit. A user orbit wins: _userOrbited stays
-    // set until the next hand/reconnect, so the spring never fights the player.
+    // Camera easing toward the fit — B3: critically damped spring. Light
+    // tracking, not a takeover: it runs whenever the player is not actively
+    // dragging, and a manual orbit only suspends it for USER_ORBIT_HOLD_MS.
+    if (this._userOrbited && !this._orbiting &&
+        now - (this._userOrbitAt || 0) > USER_ORBIT_HOLD_MS) {
+      this._userOrbited = false;
+      this._camStartAt = now + 250;   // let the gesture settle before easing back
+    }
     if (!this._userOrbited && !this._orbiting && this._camGoal && !this._reducedMotion &&
-        now >= (this._camStartAt || 0) && now < (this._camUntil || 0)) {
-      const w = 4.5, w2 = w * w;
+        now >= (this._camStartAt || 0)) {
+      const w = 3.6, w2 = w * w;
       const p = this.camera.position, v = this._camVel, g = this._camGoal;
       v.x += (w2 * (g.x - p.x) - 2 * w * v.x) * dt;
       v.y += (w2 * (g.y - p.y) - 2 * w * v.y) * dt;
@@ -2238,13 +2254,6 @@ export class Board3D {
       if (tg) {
         this._camTargetVec.set(tg.x, tg.y, tg.z);
         this.controls.target.lerp(this._camTargetVec, 1 - Math.exp(-5 * dt));
-      }
-      // Arrived: stop the spring instead of nudging the camera for the rest of the
-      // window (visible as drift on slow devices where the deadline is generous).
-      const dx = g.x - p.x, dy = g.y - p.y, dz = g.z - p.z;
-      if (dx * dx + dy * dy + dz * dz < 0.01 &&
-          Math.abs(v.x) + Math.abs(v.y) + Math.abs(v.z) < 0.05) {
-        this._camUntil = 0;
       }
     }
 

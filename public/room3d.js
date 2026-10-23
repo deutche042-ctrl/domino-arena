@@ -118,6 +118,9 @@ const FALLBACK_STYLES = [
 const ROOMS = new WeakMap();      // scene -> room state
 const GROUP_STATE = new WeakMap(); // group -> room state
 const TEXTURE_LOADER = new THREE.TextureLoader();
+// What you see through the window (a CC0 Poly Haven panorama cropped to its
+// sunset waterfront). A plain lit plane read as a blank white square instead.
+const WINDOW_VIEW_URL = './vendor/environments/venice_sunset/venice_sunset_bg.jpg';
 
 // ── Small utilities ─────────────────────────────────────────────────────────
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -515,6 +518,25 @@ function createMaterials(state, style) {
   add('tileWhite', new THREE.MeshStandardMaterial({ color: 0xf4f1e8, roughness: 0.5 }));
   add('tileBlack', new THREE.MeshStandardMaterial({ color: 0x1b1c22, roughness: 0.35, metalness: 0.1 }));
 
+  // Window view: a real scene behind the glass so the pane never reads as a
+  // blank white board. Unlit, so it stays bright on the dark room styles; the
+  // panorama is cropped to its lit centre.
+  const viewMat = new THREE.MeshBasicMaterial({ color: 0xdfe8f2, toneMapped: false });
+  state.materials.add(viewMat);
+  m.windowView = viewMat;
+  TEXTURE_LOADER.load(WINDOW_VIEW_URL, (tex) => {
+    if (state.disposed) { tex.dispose(); return; }
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.repeat.set(0.46, 1);
+    tex.offset.set(0.27, 0);
+    tex.anisotropy = 4;
+    state.textures.add(tex);
+    viewMat.map = tex;
+    viewMat.needsUpdate = true;
+  }, undefined, () => { /* keep the soft sky tint if the photo is missing */ });
+
   return m;
 }
 
@@ -604,8 +626,8 @@ function buildShell(room, geo, mats, keepOut = 0) {
   // Rug — sits a couple of centimetres above the floor. Around a real (much
   // bigger) play table the carpet grows so it reads as a rug under the table
   // instead of slivers peeking past the felt edge.
-  const rugW = Math.max(5.8, keepOut * 2 + 2.6);
-  const rugD = Math.max(4.4, keepOut * 2 + 2.2);
+  const rugW = Math.max(5.8, keepOut * 2 + 4.2);
+  const rugD = Math.max(4.4, keepOut * 2 + 3.8);
   addMesh(room, geo.box, mats.rug, {
     scale: [rugW, 0.025, rugD], pos: [0, 0.0125, -0.1], cast: false,
   });
@@ -787,8 +809,10 @@ function buildWindow(room, geo, mats, style, spec) {
   const h = spec.h;
   const roomSide = 0.03;
 
-  // Warm light behind the glass makes the window read as a real light source.
-  addMesh(group, geo.plane, mats.shade, {
+  // The pane carries a real outside view. A flat warm plane reads as a blank
+  // white board hanging on the wall (the "white square"); a photo behind the
+  // glass reads as a window instead.
+  addMesh(group, geo.plane, mats.windowView || mats.shade, {
     scale: [w, h, 1], pos: [0, y, roomSide], cast: false, receive: false,
   });
   addMesh(group, geo.plane, mats.glass, {
@@ -1227,9 +1251,20 @@ function layout(style, keepOut = 0) {
     return { x: x * k, z: z * k };
   };
 
+  // A real play table (keepOut > 0) gets the demo room's composition: the
+  // furniture goes against the walls instead of clustering around the centre,
+  // so the room reads as a room and not as a backdrop squeezed behind a table.
+  const roomy = keepOut > 0;
+  const halfW = ROOM.width / 2;
+  const halfD = ROOM.depth / 2;
+  const backZ = -halfD + 0.9;
+  const frontZ = halfD - 1.2;
+
   const sofaRaw = billiard
     ? { x: -3.9, z: 0.9, rot: Math.PI / 2 }
-    : { x: 0, z: -2.85, rot: 0 };
+    : roomy
+      ? { x: 0, z: backZ, rot: 0 }
+      : { x: 0, z: -2.85, rot: 0 };
   const sofa = { ...sofaRaw, ...pushOut(sofaRaw.x, sofaRaw.z, billiard ? 1.35 : 0.62) };
 
   // The two dining chairs sit at the table's edge in the demo. With a real felt
@@ -1240,12 +1275,16 @@ function layout(style, keepOut = 0) {
 
   const sideRaw = billiard
     ? { x: -3.35, z: -0.65, rot: 0 }
-    : cozy
-      ? { x: -1.75, z: -2.85, rot: 0 }
-      : { x: 1.75, z: -2.85, rot: 0 };
+    : roomy
+      ? { x: 1.9, z: backZ, rot: 0 }
+      : cozy
+        ? { x: -1.75, z: -2.85, rot: 0 }
+        : { x: 1.75, z: -2.85, rot: 0 };
   const sideTable = { ...sideRaw, ...pushOut(sideRaw.x, sideRaw.z, 0.5) };
 
-  const lampRaw = billiard ? { x: -2.9, z: 2.1 } : { x: -2.25, z: 2.8 };
+  const lampRaw = billiard
+    ? { x: -2.9, z: 2.1 }
+    : roomy ? { x: -halfW + 0.9, z: frontZ } : { x: -2.25, z: 2.8 };
   const lamp = { ...lampRaw, ...pushOut(lampRaw.x, lampRaw.z, 0.42) };
 
   // Decorative billiard table: pushed deep enough that its near edge clears the
@@ -1259,14 +1298,16 @@ function layout(style, keepOut = 0) {
   // fixture (real felt radius included) outside the disc around the room centre.
   const chandelier = pushOut(chanRaw.x, chanRaw.z, 0.5);
 
-  const plantRaw = style.id === 'playful' ? { x: -3.85, z: -2.95 } : { x: 3.95, z: 2.85 };
+  const plantRaw = style.id === 'playful'
+    ? { x: -3.85, z: -2.95 }
+    : roomy ? { x: halfW - 0.9, z: frontZ } : { x: 3.95, z: 2.85 };
   const plant = { ...plantRaw, ...pushOut(plantRaw.x, plantRaw.z, 0.55) };
 
   const shelf = cozy
-    ? { wall: 'right', x: ROOM.width / 2 - 0.18, z: -2.6, rot: -Math.PI / 2 }
+    ? { wall: 'right', x: ROOM.width / 2 - 0.18, z: roomy ? -1.4 : -2.6, rot: -Math.PI / 2 }
     : billiard
       ? { wall: 'back', x: 3.3, z: -ROOM.depth / 2 + 0.18, rot: 0 }
-      : { wall: 'right', x: ROOM.width / 2 - 0.18, z: -2.2, rot: -Math.PI / 2 };
+      : { wall: 'right', x: ROOM.width / 2 - 0.18, z: roomy ? -1.4 : -2.2, rot: -Math.PI / 2 };
   const bar = props.has('bar') ? { z: 0.85 } : null;
 
   return {

@@ -78,8 +78,14 @@ export function loadTableModel(design) {
  * Scale/centre a table and put its top face exactly on `playY`, which is where
  * the dominoes rest. The minimum horizontal span keeps the boneyard (at the
  * far corner of the play area) on the table even for narrow rectangular tops.
+ *
+ * `floorY` (optional) keeps the model's BASE on the room floor: a real table
+ * stretched to a 34-unit play span is far taller than the 4.6 units between
+ * the felt and the floor, so its legs would end up buried under the floor and
+ * the model would read as a flat recoloured slab. Squashing the vertical axis
+ * is the only way to have both the exact play height and a visible base.
  */
-export function placeTableModel(root, { targetSpan = 34, minSpan = 24, playY = 0 } = {}) {
+export function placeTableModel(root, { targetSpan = 34, minSpan = 24, playY = 0, floorY = null } = {}) {
   root.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(root);
   const size = box.getSize(new THREE.Vector3());
@@ -90,7 +96,16 @@ export function placeTableModel(root, { targetSpan = 34, minSpan = 24, playY = 0
   root.scale.multiplyScalar(scale);
   root.updateMatrixWorld(true);
 
-  const scaled = new THREE.Box3().setFromObject(root);
+  let scaled = new THREE.Box3().setFromObject(root);
+  if (floorY != null) {
+    const available = playY - floorY;
+    const height = scaled.max.y - scaled.min.y;
+    if (height > available && available > 0) {
+      root.scale.y *= Math.max(0.1, available / height);
+      root.updateMatrixWorld(true);
+      scaled = new THREE.Box3().setFromObject(root);
+    }
+  }
   const center = scaled.getCenter(new THREE.Vector3());
   root.position.x -= center.x;
   root.position.z -= center.z;
