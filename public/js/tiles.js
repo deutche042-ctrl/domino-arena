@@ -71,8 +71,24 @@ const THEMES = {
       ctx.lineWidth = 4; ctx.strokeRect(16, 16, 224, 480);
       ctx.beginPath(); ctx.arc(128, 256, 62, 0, Math.PI * 2);
       ctx.strokeStyle = 'rgba(140,170,255,.35)'; ctx.stroke();
-      ctx.font = '90px serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillStyle = 'rgba(190,205,255,.5)'; ctx.fillText('🁢', 128, 260);
+      // Drawn mini-domino motif. This used to be a 🁢 fillText, which fell back to
+      // a striped tofu box on systems without a domino glyph — visible on every
+      // boneyard tile.
+      const dw = 56, dh = 112;
+      ctx.fillStyle = 'rgba(190,205,255,.5)';
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(128 - dw / 2, 256 - dh / 2, dw, dh, 9);
+      else ctx.rect(128 - dw / 2, 256 - dh / 2, dw, dh);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(43,51,80,.85)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(128 - dw / 2 + 7, 256); ctx.lineTo(128 + dw / 2 - 7, 256);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(43,51,80,.85)';
+      for (const [px, py] of [[-13, -30], [13, -30], [-13, 22], [13, 22]]) {
+        ctx.beginPath(); ctx.arc(128 + px, 256 + py, 5, 0, Math.PI * 2); ctx.fill();
+      }
     },
   },
 
@@ -180,14 +196,30 @@ export function setTheme(name) {
 function theme() { return THEMES[activeTheme] || THEMES.classic; }
 
 // ── painters ─────────────────────────────────────────────────────────────────
+// The art below is authored in a fixed 256×512 logical space (every coordinate
+// in the themes is in that space). `faceCanvas(px)` keeps the art identical at
+// any resolution by scaling the 2D context once, so the low tier can paint
+// 128×256 faces without clipping or misplacing a single pip.
+const FACE_W = 256, FACE_H = 512;
 
-/** Face texture: value a on top half, b on bottom. Canvas 256×512. */
-export function tileFaceCanvas(a, b) {
+function faceCanvas(px) {
+  const scale = Math.max(0.25, Math.min(2, (Number(px) || FACE_W) / FACE_W));
   const c = document.createElement('canvas');
-  c.width = 256; c.height = 512;
+  c.width = Math.round(FACE_W * scale);
+  c.height = Math.round(FACE_H * scale);
   const ctx = c.getContext('2d');
+  if (scale !== 1) ctx.scale(scale, scale);   // logical 256×512 from here on
+  return { c, ctx };
+}
+
+/**
+ * Face texture: value a on top half, b on bottom.
+ * `px` is the requested pixel WIDTH (default full 256); height follows 1:2.
+ */
+export function tileFaceCanvas(a, b, px = FACE_W) {
+  const { c, ctx } = faceCanvas(px);
   const t = theme();
-  t.faceFill(ctx, 256, 512, a, b);
+  t.faceFill(ctx, FACE_W, FACE_H, a, b);
   // inner border
   ctx.strokeStyle = t.inner;
   ctx.lineWidth = 4;
@@ -202,55 +234,96 @@ export function tileFaceCanvas(a, b) {
   return c;
 }
 
-/** Themed back face. */
-export function tileBackCanvas() {
-  const c = document.createElement('canvas');
-  c.width = 256; c.height = 512;
-  const ctx = c.getContext('2d');
-  theme().back(ctx, 256, 512);
+/** Themed back face. `px` is the requested pixel width (default 256). */
+export function tileBackCanvas(px = FACE_W) {
+  const { c, ctx } = faceCanvas(px);
+  theme().back(ctx, FACE_W, FACE_H);
   return c;
 }
 
 const dataUrlCache = new Map();
-/** dataURL for hand tiles (vertical, a over b) — themed. */
+/** dataURL for hand tiles (vertical, a over b) — themed, always full size. */
 export function tileImage(a, b) {
   const key = `${activeTheme}:${a}-${b}`;
   if (!dataUrlCache.has(key)) dataUrlCache.set(key, tileFaceCanvas(a, b).toDataURL());
   return dataUrlCache.get(key);
 }
 
-/** Felt texture for the table. B3: punchier contrast + a fine woven pattern. */
-export function feltCanvas() {
+// ── felt ─────────────────────────────────────────────────────────────────────
+// Theme-tinted felt palettes. The board rebuilds its felt texture on a theme
+// switch, so the table follows the tiles instead of staying classic green.
+const FELT = {
+  classic: { inner: '#217a59', mid: '#124a3a', outer: '#0a2f26', stitchA: '#06231c', stitchB: '#2f8a66', emblem: '#ffffff' },
+  neon:    { inner: '#123a3a', mid: '#0a2130', outer: '#040a12', stitchA: '#03141a', stitchB: '#1f8a72', emblem: '#7ef7d0' },
+  wood:    { inner: '#6e4523', mid: '#452a11', outer: '#241505', stitchA: '#1b0e03', stitchB: '#8f5e2d', emblem: '#f3d6ac' },
+  piano:   { inner: '#23252f', mid: '#12141b', outer: '#05060a', stitchA: '#030409', stitchB: '#3a3d4f', emblem: '#dfe4ff' },
+};
+
+// One 256×256 noise tile, generated once and repeated by the 2D context. The
+// old code ran getImageData/putImageData over the whole 1024² felt (1,048,576
+// pixels) on every theme switch; a pattern fill is ~16× cheaper for the same nap.
+let _noiseTile = null;
+function noiseTile() {
+  if (_noiseTile) return _noiseTile;
+  const n = document.createElement('canvas');
+  n.width = n.height = 256;
+  const g = n.getContext('2d');
+  const img = g.createImageData(256, 256);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 128 + (Math.random() - .5) * 90;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+    img.data[i + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  _noiseTile = n;
+  return n;
+}
+
+/** Felt texture for the table. `name` selects the theme palette. */
+export function feltCanvas(name = activeTheme) {
+  const pal = FELT[name] || FELT.classic;
   const c = document.createElement('canvas');
   c.width = 1024; c.height = 1024;
   const ctx = c.getContext('2d');
   const g = ctx.createRadialGradient(512, 512, 80, 512, 512, 720);
-  g.addColorStop(0, '#217a59');
-  g.addColorStop(.7, '#124a3a');
-  g.addColorStop(1, '#0a2f26');
+  g.addColorStop(0, pal.inner);
+  g.addColorStop(.7, pal.mid);
+  g.addColorStop(1, pal.outer);
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 1024, 1024);
   // fine felt nap — one subtle stitch direction only (a full grid moirés
   // into diagonal bands when the texture is minified on the table cap)
   ctx.globalAlpha = 0.028;
   for (let i = 0; i < 1024; i += 5) {
-    ctx.fillStyle = i % 10 ? '#06231c' : '#2f8a66';
+    ctx.fillStyle = i % 10 ? pal.stitchA : pal.stitchB;
     ctx.fillRect(0, i, 1024, 2);
   }
   ctx.globalAlpha = 1;
-  // felt noise
-  const img = ctx.getImageData(0, 0, 1024, 1024);
-  for (let i = 0; i < img.data.length; i += 4) {
-    const n = (Math.random() - .5) * 14;
-    img.data[i] += n; img.data[i + 1] += n; img.data[i + 2] += n;
+  // felt noise — a repeated 256² tile overlaid onto the 1024² gradient
+  const pattern = ctx.createPattern(noiseTile(), 'repeat');
+  if (pattern) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = pattern;
+    ctx.fillRect(0, 0, 1024, 1024);
+    ctx.restore();
   }
-  ctx.putImageData(img, 0, 0);
-  // subtle center emblem
-  ctx.globalAlpha = .06;
-  ctx.font = '400px serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#fff';
-  ctx.fillText('🁢', 512, 540);
-  ctx.globalAlpha = 1;
+  // subtle center watermark — drawn, never a font glyph. The old 🁢 fillText fell
+  // back to a striped tofu box on systems without a domino emoji, which read as a
+  // rendering artifact across the middle of the table.
+  ctx.save();
+  ctx.globalAlpha = .05;
+  ctx.strokeStyle = pal.emblem;
+  ctx.lineWidth = 7;
+  const bw = 300, bh = 620, br = 46;
+  const bx = 512 - bw / 2, by = 512 - bh / 2;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(bx, by, bw, bh, br); else ctx.rect(bx, by, bw, bh);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(bx + 30, 512); ctx.lineTo(bx + bw - 30, 512);
+  ctx.stroke();
+  ctx.restore();
   return c;
 }

@@ -14,7 +14,7 @@
 // Anything the 3D board does with meshes is a no-op here; anything the player can
 // actually DO (see the chain, tap an end, draw from the boneyard) works.
 
-import { tileImage } from './tiles.js?v=13';
+import { tileImage, getTheme, setTheme as setTileTheme, THEME_NAMES } from './tiles.js?v=15';
 
 /** True when a WebGL context can actually be created. Never throws. */
 export function webglAvailable() {
@@ -62,9 +62,10 @@ export class DomBoard {
     this.onBoardMiss = onBoardMiss;
     this.onBoneyardClick = onBoneyardClick;
     this.isDomFallback = true;
+    this._disposed = false;
     this.canDraw = false;
     this._myTurn = false;
-    this._theme = 'classic';
+    this._theme = getTheme();
     this._view = null;
     this._ends = [];
     this._scoreBy = null;
@@ -144,8 +145,17 @@ export class DomBoard {
     this._myTurn = !!b;
     this.root.classList.toggle('my-turn', this._myTurn);
   }
+  /** API parity with Board3D — the DOM board has no render loop to pause. */
+  setActive() { /* no-op */ }
   setTheme(name) {
-    if (typeof name !== 'string' || name === this._theme) return false;
+    // Delegate to the shared tiles.js theme so a 2D board honours the player's
+    // skin. Do NOT gate on setTileTheme's return value: app.js (and the 3D board)
+    // have normally switched the registry already, in which case it reports
+    // "unchanged" even though this board must still repaint its own tiles.
+    if (this._disposed) return false;
+    if (typeof name !== 'string' || !THEME_NAMES.includes(name)) return false;
+    if (name === this._theme) return false;
+    setTileTheme(name);   // idempotent — safe if the caller already did it
     this._theme = name;
     // Repaint every tile image from the new theme's painters.
     const children = [...this.chainEl.children];
@@ -154,6 +164,7 @@ export class DomBoard {
         if (children[i]) children[i].style.backgroundImage = `url(${tileImage(t.a, t.b)})`;
       });
     }
+    this._renderMarkers();
     return true;
   }
   invalidate() { /* no incremental cursor to invalidate in 2D */ }
@@ -182,8 +193,10 @@ export class DomBoard {
       b.className = 'b2-marker';
       b.dataset.end = e;
       b.type = 'button';
+      // 1.5: `scoreBy` now carries a ready-made delta label ("+5" / "12 → 7") or
+      // null when the play scores nothing — the old `+${sc}` printed a raw total.
       const sc = this._scoreBy && this._scoreBy[e];
-      b.textContent = sc != null ? `${label} +${sc}` : label;
+      b.textContent = sc ? `${label} · ${sc}` : label;
       if (this._highlight != null && e !== this._highlight) b.classList.add('dim');
       nodes.push(b);
     }
@@ -208,6 +221,8 @@ export class DomBoard {
   animateDraw() { /* no-op in 2D */ }
 
   dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
     this.root?.remove();
     this.chainEl?.replaceChildren();
     this.markerEl?.replaceChildren();

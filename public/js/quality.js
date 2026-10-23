@@ -8,6 +8,7 @@ const LS_KEY = 'domino_quality';
 const PROBE_MS = 2000;          // live probe window
 const PROBE_MIN_FPS = 28;       // below this the tier drops
 const PROBE_SLOW_RATIO = 0.4;   // …or this share of frames ran under ~20fps
+const PROBE_WARMUP_FRAMES = 20; // shader compile + first-paint frames are not representative
 
 const listeners = new Set();
 
@@ -64,6 +65,7 @@ export function setQuality(next) {
   if (next !== mode) {
     mode = next;
     saveMode(mode);
+    probe = null;                              // forced tiers never probe
     if (mode === 'auto') downgraded = false;   // fresh auto decision
     notify();
   }
@@ -75,21 +77,43 @@ export function onQualityChange(cb) {
   return () => listeners.delete(cb);
 }
 
-// Called once per board construction. The probe only matters when auto mode
-// resolved to 'high' — low starts cheap, and forced tiers are never switched.
-export function startProbe() {
-  if (probe || mode !== 'auto' || currentTier() !== 'high') return;
-  probe = { t0: 0, last: 0, frames: 0, slow: 0 };
+// The visible window's start is untrustworthy after ANY hidden interval: the
+// render loops stop their rAF while hidden, so the first post-return frame would
+// otherwise be charged the whole hidden duration. Reset the window on every
+// visibility change (the loop is stopped anyway while hidden).
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (!probe) return;
+    probe.t0 = 0; probe.last = 0; probe.seen = 0; probe.frames = 0; probe.slow = 0;
+  });
 }
 
-// One call per rendered frame (board3d/home3d render loops).
-export function feedFrame(now) {
+// Called once per board construction. The probe only matters when auto mode
+// resolved to 'high' — low starts cheap, and forced tiers are never switched.
+// `owner` names the render loop feeding it: when the active loop changes (home →
+// game), the old window is discarded instead of mixing two dt streams.
+export function startProbe(owner = 'default') {
+  if (probe && probe.owner === owner) return;
+  probe = null;   // a different loop took over — never mix their dt streams
+  if (mode !== 'auto' || currentTier() !== 'high') return;
+  probe = { owner, t0: 0, last: 0, frames: 0, slow: 0, seen: 0 };
+}
+
+// One call per rendered frame, from the ACTIVE board only (board3d/home3d).
+export function feedFrame(now, owner = 'default') {
   if (!probe || mode !== 'auto') return;
-  if (document.hidden) { probe.last = now; return; }   // hidden tabs stall rAF — don't count
-  if (!probe.t0) { probe.t0 = now; probe.last = now; return; }
-  probe.frames++;
+  if (probe.owner !== owner) return;
+  if (typeof document !== 'undefined' && document.hidden) {
+    probe.t0 = 0; probe.last = 0; probe.seen = 0;
+    return;
+  }
+  if (!probe.last) { probe.last = now; return; }
   const dt = now - probe.last;
   probe.last = now;
+  // Warmup: skip the first frames (shader compilation, first paint, DOM layout).
+  if (probe.seen < PROBE_WARMUP_FRAMES) { probe.seen++; return; }
+  if (!probe.t0) { probe.t0 = now; probe.frames = 0; probe.slow = 0; return; }
+  probe.frames++;
   if (dt > 50) probe.slow++;   // ran under ~20fps
   const elapsed = now - probe.t0;
   if (elapsed >= PROBE_MS) {
