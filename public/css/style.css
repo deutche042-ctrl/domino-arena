@@ -2852,17 +2852,17 @@ body:not(.in-room) #voicePanel {
 #btnHint:hover { background: rgba(247, 179, 43, .10); border-color: rgba(247, 179, 43, .28); }
 #btnSort { color: var(--muted); }
 
-/* ── scorecard: rank badge, readable rows, code chip ── */
+/* ── scorecard: floating rows over the felt, no panel ── */
 .score-card {
   min-width: 188px;
   max-width: 218px;
-  gap: 1px;
-  padding: 8px;
-  border-radius: 14px;
-  background: var(--hud-surface);
-  border: 1px solid var(--hud-border);
-  box-shadow: var(--hud-shadow);
-  backdrop-filter: blur(16px) saturate(1.12);
+  gap: 3px;
+  padding: 4px;
+  border-radius: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  backdrop-filter: none;
 }
 .sc-row {
   gap: 7px;
@@ -2870,8 +2870,10 @@ body:not(.in-room) #voicePanel {
   border-radius: 8px;
   font-size: 12px;
   line-height: 1.3;
+  background: rgba(3, 8, 18, .34);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .85);
 }
-.sc-row.me { background: rgba(46, 230, 168, .08); }
+.sc-row.me { background: rgba(46, 230, 168, .12); }
 .sc-rank {
   width: 18px;
   height: 18px;
@@ -2903,17 +2905,19 @@ body:not(.in-room) #voicePanel {
 .sc-name .icon-bot { color: var(--muted); flex: 0 0 auto; }
 .sc-who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sc-row.me .sc-who { color: var(--mint-2); }
-.sc-pts { font-size: 12.5px; font-weight: 800; color: var(--gold-2); }
+.sc-pts { font-size: 12.5px; font-weight: 800; color: var(--gold-2); text-shadow: 0 1px 3px rgba(0, 0, 0, .85); }
 .sc-code {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
-  margin-top: 5px;
-  padding-top: 6px;
-  border-top: 1px solid rgba(255, 255, 255, .07);
+  margin-top: 3px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  background: rgba(3, 8, 18, .34);
   font-size: 10.5px;
   color: var(--muted);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .85);
 }
 .sc-code b {
   font-family: "Cairo", sans-serif;
@@ -3016,35 +3020,11 @@ body:not(.in-room) #voicePanel {
 
 /* ── phones: compact command deck, board first ── */
 @media (max-width: 680px) {
-  /* opponents: one horizontal strip under the status bar */
-  #opponents {
-    top: 52px;
-    inset-inline-start: 8px;
-    inset-inline-end: 8px;
-    flex-direction: row;
-    justify-content: center;
-    gap: 5px;
-  }
-  .opp-card {
-    flex: 1 1 0;
-    min-width: 0;
-    max-width: 140px;
-    padding: 4px 6px;
-    gap: 5px;
-    border-radius: 10px;
-  }
-  .opp-avatar { width: 22px; height: 22px; }
-  .opp-avatar .icon-bot { width: 12px; height: 12px; }
-  .opp-info-col { gap: 0; }
-  .opp-name { font-size: 10px; max-width: 78px; }
-  .opp-badge { font-size: 9px; }
-  .opp-badge.tiles { gap: 2px; }
-  .opp-badge.tiles .icon-tile { width: 8px; height: 12px; }
-  .opp-badge.tiles .mini-tile { font-size: 9px; }
-
-  /* one-line status prompt, below the opponent strip */
+  /* The per-turn banner carries each opponent's name and tile count, so the
+     horizontal opponent chips are removed on phones to give the board room. */
+  #opponents { display: none; }
   #turnBanner {
-    top: 98px;
+    top: 54px;
     width: max-content;
     max-width: calc(100vw - 16px);
     padding: 4px 10px;
@@ -3055,7 +3035,7 @@ body:not(.in-room) #voicePanel {
     text-overflow: ellipsis;
   }
   #turnBanner span { display: block; overflow: hidden; text-overflow: ellipsis; }
-  #endsPill { top: 126px; padding: 3px 10px; font-size: 11.5px; }
+  #endsPill { top: 88px; padding: 3px 10px; font-size: 11.5px; }
 
   /* status cluster */
   .hud-right { gap: 1px; padding: 3px; border-radius: 13px; }
@@ -3165,4 +3145,11 @@ body:not(.in-room) #voicePanel {
     right: auto;
     transform: none;
   }
+}
+
+/* Phone landscape: the chips are gone; the per-turn banner carries the info. */
+@media (orientation: landscape) and (max-height: 560px) {
+  #opponents { display: none; }
+  #turnBanner { top: 10px; }
+  #endsPill { top: 48px; }
 }

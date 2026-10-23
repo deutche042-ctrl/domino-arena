@@ -1272,8 +1272,12 @@ function previewEndsTotal(tileId, end) {
 function renderTurnBanner() {
   if (bannerOverride) return;   // a coaching/notice line is holding the banner
   if (spectating) {
-    const nm = view.names?.[view.turn] || '';
-    setBanner(view.status === 'playing' ? `👁 بتتفرج — دور ${nm}` : '👁 بتتفرج', 'spect');
+    const pid = view.turn;
+    const nm = view.names?.[pid] || '';
+    const n = view.handCounts?.[pid];
+    setBanner(view.status === 'playing'
+      ? `👁 بتتفرج — دور ${nm}${n != null ? ` · معاه ${n} ورق` : ''}`
+      : '👁 بتتفرج', 'spect');
     return;
   }
   if (view.status !== 'playing') { setBanner('', ''); return; }
@@ -1292,7 +1296,10 @@ function renderTurnBanner() {
       setBanner('دورك الآن', 'mine');
     }
   } else {
-    setBanner(`دور ${view.names[view.turn] || 'اللاعب'}`, '');
+    const pid = view.turn;
+    const nm = view.names[pid] || 'اللاعب';
+    const n = view.handCounts?.[pid];
+    setBanner(n != null ? `دور ${nm} — معاه ${n} ورق` : `دور ${nm}`, '');
   }
 }
 
