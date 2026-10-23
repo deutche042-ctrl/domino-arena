@@ -9,6 +9,9 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { tileFaceCanvas, tileBackCanvas, feltCanvas, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, onQualityChange, startProbe, feedFrame } from './quality.js?v=3';
+import {
+  getTableDesign, loadTableModel, placeTableModel, applyTableMaterials, disposeTableModel,
+} from './tables3d.js?v=1';
 
 const TILE_W = 1, TILE_L = 2, TILE_H = 0.42, GAP = 0.07;
 const MAX_X = 9.5;              // table boundary along X before turning
@@ -78,6 +81,12 @@ export class Board3D {
     this._quality = getQuality();
     this._texPx = this._quality.tier === 'high' ? FACE_PX_HIGH : FACE_PX_LOW;
     this._shadowDirty = true;
+    // Selected table design. The procedural felt table stays the fallback
+    // until a downloaded model is ready, and remains for the classic option.
+    this._tableDesign = 'classic';
+    this._tableModel = null;
+    this._tableLoadToken = 0;
+    this._tableLoadingId = null;
 
     const low = this._quality.tier === 'low';
     // Low tier renders at CSS resolution with no MSAA and no shadow pass. Those
@@ -452,6 +461,67 @@ export class Board3D {
     this._rimMat.roughness = look.rimRough;
     this._rimMat.needsUpdate = true;
     this._shadowDirty = true;
+  }
+
+  // ── table design (classic felt or a vendored 3D model) ──
+  /**
+   * Swap the play table. Classic shows the procedural felt + rim; a model
+   * design loads its glTF asynchronously and replaces them once it is ready.
+   * The old table stays visible while a new model loads, so a selection can
+   * never flash the board back to an empty scene.
+   */
+  setTable(id) {
+    if (this._disposed) return;
+    const design = getTableDesign(id);
+    if (design.id === this._tableDesign
+        && (design.kind === 'felt' || this._tableModel || this._tableLoadingId === design.id)) return;
+    this._tableDesign = design.id;
+    const token = ++this._tableLoadToken;
+
+    if (design.kind === 'felt') {
+      this._clearTableModel();
+      this._showProceduralTable(true);
+      this._shadowDirty = true;
+      return;
+    }
+
+    this._tableLoadingId = design.id;
+    loadTableModel(design).then((gltf) => {
+      if (this._disposed || token !== this._tableLoadToken) {
+        disposeTableModel(gltf.scene);
+        return;
+      }
+      const root = gltf.scene;
+      placeTableModel(root, { targetSpan: 34, minSpan: 24, playY: TABLE_TOP_Y });
+      applyTableMaterials(root, { anisotropy: this._maxAniso || 4, tone: design.tone || 1 });
+      const old = this._tableModel;
+      this._tableModel = root;
+      this.scene.add(root);
+      if (old) { this.scene.remove(old); disposeTableModel(old); }
+      this._tableLoadingId = null;
+      this._showProceduralTable(false);
+      this._shadowDirty = true;
+      if (this.renderer.shadowMap.enabled) this.renderer.shadowMap.needsUpdate = true;
+    }).catch((err) => {
+      if (token === this._tableLoadToken) this._tableLoadingId = null;
+      console.warn('[table] model load failed:', design.id, err?.message || err);
+    });
+  }
+
+  /** The felt disc/rim/floor are the classic table; models replace all three. */
+  _showProceduralTable(show) {
+    if (this._tableTop) this._tableTop.visible = show;
+    if (this._tableRim) this._tableRim.visible = show;
+    if (this._tableFloor) this._tableFloor.visible = show;
+  }
+
+  _clearTableModel() {
+    const old = this._tableModel;
+    this._tableModel = null;
+    this._tableLoadingId = null;
+    if (!old) return;
+    this.scene.remove(old);
+    disposeTableModel(old);
   }
 
   // ── turn state ──
@@ -1929,6 +1999,10 @@ export class Board3D {
       this._contactTex?.dispose?.();
       this._contact = null;
     }
+
+    // Selected table model.
+    this._tableLoadToken++;
+    this._clearTableModel();
 
     // Table meshes/materials/textures.
     for (const mesh of [this._tableTop, this._tableRim, this._tableFloor]) {

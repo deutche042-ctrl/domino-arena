@@ -1,8 +1,10 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=34';
+import { Board3D } from './board3d.js?v=35';
 import { Home3D } from './home3d.js?v=7';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, setQuality, onQualityChange } from './quality.js?v=3';
+import { TABLE_DESIGNS, getTableDesign, loadTableDesign, saveTableDesign } from './tables3d.js?v=1';
+import { TablePreview } from './tablepreview.js?v=1';
 import { sfx } from './sfx.js?v=17';
 import { VoiceChat } from './voice.js?v=2';
 
@@ -129,6 +131,8 @@ let tileTheme = (() => {
   } catch { return 'classic'; }
 })();
 setTileTheme(tileTheme);
+// F4.5: selected 3D table design (classic felt or a vendored Poly Haven model).
+let tableDesign = loadTableDesign();
 
 function applyTheme(name) {
   if (!THEME_NAMES.includes(name)) return;
@@ -184,6 +188,120 @@ function bindQualityPicker(rootId) {
   });
 }
 
+// ══════════ table picker + rotatable 3D preview (lobby) ══════════
+let tablePreview = null;
+let previewTableId = 'classic';
+
+function selectTable(id) {
+  const design = getTableDesign(id);
+  if (!design) return;
+  tableDesign = design.id;
+  saveTableDesign(design.id);
+  board?.setTable?.(design.id);
+  document.querySelectorAll('.table-choice').forEach((c) => {
+    const on = c.dataset.table === design.id;
+    c.classList.toggle('active', on);
+    c.setAttribute('aria-pressed', String(on));
+  });
+  centerActiveTableCard();
+  sfx.click();
+}
+
+/** Horizontally centre the selected card in its strip without scrolling the page. */
+function centerActiveTableCard() {
+  const wrap = $('tableChoices');
+  const active = wrap?.querySelector('.table-choice.active');
+  if (!wrap || !active) return;
+  const a = active.getBoundingClientRect();
+  const w = wrap.getBoundingClientRect();
+  if (!w.width) return;
+  const delta = (a.left + a.width / 2) - (w.left + w.width / 2);
+  if (Math.abs(delta) > 4) wrap.scrollBy({ left: delta, behavior: 'smooth' });
+}
+
+function renderTableChoices() {
+  const wrap = $('tableChoices');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  for (const d of TABLE_DESIGNS) {
+    const card = document.createElement('div');
+    card.className = 'table-choice' + (d.id === tableDesign ? ' active' : '');
+    card.dataset.table = d.id;
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-pressed', String(d.id === tableDesign));
+    card.innerHTML = `
+      ${d.thumb
+        ? `<img class="tc-thumb" src="${d.thumb}" alt="" loading="lazy" draggable="false">`
+        : '<span class="tc-thumb tc-classic" aria-hidden="true"></span>'}
+      <span class="tc-name">${esc(d.name)}</span>
+      <span class="tc-check" aria-hidden="true">✓</span>
+    `;
+    const eye = document.createElement('button');
+    eye.type = 'button';
+    eye.className = 'tc-eye';
+    eye.title = 'معاينة الطاولة';
+    eye.setAttribute('aria-label', `معاينة ${d.name}`);
+    eye.textContent = '👁';
+    eye.addEventListener('click', (e) => { e.stopPropagation(); openTablePreview(d.id); });
+    card.appendChild(eye);
+    card.addEventListener('click', () => selectTable(d.id));
+    card.addEventListener('keydown', (e) => {
+      if (e.target !== card) return;   // the nested preview button owns its keys
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectTable(d.id); }
+    });
+    wrap.appendChild(card);
+  }
+}
+
+function openTablePreview(id) {
+  const design = getTableDesign(id);
+  const modal = $('modalTableView');
+  if (!modal || !design) return;
+  previewTableId = design.id;
+  $('tableViewName').textContent = design.name;
+  $('tableViewDesc').textContent = design.desc || '';
+  $('tableViewCredit').textContent = design.credit || '';
+  const use = $('btnTableViewUse');
+  if (use) {
+    use.textContent = design.id === tableDesign ? 'مختارة بالفعل' : 'استخدم التصميم ده';
+    use.disabled = design.id === tableDesign;
+  }
+  const loading = $('tableViewLoading');
+  if (loading) { loading.textContent = 'جاري التحميل…'; loading.classList.remove('hidden'); }
+  modal.classList.remove('hidden');
+  if (!tablePreview) {
+    tablePreview = new TablePreview($('tableViewCanvas'), {
+      onState: (state) => {
+        const el = $('tableViewLoading');
+        if (!el) return;
+        el.classList.toggle('hidden', state === 'ready');
+        if (state === 'error') el.textContent = 'تعذّر تحميل المعاينة';
+      },
+    });
+  }
+  tablePreview.resume();
+  tablePreview.setDesign(design);
+  sfx.click();
+}
+
+function closeTablePreview() {
+  $('modalTableView')?.classList.add('hidden');
+  tablePreview?.pause();
+}
+
+function initTablePicker() {
+  renderTableChoices();
+  const previewBtn = $('btnTablePreview');
+  if (previewBtn) previewBtn.onclick = () => openTablePreview(tableDesign);
+  const closeBtn = $('btnTableViewClose');
+  if (closeBtn) closeBtn.onclick = closeTablePreview;
+  const useBtn = $('btnTableViewUse');
+  if (useBtn) useBtn.onclick = () => { selectTable(previewTableId); closeTablePreview(); };
+  const modal = $('modalTableView');
+  if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) closeTablePreview(); });
+}
+
 // ══════════ screens ══════════
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -198,9 +316,19 @@ function showScreen(name) {
   // Self-heal: whenever the lobby becomes visible the code box must show a
   // code — repaint from the freshest known source in case an earlier paint
   // was missed, stale, or rendered while roomCode was still unset.
-  if (name === 'lobby') paintLobbyCode(lastLobbyState);
+  if (name === 'lobby') {
+    paintLobbyCode(lastLobbyState);
+    requestAnimationFrame(centerActiveTableCard);
+  }
+  if (name === 'game') {
+    // The lobby preview owns a second WebGL context; release it before the
+    // actual board starts so low-end phones never hold both at once.
+    closeTablePreview();
+    if (tablePreview) { tablePreview.destroy(); tablePreview = null; }
+  }
   if (name === 'game' && !board) {
     board = createBoard($('table3d'), { onMarkerClick, onBoardMiss, onBoneyardClick: onBoneyardDraw });
+    board?.setTable?.(tableDesign);
   }
   if (name === 'game') setTimeout(() => board?.resize(), 50);
   home3d?.setActive(name === 'home');
@@ -661,6 +789,7 @@ function initLobby() {
     const el = $(id);
     if (el) el.onchange = pushConfig;
   }
+  initTablePicker();
 }
 function lobbyError(msg) { $('lobbyError').textContent = msg || ''; }
 
@@ -1262,6 +1391,7 @@ function previewEndsTotal(tileId, end) {
 }
 
 function renderTurnBanner() {
+  if (!view) return;            // leaving the room clears view before the banner hold
   if (bannerOverride) return;   // a coaching/notice line is holding the banner
   if (spectating) {
     const pid = view.turn;

@@ -8,7 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=81">
+<link rel="stylesheet" href="css/style.css?v=82">
 <script type="importmap">
 {
   "imports": {
@@ -200,6 +200,13 @@
       <button id="voiceStripBtn" class="voice-strip-btn" type="button">ادخل الصوت</button>
     </div>
     <button id="btnAddBot" class="btn small add-bot hidden">🤖 إضافة بوت</button>
+    <div class="table-picker">
+      <div class="table-picker-head">
+        <span class="table-picker-title">شكل الطاولة</span>
+        <button id="btnTablePreview" class="btn small" type="button">👁 معاينة</button>
+      </div>
+      <div id="tableChoices" class="table-choices" role="group" aria-label="اختيار شكل الطاولة"></div>
+    </div>
     <div id="hostConfig" class="host-config hidden">
       <label>نوع اللعبة
         <select id="selVariant">
@@ -413,6 +420,27 @@
   </div>
 </section>
 
+<!-- lobby table preview: body-level so it can cover the lobby screen -->
+  <div id="modalTableView" class="modal hidden" role="dialog" aria-modal="true" aria-label="معاينة الطاولة">
+    <div class="modal-card table-view-card">
+      <button id="btnTableViewClose" class="chat-icon-btn how-close" title="إغلاق" aria-label="إغلاق">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+      <h2 id="tableViewName">معاينة الطاولة</h2>
+      <p id="tableViewDesc" class="table-view-desc"></p>
+      <div class="table-view-stage" id="tableViewStage">
+        <canvas id="tableViewCanvas"></canvas>
+        <div id="tableViewLoading" class="table-view-loading">جاري التحميل…</div>
+      </div>
+      <p class="table-view-hint">اسحب لتدوير الطاولة — وبإصبعين للتقريب</p>
+      <p id="tableViewCredit" class="table-view-credit"></p>
+      <button id="btnTableViewUse" class="btn primary" type="button">استخدم التصميم ده</button>
+    </div>
+  </div>
+
 <!-- ══════════ GLOBAL CHAT (lobby + game, while in a room) ══════════
      Body-level on purpose: it must work on both screens, not just #screen-game.
      `body.in-room` (set by app.js) gates the whole cluster. -->
@@ -574,6 +602,6 @@
 </div>
 
 <script>window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(((e.error&&e.error.stack)||e.message).split('\n').slice(0,4).join(' | '));});window.addEventListener('unhandledrejection',function(e){window.__errs.push('rej: '+((e.reason&&(e.reason.stack||e.reason.message))||String(e.reason)));});</script>
-<script type="module" src="js/app.js?v=74"></script>
+<script type="module" src="js/app.js?v=75"></script>
 </body>
 </html>
