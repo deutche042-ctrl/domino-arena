@@ -4,7 +4,7 @@
 //   - static assets (js/css/vendor/fonts/icons): cache-first, filled at runtime
 //   - everything else (socket.io): network only — live data never cached
 // Cache name is versioned: bump SW_VER when shipped asset expectations change.
-const SW_VER = 'domino-v43';
+const SW_VER = 'domino-v44';
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SW_VER).then(c => c.addAll([

@@ -8,7 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=85">
+<link rel="stylesheet" href="css/style.css?v=86">
 <script type="importmap">
 {
   "imports": {
@@ -435,6 +435,13 @@
         </label>
       </div>
       <div class="set-group">
+        <span class="set-label">قائمة اللاعبين</span>
+        <div class="diff-row" id="scoreCardRow" role="group" aria-label="إظهار قائمة اللاعبين">
+          <button type="button" class="diff-chip" data-scorecard="show" aria-pressed="true">👁 ظاهرة</button>
+          <button type="button" class="diff-chip" data-scorecard="hide" aria-pressed="false">🙈 مخفية</button>
+        </div>
+      </div>
+      <div class="set-group">
         <span class="set-label">جودة الرسوم</span>
         <div class="diff-row" id="qualityRowGame" role="group" aria-label="جودة الرسوم">
           <button type="button" class="diff-chip" data-quality="auto" aria-pressed="false">✨ تلقائي</button>
@@ -651,6 +658,6 @@
 </div>
 
 <script>window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(((e.error&&e.error.stack)||e.message).split('\n').slice(0,4).join(' | '));});window.addEventListener('unhandledrejection',function(e){window.__errs.push('rej: '+((e.reason&&(e.reason.stack||e.reason.message))||String(e.reason)));});</script>
-<script type="module" src="js/app.js?v=99"></script>
+<script type="module" src="js/app.js?v=100"></script>
 </body>
 </html>

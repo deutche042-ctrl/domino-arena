@@ -3584,4 +3584,9 @@ body:not(.in-room) #voicePanel {
     linear-gradient(180deg, rgba(3, 6, 14, .42) 0, transparent 18%, transparent 68%, rgba(3, 6, 14, .74) 100%),
     radial-gradient(ellipse at center, transparent 46%, rgba(3, 6, 14, .34) 100%);
 }
-#table3d { z-index: 1; }
+/* No z-index on #table3d: it is authored after #gameEnv, so it already paints
+   above the backdrop — and an explicit z-index lifted the canvas over #hud,
+   which silently hid the sound / fullscreen / settings buttons. */
+
+/* ── in-game player list toggle (settings → قائمة اللاعبين) ── */
+body.hide-scoreboard #scoreCard { display: none; }

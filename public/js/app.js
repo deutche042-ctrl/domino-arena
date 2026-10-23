@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=51';
+import { Board3D } from './board3d.js?v=52';
 import { Home3D } from './home3d.js?v=7';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, setQuality, onQualityChange } from './quality.js?v=3';
@@ -206,6 +206,29 @@ function syncQualityUI() {
     if (n) n.textContent = noteText;
   }
 }
+// ── in-game player list (scorecard) visibility ──
+// Some players want the felt to themselves; the list is chrome, so it is a
+// persisted per-device preference rather than something the room decides.
+function scorecardHidden() {
+  try { return localStorage.getItem('domino_scoreboard') === 'hide'; } catch { return false; }
+}
+function syncScorecardUI() {
+  const hidden = scorecardHidden();
+  document.querySelectorAll('#scoreCardRow .diff-chip').forEach((c) => {
+    const on = (c.dataset.scorecard === 'hide') === hidden;
+    c.classList.toggle('active', on);
+    c.setAttribute('aria-pressed', String(on));
+  });
+}
+function applyScorecard() {
+  document.body.classList.toggle('hide-scoreboard', scorecardHidden());
+  syncScorecardUI();
+}
+function setScorecard(hidden) {
+  try { localStorage.setItem('domino_scoreboard', hidden ? 'hide' : 'show'); } catch { /* no storage */ }
+  applyScorecard();
+}
+
 function bindQualityPicker(rootId) {
   document.querySelectorAll(`#${rootId} .diff-chip`).forEach(ch => {
     ch.onclick = () => {
@@ -2294,6 +2317,7 @@ function openSettings() {
   const vb = $('chkVibrate');
   if (vb) vb.checked = vibrationOn();
   syncQualityUI();
+  syncScorecardUI();
   modal.classList.remove('hidden');
 }
 function initSettingsModal() {
@@ -2312,6 +2336,13 @@ function initSettingsModal() {
     };
     rng.onchange = () => sfx.click();
   }
+  document.querySelectorAll('#scoreCardRow .diff-chip').forEach((ch) => {
+    ch.onclick = () => {
+      setScorecard(ch.dataset.scorecard === 'hide');
+      sfx.click();
+    };
+  });
+  applyScorecard();
   const cf = $('chkConfirm');
   if (cf) {
     cf.onchange = () => {
