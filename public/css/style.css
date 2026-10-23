@@ -3626,8 +3626,15 @@ body.ui-compact #turnTimer { width: 28px; height: 28px; }
 body.ui-compact #turnTimerSecs { font-size: 11px; }
 body.ui-compact #turnBanner { font-size: 11.5px; padding: 4px 12px; }
 
-body.ui-compact .fab { width: 38px; height: 38px; bottom: 112px; inset-inline-start: 10px; }
+/* Sizes shrink; the per-button offsets stay in charge (a blanket bottom/inset
+   here stacked the chat, voice and voice-panel buttons on top of each other). */
+body.ui-compact .fab { width: 38px; height: 38px; }
 body.ui-compact .fab .voice-ic { width: 18px; height: 18px; }
+body.ui-compact #btnChat { bottom: 104px; inset-inline-start: 10px; }
+body.ui-compact .voice-fab { bottom: 104px; inset-inline-start: 56px; }
+body.ui-compact .voice-panel-btn {
+  width: 26px; height: 26px; bottom: 150px; inset-inline-start: 62px;
+}
 body.ui-compact .exit-fab { width: 36px; height: 36px; bottom: 10px; right: 10px; }
 
 body.ui-compact .score-card { min-width: 132px; max-width: 158px; }

@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=55';
+import { Board3D } from './board3d.js?v=56';
 import { Home3D } from './home3d.js?v=7';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, setQuality, onQualityChange } from './quality.js?v=3';
@@ -1369,15 +1369,9 @@ function renderHand() {
     }
     hand.appendChild(el);
   }
-  // 1.2: "what can I play" as a number, not an inference. Only meaningful on my
-  // turn — during opponents' turns every tile would read as "dead".
-  const cnt = $('handCount');
-  if (cnt) {
-    const playableN = playableIds.size;
-    const deadN = myTurn ? handList.length - playableN : 0;
-    cnt.textContent = myTurn ? `${playableN} متاح · ${deadN} ميت` : '';
-    cnt.classList.toggle('hidden', !myTurn || !handList.length);
-  }
+  // The old "N متاح · M ميت" chip above the dock was removed: it sat on the
+  // tray's edge and clipped on phones, and the tiles already dim what cannot
+  // be played.
 }
 
 function renderActions() {
