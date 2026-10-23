@@ -9,7 +9,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { tileFaceCanvas, tileBackCanvas, getTheme, setTheme as setTileTheme, THEME_NAMES } from './tiles.js?v=15';
-import { getQuality, onQualityChange, startProbe, feedFrame } from './quality.js?v=2';
+import { getQuality, onQualityChange, startProbe, feedFrame } from './quality.js?v=3';
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const DEEP = 0x121a3c; // mid-twilight sky tone so fog blends into the gradient
@@ -43,9 +43,12 @@ export class Home3D {
     this._quality = getQuality();
     this._faceSize = this._quality.tier === 'high' ? 256 : 128;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    const low = this._quality.tier === 'low';
+    this.renderer = new THREE.WebGLRenderer({
+      canvas, alpha: true, antialias: !low, powerPreference: 'high-performance',
+    });
     this.renderer.setClearColor(0x000000, 0);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, low ? 1 : 1.75));
     // B4: filmic output — matches the game board's grade
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.12;
@@ -75,6 +78,7 @@ export class Home3D {
     this.scene.add(key);
     const gold = new THREE.PointLight(0xf7b32b, 85, 0, 2);
     gold.position.set(-7, -5, 5);
+    gold.visible = !low;   // accent pools are the first thing a phone GPU drops
     this.scene.add(gold);
     // warm rim from below-front — gilds the tile edges against the dusk sky
     const rim = new THREE.DirectionalLight(0xffd27a, 0.65);
@@ -82,7 +86,9 @@ export class Home3D {
     this.scene.add(rim);
     const teal = new THREE.PointLight(0x2ee6a8, 40, 0, 2);
     teal.position.set(8, 6, 2);
+    teal.visible = !low;
     this.scene.add(teal);
+    this._accentLights = [gold, teal];
 
     // one shared beveled tile shape; faces use the canvas art from tiles.js
     this.geo = new RoundedBoxGeometry(1, 2, 0.28, 3, 0.06);
@@ -122,8 +128,10 @@ export class Home3D {
     this._quality = q;
     const high = q.tier === 'high';
     const dpr = Math.min(window.devicePixelRatio || 1, high ? 1.75 : 1.0);
+    this._frameInterval = high ? 0 : 1000 / 30;
     this.renderer.setPixelRatio(dpr);
     this._composer?.setPixelRatio(dpr);
+    for (const l of this._accentLights || []) l.visible = high;
 
     const want = this._desiredTileCount();
     while (this.tiles.length > want) this._removeTile();
@@ -364,6 +372,11 @@ export class Home3D {
   tick = (now) => {
     if (this._disposed) return;
     this.raf = requestAnimationFrame(this.tick);
+    // Low tier renders the backdrop at 30fps; the tumbling motion is slow
+    // enough that the halved cadence is invisible, and the GPU gets breathing
+    // room for the actual board when the player moves on.
+    if (this._frameInterval && now - (this._lastStep || 0) < this._frameInterval) return;
+    this._lastStep = now;
     const dt = Math.min((now - this.last) / 1000, 0.05);
     this.last = now;
     const t = now / 1000;

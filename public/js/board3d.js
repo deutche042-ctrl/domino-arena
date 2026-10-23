@@ -8,7 +8,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { tileFaceCanvas, tileBackCanvas, feltCanvas, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
-import { getQuality, onQualityChange, startProbe, feedFrame } from './quality.js?v=2';
+import { getQuality, onQualityChange, startProbe, feedFrame } from './quality.js?v=3';
 
 const TILE_W = 1, TILE_L = 2, TILE_H = 0.42, GAP = 0.07;
 const MAX_X = 9.5;              // table boundary along X before turning
@@ -79,9 +79,15 @@ export class Board3D {
     this._texPx = this._quality.tier === 'high' ? FACE_PX_HIGH : FACE_PX_LOW;
     this._shadowDirty = true;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    this.renderer.shadowMap.enabled = true;
+    const low = this._quality.tier === 'low';
+    // Low tier renders at CSS resolution with no MSAA and no shadow pass. Those
+    // three together are the difference between a phone GPU compositing a frame
+    // and choking on it; the desktop high-tier path is untouched.
+    this.renderer = new THREE.WebGLRenderer({
+      canvas, antialias: !low, powerPreference: 'high-performance',
+    });
+    this.renderer.setPixelRatio(low ? 1 : Math.min(devicePixelRatio || 1, 2));
+    this.renderer.shadowMap.enabled = !low;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     // Shadows only need a new pass when geometry moved — not on every frame and
     // not when only the camera orbited. _step() raises needsUpdate on changes.
@@ -92,7 +98,9 @@ export class Board3D {
     // B3: filmic output — ACES tone mapping over the new env-lit scene
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
-    this._maxAniso = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    this._maxAniso = Math.min(low ? 2 : 8, this.renderer.capabilities.getMaxAnisotropy());
+    this._frameInterval = low ? 1000 / 30 : 0;   // low tier: 30fps is plenty
+    this._lastStep = 0;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x070a14);
@@ -153,12 +161,16 @@ export class Board3D {
     this._key = key;
     const rim = new THREE.PointLight(0x4d7dff, 10, 40);
     rim.position.set(-8, 6, -6);
+    rim.visible = !low;   // one fewer point light in every low-tier fragment
+    this._rimLight = rim;
     this.scene.add(rim);
 
-    // Warm invite spotlight on boneyard when drawing is possible
+    // Warm invite spotlight on boneyard when drawing is possible. Keep it in
+    // the light list with intensity 0: toggling `visible` changes the light
+    // count and recompiles every standard material on the first draw.
     this.boneLight = new THREE.PointLight(0xf4c055, 0, 14);
     this.boneLight.position.set(9.5, 4.0, 9.8);
-    this.boneLight.visible = false;
+    this.boneLight.intensity = 0;
     this.scene.add(this.boneLight);
 
     // F4.4: respect the OS reduced-motion preference — flattens the arc/drop
@@ -302,18 +314,20 @@ export class Board3D {
   // ── B3: adaptive quality wiring ──
   _applyQuality(q = getQuality()) {
     if (this._disposed) return;
-    const prevTier = this._quality?.tier;
     this._quality = q;
     const high = q.tier === 'high';
-    const downgraded = prevTier === 'high' && !high;
-    const dpr = Math.min(devicePixelRatio || 1, high ? 2 : 1.5);
+    // Low is a phone budget: CSS-resolution buffer, no MSAA, no shadows and a
+    // 30fps cap. High keeps the full desktop pipeline (DPR 2, MSAA bloom,
+    // 2048 shadows) so nothing changes on a computer.
+    const dpr = high ? Math.min(devicePixelRatio || 1, 2) : 1;
+    this._frameInterval = high ? 0 : 1000 / 30;
     this.renderer.setPixelRatio(dpr);
     // A composer that survives the resize must adopt the new pixel ratio too.
     this._composer?.setPixelRatio(dpr);
-    // shadow budget: 2048 high / 1024 low. A live probe downgrade kills shadows
-    // entirely — the device already proved it can't hold the frame rate.
+    // Shadow budget: 2048 high / 1024 low. The low tier disables the shadow
+    // pass entirely; the instanced contact quads still ground every tile.
     if (this._key) {
-      this._key.castShadow = !downgraded;
+      this._key.castShadow = high;
       const size = high ? 2048 : 1024;
       if (this._key.shadow.mapSize.x !== size) {
         this._key.shadow.mapSize.set(size, size);
@@ -321,7 +335,19 @@ export class Board3D {
       }
       this._key.shadow.camera.updateProjectionMatrix();
     }
-    this.renderer.shadowMap.needsUpdate = true;
+    this.renderer.shadowMap.enabled = high;
+    this.renderer.shadowMap.needsUpdate = high;
+    const aniso = Math.min(high ? 8 : 2, this.renderer.capabilities.getMaxAnisotropy());
+    if (aniso !== this._maxAniso) {
+      this._maxAniso = aniso;
+      if (this._feltTex) { this._feltTex.anisotropy = aniso; this._feltTex.needsUpdate = true; }
+    }
+    // Marker halo lights and the blue rim are decoration; low drops them so
+    // every standard material shades with one point light instead of six.
+    if (this._rimLight) this._rimLight.visible = high;
+    for (const slot of this._markerPool || []) {
+      if (slot.light) slot.light.visible = high;
+    }
     const px = high ? FACE_PX_HIGH : FACE_PX_LOW;
     if (px !== this._texPx) {
       this._texPx = px;
@@ -381,14 +407,17 @@ export class Board3D {
 
   // ── table ──
   _buildTable() {
+    // The low tier shaves the two large cylinders: 32 segments is still a
+    // smooth silhouette at phone distance and costs half the vertices.
+    const seg = this._quality.tier === 'high' ? 64 : 32;
     this._feltMat = new THREE.MeshStandardMaterial({ roughness: 0.95, envMapIntensity: 0.22 });
-    const top = new THREE.Mesh(new THREE.CylinderGeometry(17, 17, 0.6, 64), this._feltMat);
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(17, 17, 0.6, seg), this._feltMat);
     top.position.y = -0.3 - TILE_H / 2;
     top.receiveShadow = true;
     this.scene.add(top);
     this._tableTop = top;
     this._rimMat = new THREE.MeshStandardMaterial({ color: 0x4a2f1d, roughness: 0.32, metalness: 0.45, envMapIntensity: 0.9 });
-    const rim = new THREE.Mesh(new THREE.CylinderGeometry(18.4, 18.4, 0.7, 64), this._rimMat);
+    const rim = new THREE.Mesh(new THREE.CylinderGeometry(18.4, 18.4, 0.7, seg), this._rimMat);
     rim.position.y = -0.42 - TILE_H / 2;
     this.scene.add(rim);
     this._tableRim = rim;
@@ -1140,7 +1169,6 @@ export class Board3D {
     const was = this.canDraw;
     this.canDraw = !!canDraw;
     if (this.boneLight) {
-      this.boneLight.visible = this.canDraw;
       this.boneLight.intensity = this.canDraw ? (this._reducedMotion ? 4 : 3.5) : 0;
     }
     if (!this.canDraw && this.renderer?.domElement?.style?.cursor === 'pointer') {
@@ -1339,8 +1367,13 @@ export class Board3D {
 
       // Keep the light in the render list with intensity 0 when idle: toggling
       // `visible` on a light changes the light count and forces a shader recompile.
-      const light = new THREE.PointLight(0x2ee6a8, 0, 4);
+      // Low tier gets a position-only placeholder — the pads stay visible, but
+      // the four extra point lights leave the fragment shader.
+      const light = this._quality.tier === 'high'
+        ? new THREE.PointLight(0x2ee6a8, 0, 4)
+        : new THREE.Object3D();
       light.position.y = 1.2;
+      if (light.isLight) light.visible = true;
 
       const sprite = new THREE.Sprite(this._ghostSpriteMat);
       sprite.scale.set(1.7, 0.85, 1);
@@ -1680,6 +1713,10 @@ export class Board3D {
   };
 
   _step(now) {
+    // Low-tier frame cap: rAF still ticks at the display rate, but the scene is
+    // only stepped/rendered at 30fps, halving GPU work during animations.
+    if (this._frameInterval && now - this._lastStep < this._frameInterval) return;
+    this._lastStep = now;
     const dt = Math.min(this.clock ? (now - this.clock) / 1000 : 0.016, 0.05);
     this.clock = now;
     const t = now / 1000;

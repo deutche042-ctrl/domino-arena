@@ -1,8 +1,8 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=32';
-import { Home3D } from './home3d.js?v=6';
+import { Board3D } from './board3d.js?v=33';
+import { Home3D } from './home3d.js?v=7';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
-import { getQuality, setQuality } from './quality.js?v=2';
+import { getQuality, setQuality } from './quality.js?v=3';
 import { sfx } from './sfx.js?v=17';
 import { VoiceChat } from './voice.js?v=2';
 

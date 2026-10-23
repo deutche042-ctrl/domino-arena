@@ -26,8 +26,25 @@ let downgraded = false;   // probe verdict for the session (auto mode only)
 let heuristic = null;     // cached heuristic verdict
 let probe = null;
 
+// Handheld detection is deliberately blunt: a phone with 8 cores and 8 GB of
+// RAM still cannot afford the high-tier MSAA+bloom path, and starting high then
+// waiting for the probe to correct it costs the first seconds of a match. Touch
+// laptops keep their fine pointer, so only a genuinely narrow touch viewport
+// counts as handheld.
+export function isHandheldDevice() {
+  try {
+    if (typeof window !== 'undefined' && window.matchMedia
+        && matchMedia('(pointer: coarse)').matches) return true;
+  } catch { /* matchMedia unavailable */ }
+  const touch = (typeof navigator !== 'undefined' && navigator.maxTouchPoints) || 0;
+  if (touch <= 0 || typeof window === 'undefined') return false;
+  return Math.min(window.innerWidth || 0, window.innerHeight || 0) < 900;
+}
+
 function heuristicTier() {
   if (heuristic) return heuristic;
+  // Handhelds always start low; the quality picker can still force 'high'.
+  if (isHandheldDevice()) { heuristic = 'low'; return heuristic; }
   let score = 0;
   const cores = navigator.hardwareConcurrency || 4;
   if (cores >= 6) score += 2;
