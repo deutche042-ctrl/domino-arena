@@ -64,8 +64,8 @@ const ROOM_STYLE_IDS = ['modern', 'cozy', 'billiard', 'playful'];
 // How long a manual orbit keeps the auto-fit out of the way. Short enough to
 // feel like light tracking, long enough that the camera never fights a drag.
 const USER_ORBIT_HOLD_MS = 5000;
-const CAM_MIN_DIST = 24;
-const CAM_MIN_DIST_PORTRAIT = 32;
+const CAM_MIN_DIST = 12;
+const CAM_MIN_DIST_PORTRAIT = 16;
 
 // Theme-tinted table/side/bloom look. Kept small and explicit so every value the
 // material swap touches lives in one place.
@@ -197,7 +197,7 @@ export class Board3D {
 
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enablePan = false;
-    this.controls.minDistance = 14;
+    this.controls.minDistance = 8;
     this.controls.maxDistance = 46;
     this.controls.maxPolarAngle = Math.PI * 0.42;
     // Steep orbit allowed: the fit camera looks down at the felt almost from
@@ -1687,7 +1687,7 @@ export class Board3D {
       this._camTargetGoal = { x: 0, y: 0, z: 0 };
       // Lower than the old top-down default: the room must be visible
       // above/behind the table, not just a green felt filling the frame.
-      this._camGoal = { x: 0, y: (this.camera.aspect || 1) < 0.95 ? 25 : 20.4, z: (this.camera.aspect || 1) < 0.95 ? 20.2 : 12.7 };
+      this._camGoal = { x: 0, y: (this.camera.aspect || 1) < 0.95 ? 12.5 : 10.2, z: (this.camera.aspect || 1) < 0.95 ? 10.1 : 6.4 };
       this._applyCameraGoal();
       return;
     }
