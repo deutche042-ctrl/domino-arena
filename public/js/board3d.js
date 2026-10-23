@@ -53,7 +53,7 @@ const FACE_PX_HIGH = 256, FACE_PX_LOW = 128;
 // real table sits inside with a walk-around ring — props keep their authored
 // proportions AND the felt/rim/tile ratios read true.
 const ROOM_SCALE = 6;                                  // world units per room metre
-const ROOM_DIMS = { width: 15, depth: 16, height: 4.8 };   // hall sized around the table, like the demo
+const ROOM_DIMS = { width: 15, depth: 16, height: 5.6 };   // hall sized around the table, like the demo
 const ROOM_FRONT_OPENING = 7.4;                        // wide doorway on the +Z wall
 const ROOM_FLOOR_Y = -4.8;                             // felt top (-0.21) sits 4.6 units ≈ 0.77 m above it
 const ROOM_TABLE_RADIUS = 18.4 / ROOM_SCALE + 0.05;    // keep-out radius, room metres
@@ -64,8 +64,8 @@ const ROOM_STYLE_IDS = ['modern', 'cozy', 'billiard', 'playful'];
 // How long a manual orbit keeps the auto-fit out of the way. Short enough to
 // feel like light tracking, long enough that the camera never fights a drag.
 const USER_ORBIT_HOLD_MS = 5000;
-const CAM_MIN_DIST = 26;
-const CAM_MIN_DIST_PORTRAIT = 34;
+const CAM_MIN_DIST = 24;
+const CAM_MIN_DIST_PORTRAIT = 32;
 
 // Theme-tinted table/side/bloom look. Kept small and explicit so every value the
 // material swap touches lives in one place.
@@ -200,7 +200,9 @@ export class Board3D {
     this.controls.minDistance = 14;
     this.controls.maxDistance = 46;
     this.controls.maxPolarAngle = Math.PI * 0.42;
-    this.controls.minPolarAngle = Math.PI * 0.18;
+    // Steep orbit allowed: the fit camera looks down at the felt almost from
+    // above, and OrbitControls clamps phi on every update().
+    this.controls.minPolarAngle = Math.PI * 0.10;
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
@@ -1685,7 +1687,7 @@ export class Board3D {
       this._camTargetGoal = { x: 0, y: 0, z: 0 };
       // Lower than the old top-down default: the room must be visible
       // above/behind the table, not just a green felt filling the frame.
-      this._camGoal = { x: 0, y: 13, z: (this.camera.aspect || 1) < 0.95 ? 31 : 22 };
+      this._camGoal = { x: 0, y: (this.camera.aspect || 1) < 0.95 ? 25 : 20.4, z: (this.camera.aspect || 1) < 0.95 ? 20.2 : 12.7 };
       this._applyCameraGoal();
       return;
     }
@@ -1709,8 +1711,8 @@ export class Board3D {
     // the depth span (foreshortened by the camera elevation below).
     const tan = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
     const aspect = Math.max(0.35, this.camera.aspect || 1);
-    const distH = (spanX / (2 * tan * aspect)) * 1.2;
-    const distV = ((spanZ * 0.85) / (2 * tan)) * 1.2;
+    const distH = (spanX / (2 * tan * aspect)) * 1.1;
+    const distV = ((spanZ * 0.85) / (2 * tan)) * 1.1;
     // The default view is deliberately close (the felt + ring of room), and the
     // fit opens up as the chain grows, so the whole board is contained by the
     // time it matters. Never closer than CAM_MIN_DIST: anything under the rim
@@ -1722,13 +1724,12 @@ export class Board3D {
     const maxDist = aspect < 0.85 ? 72 : 48;
     const dist = clamp(Math.max(distH, distV, minDist), minDist, maxDist);
     this.controls.maxDistance = Math.max(60, Math.min(120, dist * 1.4));
-    // ~35° above the felt in landscape, ~25° when portrait: dominoes stay
-    // readable while the room shows behind the far edge of the table. The
-    // camera stays under the ceiling (the room clamp in _clampCameraToRoom
-    // would otherwise flatten the shot).
+    // Steep by design (≈58° landscape / ≈51° portrait): the cards are read
+    // almost from above, and the near edge of the felt never eats the frame.
+    // The room clamp in _clampCameraToRoom still keeps it under the ceiling.
     this._camGoal = portrait
-      ? { x: cx, y: dist * 0.40, z: cz + dist * 0.90 }
-      : { x: cx, y: dist * 0.50, z: cz + dist * 0.86 };
+      ? { x: cx, y: dist * 0.78, z: cz + dist * 0.63 }
+      : { x: cx, y: dist * 0.85, z: cz + dist * 0.53 };
     this._camTargetGoal = { x: cx, y: 0, z: cz };
     this._applyCameraGoal();
   }
