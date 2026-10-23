@@ -3153,3 +3153,47 @@ body:not(.in-room) #voicePanel {
   #turnBanner { top: 10px; }
   #endsPill { top: 48px; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   FLUID SIZING — no fixed viewport assumptions
+   The hand tiles scale with the viewport instead of a hard 50×100; the
+   scorecard lifts above the dock on mid-width windows (where the centred
+   hand used to cover it); short landscape gets a compact top-left board.
+   ═══════════════════════════════════════════════════════════════════ */
+.tile-h {
+  width: clamp(40px, 4.8vw, 56px);
+  height: auto;
+  aspect-ratio: 1 / 2;
+}
+
+/* 681–1020px: the hand can be wide enough to sit over the bottom-left scores. */
+@media (min-width: 681px) and (max-width: 1020px) {
+  .score-card {
+    bottom: calc(170px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Short landscape: a compact standings block under the top bar, no code row. */
+@media (min-width: 681px) and (max-height: 520px) {
+  .score-card {
+    top: 60px;
+    bottom: auto;
+    left: 14px;
+    min-width: 150px;
+    max-width: 170px;
+    padding: 2px;
+    gap: 2px;
+  }
+  .sc-row { padding: 2px 4px; font-size: 10px; gap: 4px; }
+  .sc-rank { width: 14px; height: 14px; font-size: 8px; }
+  .sc-name { font-size: 10px; }
+  .sc-pts { font-size: 10px; }
+  .sc-code { display: none; }
+}
+
+@media (max-width: 680px) {
+  .tile-h {
+    width: clamp(40px, 11vw, 46px);
+    height: auto;
+  }
+}
