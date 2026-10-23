@@ -251,14 +251,46 @@ test('turn timer: forceSkip penalizes a timed-out player even with legal moves',
   assert.ok(g.legalMoves('a').length > 0);   // a could play, but timed out
   g.forceSkip('a');
   assert.equal(g.turn, 'b');
+  assert.equal(g.leadForcedTile, null);      // B2: forced opening lead is dropped
+  assert.ok(g.legalMoves('b').length > 0);   // b may now open with any tile
   assert.equal(g.lastAction.type, 'skip');
   assert.equal(g.lastAction.pid, 'a');
-  // b has no 4 and cannot draw (block) → force-skip too → 2 consecutive skips = players → blocked
+  // A timeout is still a skip penalty even when the player has a legal move:
+  // two consecutive skips = players → blocked hand.
   g.forceSkip('b');
   assert.equal(g.status, 'handEnd');
   assert.equal(g.handResult.blocked, true);
   assert.equal(g.handResult.winnerId, 'b');  // b: 8 pips vs a: 9 pips
   assert.equal(g.scores.b, 9);
+});
+
+test('B2: skipping the opening leader keeps the next player able to lead', () => {
+  const g = new DominoGame({
+    variant: 'block', playerIds: ['a', 'b'],
+    deal: { hands: { a: ['6-6', '1-2'], b: ['0-4', '3-5'] }, boneyard: [] },
+  });
+  assert.equal(g.turn, 'a');                 // a holds the highest double
+  assert.equal(g.leadForcedTile, '6-6');
+  assert.deepEqual(g.legalMoves('a'), [{ tileId: '6-6', end: null }]);
+  g.forceSkip('a');
+  assert.equal(g.turn, 'b');
+  assert.equal(g.leadForcedTile, null, 'the forced tile must not follow the turn');
+  assert.equal(g.legalMoves('b').length, 2, 'b may open with either tile');
+  assert.equal(g.viewFor('b').leadForcedTile, null, 'no phantom forced-lead banner');
+});
+
+test('B2: a disconnect-driven advance also drops the forced lead', () => {
+  const g = new DominoGame({
+    variant: 'block', playerIds: ['a', 'b'],
+    deal: { hands: { a: ['6-6', '1-2'], b: ['0-4', '3-5'] }, boneyard: [] },
+  });
+  const leader = g.turn;
+  assert.equal(leader, 'a');
+  assert.equal(g.leadForcedTile, '6-6');
+  // server.js advances the turn directly on a disconnect, bypassing forceSkip.
+  g._advanceTurn(leader);
+  assert.equal(g.leadForcedTile, null);
+  assert.equal(g.legalMoves(g.turn).length, 2);
 });
 
 test('turn timer: forceSkip counts toward block detection like a pass', () => {

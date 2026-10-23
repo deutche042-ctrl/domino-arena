@@ -387,7 +387,9 @@ export class DominoGame {
       passLog: (this.passLog || []).map(e => ({ pid: e.pid, ends: e.ends.slice(), kind: e.kind })),
       ends: this.moves.length ? this.attachableEnds() : [],
       endsTotal: this.endsTotal(),
-      leadForcedTile: this.turn === pid ? this.leadForcedTile : null,
+      leadForcedTile: this.turn === pid && this.leadForcedTile &&
+        (this.hands[pid] || []).some(t => t.id === this.leadForcedTile)
+        ? this.leadForcedTile : null,
       forcedDrawTile: this.turn === pid && this.status === 'playing' ? this.forcedDrawTileId : null,
       scores: { ...this.scores },
       legalMoves: this.turn === pid && this.status === 'playing' ? this.legalMoves(pid) : [],
@@ -461,6 +463,16 @@ export class DominoGame {
 
   _advanceTurn(fromPid) {
     this._invalidateEnds();
+    // B2: the opening "highest double must lead" tile belongs to one player.
+    // If that player leaves the turn without playing (timeout skip, a
+    // disconnect-driven advance, or a pass on an empty table), the forced tile
+    // must not follow the turn — otherwise every other player's legalMoves()
+    // short-circuits to [] and nobody can open the hand. Drop the rule and let
+    // the next player lead any tile from an empty table.
+    if (this.moves.length === 0 && this.leadForcedTile) {
+      const hand = this.hands[fromPid] || [];
+      if (hand.some(t => t.id === this.leadForcedTile)) this.leadForcedTile = null;
+    }
     const i = this.playerIds.indexOf(fromPid);
     this.turn = this.playerIds[(i + 1) % this.playerIds.length];
   }
