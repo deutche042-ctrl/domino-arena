@@ -988,7 +988,7 @@ export class Board3D {
         mesh.rotation.x = this._reducedMotion ? 0 : 0.6;
         if (arc) { mesh.position.x = arc.fromX; mesh.position.z = arc.fromZ; }
         this._anims.push({
-          mesh, t: 0, dur: this._reducedMotion ? 0.01 : 0.28, kind: 'drop',
+          mesh, t: 0, dur: this._reducedMotion ? 0.01 : 0.5, kind: 'drop',
           baseRotY: s.rotY, toX: s.x, toZ: s.z, arc,
         });
       }
@@ -1092,7 +1092,7 @@ export class Board3D {
       if (dropLast && i === moves.length - 1) {
         mesh.position.y = 7;
         mesh.rotation.x = 0.6;
-        this._anims.push({ mesh, t: 0, dur: this._reducedMotion ? 0.01 : 0.28, kind: 'drop', baseRotY: s.rotY });
+        this._anims.push({ mesh, t: 0, dur: this._reducedMotion ? 0.01 : 0.5, kind: 'drop', baseRotY: s.rotY });
       }
     }
 
@@ -1207,11 +1207,12 @@ export class Board3D {
       startRotY,
       midPos: new THREE.Vector3(0, 5.2, 4.8),
       endPos: isMe ? new THREE.Vector3(0, -1.0, 11.5) : new THREE.Vector3(0, 3.5, -8.0),
-      // 1.7: the whole flight is 1.2s of dead air in a game with a 30s clock.
-      // Shorter lift, the "admire the pips" hover nearly gone, quicker glide.
-      dur1: isMe ? 0.30 : 0.24,  // Phase 1: Lift & Flip
-      dur2: isMe ? 0.10 : 0.0,   // Phase 2: brief hover (was a 0.40s pause)
-      dur3: isMe ? 0.16 : 0.12,  // Phase 3: Glide into 2D hand (or opponent's side)
+      // 1.8: give the player time to actually watch their own draw. The lift,
+      // the brief face-up hover and the glide into the hand now total ~1.05s
+      // (opponents stay a little quicker at ~0.65s so the table keeps moving).
+      dur1: isMe ? 0.46 : 0.34,  // Phase 1: Lift & Flip
+      dur2: isMe ? 0.30 : 0.10,  // Phase 2: hold the face up so the pips read
+      dur3: isMe ? 0.30 : 0.20,  // Phase 3: Glide into the hand (or opponent's side)
       t: 0,
       kind: 'draw',
     };
@@ -1229,7 +1230,7 @@ export class Board3D {
     // 1.7: the camera used to start easing ~340ms BEFORE the tile touched down,
     // so the board was already gliding while the tile was still in the air and
     // the whole move felt loose. Hold the spring until touchdown instead.
-    const delay = this._reducedMotion ? 0 : 280;
+    const delay = this._reducedMotion ? 0 : 500;
     this._camStartAt = performance.now() + delay;
     // Generous window: on a slow device dt is clamped, so the spring needs more
     // wall-clock time to converge. It stops early once it actually arrives.
@@ -1680,7 +1681,7 @@ export class Board3D {
           a.mesh.position.y = 0; a.mesh.rotation.x = 0;
           if (a.arc) { a.mesh.position.x = a.toX; a.mesh.position.z = a.toZ; }
           // B3: 2-stage settle — a short squash-and-recover after touchdown
-          if (!this._reducedMotion) this._anims.push({ mesh: a.mesh, t: 0, dur: 0.12, kind: 'settle' });
+          if (!this._reducedMotion) this._anims.push({ mesh: a.mesh, t: 0, dur: 0.2, kind: 'settle' });
           return false;
         }
         return true;

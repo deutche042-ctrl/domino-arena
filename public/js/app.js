@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=29';
+import { Board3D } from './board3d.js?v=30';
 import { Home3D } from './home3d.js?v=6';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, setQuality } from './quality.js?v=2';
@@ -1008,7 +1008,7 @@ function renderScoreCard() {
   // F4.4: roll each score up from its previous value. Runs AFTER the rows are in
   // the DOM so the rAF writes land on the live elements — and (1.7) after a short
   // delay so the number starts moving when the tile LANDS, not when the state
-  // broadcast arrived ~280ms earlier. The `from` values are snapshotted NOW,
+  // broadcast arrived ~500ms earlier. The `from` values are snapshotted NOW,
   // before _scorePrev advances below.
   if (!prefersReducedMotion()) {
     const prevSnapshot = ranked.map(pid => _scorePrev.get(pid));
@@ -1020,7 +1020,7 @@ function renderScoreCard() {
         const from = prevSnapshot[i];
         if (from !== undefined && from !== to) rollNumber(row.querySelector('.sc-pts'), from, to);
       });
-    }, 280);
+    }, 500);
   }
   for (const pid of ranked) _scorePrev.set(pid, view.scores[pid] || 0);
   // Drop stale keys so the map cannot grow across many rooms.
@@ -1517,12 +1517,15 @@ function playActionSounds() {
       drawnTile = (view.hand || []).find(t => !prevIds.has(t.id)) || view.hand?.[view.hand.length - 1];
       if (drawnTile) {
         newlyDrawnTileId = drawnTile.id;
+        // Paint the hand immediately so the warm "just drawn" pop is visible
+        // while the 3D tile is still flying, then let the highlight breathe.
+        renderHand();
         setTimeout(() => {
           if (newlyDrawnTileId === drawnTile.id) {
             newlyDrawnTileId = null;
             renderHand();
           }
-        }, 1200);
+        }, 2000);
       }
     } else {
       floatText(`${view.names[la.pid] || 'لاعب'}: سحب كارت`);
