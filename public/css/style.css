@@ -3061,6 +3061,31 @@ body:not(.in-room) #voicePanel {
   .hud-right { gap: 1px; padding: 3px; border-radius: 13px; }
   #turnTimer { width: 31px; height: 31px; }
   #turnTimerSecs { font-size: 11.5px; }
+  #turnTimer.warn {
+    position: relative;
+    top: auto;
+    left: auto;
+    transform: none;
+    width: 31px;
+    height: 31px;
+    border-radius: 50%;
+    font-size: 11.5px;
+    opacity: 1;
+    z-index: auto;
+    color: var(--danger);
+    text-shadow: none;
+    background:
+      radial-gradient(closest-side, #0a0f20 71%, transparent 72% 100%),
+      conic-gradient(var(--danger) calc(var(--p, 100) * 1%), rgba(255, 255, 255, .10) 0);
+    box-shadow: 0 0 0 1px rgba(255, 92, 122, .24);
+    animation: timerWarnPulse .9s ease-in-out infinite;
+  }
+  #turnTimer.warn #turnTimerSecs { font-size: 11.5px; color: var(--danger); }
+  #turnTimer.warn.danger { animation: timerWarnPulse .55s ease-in-out infinite; }
+  @keyframes timerWarnPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .55; }
+  }
   .hud-btn { width: 28px; height: 28px; }
   #btnGameSettings svg, #btnFullscreen svg, #btnSound svg { width: 16px; height: 16px; }
   .hud-chip { height: 26px; padding: 0 7px; font-size: 11.5px; }
