@@ -25,6 +25,10 @@ mobile/android/app/.gradle/
 mobile/android/local.properties
 mobile/android/captures/
 
+# Local secrets / deployment settings — never commit
+.env
+.dev.vars
+
 # Signing keys — never commit
 *.jks
 *.keystore

@@ -2,6 +2,8 @@
 
 Real-time online dominoes for 2–4 players. Play in the browser — hosted free on Render, or on your PC. No installs, no accounts.
 
+> 📘 **دليل التشغيل والنشر الكامل (GitHub + Cloudflare):** [USAGE_AND_DEPLOYMENT.md](USAGE_AND_DEPLOYMENT.md)
+
 ## Play free 24/7 on Render (the easy way)
 
 1. Push this repo to GitHub → [Render](https://render.com) → **New +** → **Blueprint** → pick the repo (it reads `render.yaml`)
