@@ -1,5 +1,10 @@
 # 🁢 DOMINO ARENA — Online Multiplayer Domino Game
 
+> **Historical notice.** The Android/APK plan and the old voice implementation below are historical
+> and have been removed from the shipped code. This document is kept for game-rules intent; for the
+> current architecture (including the fresh WebRTC voice system in `public/js/voice.js` and the
+> `voice:*` signaling in `server/server.js`), `AGENTS.md` is authoritative.
+
 **Goal:** A polished, real-time domino game you host locally, expose via a Cloudflare Tunnel, and play with friends — everyone opens the same URL in their browser, no installs, no accounts.
 
 ---
@@ -278,7 +283,7 @@ Why each piece is forced:
 2. **Every device loads the client from its own local copy, never from the host's IP.** `getUserMedia`
    (voice) only works in a **secure context**; a WebView pointed at `http://192.168.x.x` would have a
    dead mic. Served from the Capacitor local server the origin is `http://localhost` — trustworthy, so
-   voice works on plain-LAN HTTP (`app.js applyVoiceSupport()` never trips). **Consequence: pin
+   voice works on plain-LAN HTTP in that historical build. **Consequence: pin
    `androidScheme: 'http'`** — do not let Capacitor 8's https default create an https WebView origin,
    which would make the `ws://…:3000` socket blocked mixed content.
 3. **Every device runs the full server anyway — so there is no election to lose.** The express/socket.io
@@ -320,7 +325,7 @@ Two modes, one codebase:
 - **Offline blockers in `public/index.html`:** jsdelivr importmap (`three@0.160.0` + `OrbitControls` +
   `RoundedBoxGeometry` — checked `board3d.js:2-4`, `home3d.js:4-5`), jsdelivr `socket.io-client@4.8.1`,
   Google Fonts (Cairo, Reem Kufi). All vendorable (~1 MB total).
-- **Voice ICE hardcoded to internet relays** (`voice.js:27-41`): Google STUN + OpenRelay TURN. LAN mode
+- **Voice ICE historically hardcoded to internet relays**: Google STUN + OpenRelay TURN. LAN mode
   ships empty `iceServers` (host candidates only — faster, no dead-server timeouts); web mode unchanged.
   Device test must confirm local candidates are real IPs, not mDNS `.local` obfuscations (WebView
   obfuscates candidates when mic permission is not granted; voice join always follows a grant).
@@ -483,55 +488,6 @@ a phone leaves → only its rooms die, every other phone keeps playing untouched
    المايك والشات شغالين.
 4. لو ظهر "لا يوجد إنترنت" على الـ hotspot اضغطوا "الاحتفاظ بالاتصال". كل غرفة بتشتغل على الموبايل
    اللي عملها؛ لو اتقفل بتتمسح غرفته هو بس — الباقي بيكمل لعب عادي.
-
----
-
-## J. Voice repair plan (v3) — issues P1–P11 and how each was fixed
-
-Investigation finding: the voice *protocol* layer (relay, roster, mutes) was healthy —
-`scripts/e2e-voice.js` passed 42/42 before this work. All real defects lived in the media/client
-layer that no test covered. Each fix below was implemented and verified (see J.3).
-
-### J.1 Root causes → fixes (implemented)
-
-| # | Severity | Problem | Root cause (file) | Fix implemented |
-|---|----------|---------|-------------------|-----------------|
-| P1 | critical | Total silence cross-network when the single free TURN relay is down/unreachable | `RTC_CONFIG` in `voice.js` — one shared public relay, no diagnostics | `onicecandidateerror` counter per peer warns once via `onInfo`; `GET /voice-config` lets a self-hosted coturn be injected via `TURN_URLS`/`TURN_USER`/`TURN_PASS` (client fetches it in `startSocket`, LAN override still wins) |
-| P2 | critical | Mic dies mid-call (phone call, OS backgrounding) → permanent silent broadcaster with a "live" mic button; `rejoin()` reused the dead track | no `track.onended` handler; `voice.js` | `_captureMic()` arms `onended`; `_recoverMic()` re-captures once and hot-swaps into every live sender via `replaceTrack` (no renegotiation), rebuilds the self analyser, or leaves voice cleanly with an Arabic error; `devicechange` listener recovers when the OS hands the mic back; `_doJoin(rejoin)` re-captures when the stored track is `ended` |
-| P3 | critical | Autoplay-blocked remote `<audio>` = total silence, error swallowed | `audio.play().catch(() => {})` in `_attachRemote` | rejection sets `peer.playBlocked`, surfaced through `onPeers`; `renderVoicePanel` shows a «▶ تشغيل صوت اللاعبين» row wired to the new `resumeAudio()` (user-gesture unblock) |
-| P4 | high | Mic stuck on «بنوصل بالصوت…» forever when DTLS/relay hangs silently | no connect deadline in `_createPeer` | 12 s `connectTimer` per peer: one hard rebuild (existing budget rules), then close → UI shows the truth; cleared on `connected`/`_closePeer` |
-| P5 | high | Voice panel rebuilt in full on every speaking flicker → volume-slider drags destroyed, DOM churn | `renderVoicePanel` used `list.innerHTML = ''` | diff rendering: `vpCache` maps pid → stable row; per-field updates in place; order pass moves nodes only when order actually changed; slider value never fights an active drag (`document.activeElement` guard) |
-| P6 | high | After a failed `room:join` post-reconnect, voice stayed `joined` over a dead session | `socket.on('connect')` only handled the success branch (`app.js`) | `else if (roomCode)` branch: `voice.leave()` + state reset + panel close |
-| P7 | medium | `_settleStatus` declared `live` even when every peer had failed | `voice.js` | goes `live` only with ≥1 `connected` peer; otherwise `status: 'failed'` + one Arabic error per join episode (`_failNotified`); a later peer `connected` restores `live`; retry path in `toggleMic` tears down first |
-| P8 | medium | Spectators saw mic buttons; got a real permission prompt then a confusing rejection | UI never hid the buttons; server replied bare `{ok:false}` | lobby/game mic UI hidden while `spectating` (CSS + `renderLobby`); `voice:join` answers `«المتفرج مش بيفتح مايك…»` |
-| P9 | medium | `MediaStreamSource`/`AnalyserNode` leak on every repeated `ontrack` (ICE restarts) | `_watchPeer` never disconnected the old graph | `_makeAnalyser` returns the source node; old graphs disconnected in `_watchPeer`/`_closePeer`/`_stopStream` |
-| P10 | low | Mute keeps the capture LED lit; background tab slows speaking polls (~1 Hz) | `track.enabled=false` + `setInterval` throttling | **accepted as-is** (documented decision): path stop/start re-triggers permission prompts and adds failure modes; delayed indicators don't affect audio |
-| P11 | low | `voice:join` for a missing player/bot answered bare `{ok:false}` | `server.js` | explicit Arabic errors for all three rejection paths |
-
-### J.2 Status values (voice.js v3)
-
-`'idle' | 'requesting' | 'connecting' | 'live' | 'failed'` — `failed` is reachable, visible in the
-mic UI («تعذّر توصيل الصوت»), and tappable to retry.
-
-### J.3 Verification performed
-
-1. `node --check` on every edited JS file.
-2. `npm test` — 46/46 (engine + bots untouched; safety net).
-3. `npm run e2e:voice 3100` — **45/45** (42 pre-existing + S12 spectator rejection trio; the
-   outside-a-room check now also asserts an Arabic error).
-4. `npm run e2e 3100` — 70/70 (count unchanged on a stashed clean tree — pre-existing).
-5. `curl /voice-config` → `{"iceServers":null}` with no env, real array with `TURN_URLS` set.
-6. `cd mobile && npm run sync` — regenerated APK assets include voice v3 (`sync done`; the
-   `import.meta` esbuild warning is the known, already-handled CJS-bundle case).
-7. Cache tags bumped per convention: `app.js?v=47`, `voice.js?v=5`, `style.css?v=44` (index.html +
-   importer lines + AGENTS.md list).
-
-### J.4 Not done (out of scope / deliberately deferred)
-
-- Self-hosted coturn deployment — the `/voice-config` hook is ready; the actual relay needs a
-  rented host and credentials (`TURN_URLS`, `TURN_USER`, `TURN_PASS`).
-- Real-device manual matrix (two phones across carrier NAT, iOS autoplay, incoming-call recovery) —
-  requires hardware; the automated suites above cover the protocol and unit surfaces.
 
 ---
 

@@ -12,16 +12,20 @@ Node >= 18, ESM throughout (`"type": "module"`).
 npm start                    # game server on http://localhost:3000
 npm test                     # node --test engine + bot unit tests (~0.5s)
 npm run e2e 3100             # socket protocol e2e — needs a server already running on :3100
+npm run e2e:voice 3100       # voice signaling + chat protocol e2e — same running-server requirement
 ```
 
-For e2e: start the server first, e.g. `PORT=3100 npm start` in one shell, then `npm run e2e 3100`.
-The e2e script takes the port as `argv[2]` and defaults to 3100; it is black-box (socket.io-client)
-and ends with a watchdog that exits non-zero on a hang.
+For e2e: start the server first, e.g. `PORT=3100 npm start` in one shell, then `npm run e2e 3100`
+and/or `npm run e2e:voice 3100`. Both scripts take the port as `argv[2]` and default to 3100; they
+are black-box (socket.io-client) and end with a watchdog that exits non-zero on a hang.
 
 `play.bat` (Windows): starts the server + a cloudflared tunnel for public play.
 
 Env knobs: `PORT` (server, default 3000), `TURN_TIME_MS` (per-turn limit, default 30000, min 1000),
-`MAX_ROOMS` (room-create cap, default 50 — server memory guard).
+`MAX_ROOMS` (room-create cap, default 50 — server memory guard), and the optional voice TURN relay
+`TURN_URLS` (comma-separated `turn:`/`turns:` URLs) plus `TURN_USER`/`TURN_PASS`; `TURN_SECRET`
+(and optional `TURN_TTL`) mints short-lived coturn credentials instead. With no TURN configured,
+`/voice-config` returns an empty list and clients keep their built-in STUN defaults.
 
 There is no linter or formatter configured; do not introduce one or add build tooling.
 
@@ -44,11 +48,13 @@ Strict layering — dependencies point one way only: `server → engine`. Never 
 ### `server/` — Express + Socket.IO
 
 - `rooms.js` — `RoomManager`: room lifecycle (create/join/leave), lobby state, `gameView(room, pid)` (engine view + names/connection/roomCode merged in). Player = `{ id, token, name, ready, connected, socketId }`; token enables reconnect. Bots: `addBot`/`removeBot`, `isBot` flag, `token: null`, always ready — bots never host and can't keep a room alive alone (`hasHumans` checks in removePlayer/leave/disconnect).
-- `server.js` — all socket handlers, namespaced `room:*`, `lobby:*`, `game:*`, `chat:*` (which take a `cb` ack is spelled out under Gotchas). `sessions` maps `socket.id → { roomCode, playerId }`, and handlers resolve their context with `currentCtx(socket)`. After ANY game mutation call `broadcastGame(room)` — it sends each connected player their own `game:state` view individually (and re-arms the turn timer + bot scheduler). `room:create` with `vsBots: true` + `botLevel` deals an instant human-vs-3-bots match; `lobby:addBot`/`lobby:removeBot` (host-only) seat bots in normal rooms. Bots also send occasional chat emoji via `botChatter`.
+- `server.js` — all socket handlers, namespaced `room:*`, `lobby:*`, `game:*`, `chat:*`, `voice:*` (which take a `cb` ack is spelled out under Gotchas). `sessions` maps `socket.id → { roomCode, playerId }`, and handlers resolve their context with `currentCtx(socket)`. After ANY game mutation call `broadcastGame(room)` — it sends each connected player their own `game:state` view individually (and re-arms the turn timer + bot scheduler). `room:create` with `vsBots: true` + `botLevel` deals an instant human-vs-3-bots match; `lobby:addBot`/`lobby:removeBot` (host-only) seat bots in normal rooms. Bots also send occasional chat emoji via `botChatter`.
 - Bot driving: `scheduleBotTurn(room)` arms a short timer (600–1400ms; `room.botDelayMs` override) whenever a broadcast leaves the turn on a bot; `botAct` executes the engine action and re-broadcasts (chaining draws/turns). Timers re-validate room/game/turn on fire — keep that hygiene.
 - Disconnect/reconnect: lobby removal after 5s grace, room deletion after 15s all-disconnected, host migration on leave/disconnect (never to a bot). `server.js` calls engine internals (`_endMatch`, `_advanceTurn`) for walkover/turn-skip on disconnect — keep that in sync if engine internals change. Walkover fires only in bot-free rooms; with bots seated the match continues.
 - Turn timer: one timer per room, armed on every broadcast for the current player. It deliberately does NOT restart while the same player's turn is live (disconnects/redraws can't refresh the clock). On expiry the engine is forced: `forceSkip` if they had moves, else auto-draw, else auto-pass — each is announced as a system chat message.
-- Chat: `chat:send` is rate-limited per socket to 5 messages / 3s; text is trimmed and capped at 200 chars.
+- Chat: `chat:send` is rate-limited per socket to 5 messages / 3s; text is trimmed and capped at 200 chars. Every emitted message goes through `pushChat`, gets a room-scoped `mid` (`<room>:cN`) and `at`, and is appended to the bounded room `chatLog` (80 entries). `chat:history` replays that log after create/join/reconnect; `chat:typing` is a 1200 ms-throttled relay (server-derived identity, sender excluded, muted players dropped); `chat:limited` is sent at most once per 3 s window with `retryAfterMs`, and muted sends are dropped before the rate counter.
+- Voice: signaling and moderation only — `voice:join`, `voice:leave`, `voice:mute`, `voice:moderate`, `voice:signal`, with `voice:roster` broadcasts. Media is a browser-to-browser WebRTC mesh and never reaches the server. Only seated, connected, non-bot, voice-joined humans may signal (spectators and outsiders are rejected); `voice:signal` derives `from` server-side and caps payloads at 16 KB and 200 signals / 10 s. Host mute is UI-level best-effort moderation, not a security boundary.
+- `GET /voice-config` returns `{ iceServers }` built from `TURN_URLS` + `TURN_USER`/`TURN_PASS` (or ephemeral `TURN_SECRET` credentials), rate-limited to 20 requests/min/IP. It exposes no other env values and no credentials in logs.
 - Join guard + spectators: `room:join` counts failed joins per socket (5 per 10s) and per IP (`joinFailsByIp`, 20 per 60s backstop vs socket-rotation code scanning); a successful join resets both. Joining a full or mid-match room rides along as a **spectator** — registered in `sessions` and the socket.io room, but with no seat in `room.players`, so gameplay handlers no-op for that id.
 
 ### `public/` — client, plain ES modules loaded from index.html (no bundler)
@@ -64,7 +70,8 @@ home → lobby → game.
 - `js/home3d.js` — animated Three.js home-screen backdrop.
 - `js/quality.js` — adaptive quality tier (`auto`/`high`/`low`, persisted in `localStorage('domino_quality')`); auto mode runs a ~2s frame-time probe that can downgrade once per session. `board3d.js`/`home3d.js` wire composer/shadow budgets/pixel-ratio to it; the home-screen quality chip row calls `setQuality`.
 - `js/tiles.js` — canvas-painted tile faces/backs/felt textures (data-URL cached). F4.3: a `THEMES` registry paints four skins (`classic`/`neon`/`wood`/`piano`); `setTheme(name)` clears the data-URL cache so the next paint uses the new skin. The board keys its texture cache by theme, so the pool stays bounded across switches.
-- `js/sfx.js` — WebAudio-synthesized sounds (no audio files). Game sound effects only — voice chat was removed from the project entirely (no mic, no voice UI, no voice handlers); do not reintroduce it.
+- `js/sfx.js` — WebAudio-synthesized sounds (no audio files). Game sound effects only; voice is a separate system, not part of the SFX module.
+- `js/voice.js` — fresh WebRTC mesh voice engine for seated players. No imports and no browser work at module-evaluation time. Voice is opt-in: nothing calls `getUserMedia` until the user taps the mic / join button, and the module requires a secure context (`https:` or localhost) — on plain HTTP it reports the Arabic "needs a secure connection" error instead of prompting. It owns the peer connections, push-to-talk, self/host mute handling, device switching, speaking detection, and the `/voice-config` fetch. The server relays signaling only; audio stays peer-to-peer.
 - `css/style.css` — all styling, single file. The tail holds the F4.5 `.board2d` fallback table styles.
 
 **Resource-pooling rules (F3.1) — read before touching the board.** The tile geometry (`_geo`), hit-area geometry/material (`_hitBoxGeo`/`_hitMatC`), side material, and the pooled face/back materials (`_matCache`/`_backMatC`) are **shared**. `_disposeTileMesh` deliberately skips them — disposing one would blank every tile using it. `dispose()` is the only place that may release them, and it is idempotent. The `engine/` `attachableEnds()` cache (F3.2) is a `WeakMap`-keyed revision counter so the engine stays pure and serializable.
@@ -72,7 +79,7 @@ home → lobby → game.
 **Reduced motion (F4.4).** `board3d.js` reads `prefers-reduced-motion: reduce` once at construction and flattens the arc/drop flourishes; `app.js`'s `prefersReducedMotion()` makes score roll-ups snap. Keep new animation behind that gate.
 
 **Cache-busting convention:** every client asset is imported with a `?v=N` query
-(`js/app.js?v=60`, `./board3d.js?v=26`, `./domboard.js?v=3`, `./home3d.js?v=3`, `./tiles.js?v=14`, `./quality.js?v=1`, `./sfx.js?v=16`, `css/style.css?v=56`). When you edit a client
+(`js/app.js?v=64`, `./board3d.js?v=29`, `./domboard.js?v=5`, `./home3d.js?v=6`, `./tiles.js?v=15`, `./quality.js?v=2`, `./sfx.js?v=17`, `./voice.js?v=2`, `css/style.css?v=60`). When you edit a client
 module, bump its tag in `index.html` and in every importer's `import` line — otherwise browsers keep
 running the stale module and your change appears to do nothing.
 
@@ -81,7 +88,8 @@ running the stale module and your change appears to do nothing.
 - `tests/engine.test.js` — `node:test` unit tests: rules per variant (incl. spinner arm ordering and immediate All-Fives scoring) + a 300-game fuzz per variant.
 - `tests/bot.test.js` — bot legality across variant × level, seed determinism, no-mutation of the inspected game, and the anti-cheat boundary.
 - `scripts/e2e.js` — black-box protocol test over `socket.io-client` (rooms, lobby, gameplay, chat, reconnect) against a running server.
-- The e2e suite duplicates the game protocol in JS; change a socket event's shape and it must be updated with the server.
+- `scripts/e2e-voice.js` — black-box protocol test for the fresh voice system (join/roster, self and host mute/moderation, signal relay, oversized-signal drop, spectator rejection, disconnect cleanup) plus the chat upgrades (history, `mid`/`at`, typing, rate limiting, reconnect persistence). Needs a running server; run `npm run e2e:voice <port>`.
+- The e2e suites duplicate the game protocol in JS; change a socket event's shape and they must be updated with the server.
 
 ### Ignored / throwaway paths
 
