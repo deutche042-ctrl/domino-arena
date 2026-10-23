@@ -242,7 +242,7 @@ export class Board3D {
     // the light list with intensity 0: toggling `visible` changes the light
     // count and recompiles every standard material on the first draw.
     this.boneLight = new THREE.PointLight(0xf4c055, 0, 14);
-    this.boneLight.position.set(9.5, 4.0, 9.8);
+    this.boneLight.position.set(5.7, 4.0, 9.7);
     this.boneLight.intensity = 0;
     this.scene.add(this.boneLight);
 
@@ -1584,8 +1584,12 @@ export class Board3D {
     for (let i = 0; i < count; i++) {
       const row = Math.floor(i / cols);
       const col = i % cols;
-      const x = 6.6 + col * 0.98;
-      const z = 9.0 + row * 2.15;
+      // Keep the whole pile on the felt: the felt is a 17-unit radius disc, so
+      // the far corner of the grid must stay inside it. The old 6.6+ / 9.0+
+      // origin pushed the last row past the rim, where the tiles hung in mid-air
+      // over the floor instead of resting on the table.
+      const x = 2.8 + col * 0.98;
+      const z = 6.5 + row * 2.15;
       const jitterRot = (Math.sin(i * 137.5) * 0.05);
 
       const m = this._tileMesh(0, 0, false);
@@ -1611,7 +1615,7 @@ export class Board3D {
 
   animateDraw(drawnTile, isMe, sourceMesh = null) {
     // 1. Determine starting position from sourceMesh or the last visible boneyard tile
-    let startPos = new THREE.Vector3(9.5, 0.21, 9.8);
+    let startPos = new THREE.Vector3(5.7, 0.21, 9.7);
     let startRotY = 0;
     if (sourceMesh && sourceMesh.isMesh) {
       startPos.copy(sourceMesh.position);
