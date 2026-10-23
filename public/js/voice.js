@@ -15,6 +15,15 @@ const SDP_MAX_CHARS = 15000;
 const SIGNAL_MAX_BYTES = 16000;
 const MAX_MESH_PEERS = 16;
 const SPEAKING_POLL_MS = 200;
+// Socket audio relay (no TURN needed): 16 kHz mono PCM, 60 ms per frame.
+// A frame is ~2.5 KB of base64 — small enough for any proxy that already
+// carries the game socket, and speech only, so idle players send nothing.
+const RELAY_RATE = 16000;
+const RELAY_FRAME = 960;
+const RELAY_SILENCE_RMS = 0.010;
+const RELAY_SPEECH_HOLD_MS = 500;
+const RELAY_START_AFTER_MS = 2500;
+const RELAY_QUEUE_MAX = 0.9;
 const SPEAKING_ON_RMS = 0.055;
 const SPEAKING_OFF_RMS = 0.028;
 const CONNECT_TIMEOUT_MS = 20000;
@@ -173,6 +182,12 @@ export class VoiceChat {
     this._deviceChangeBusy = false;
     this._localTrackBindings = [];
     this._localAnalyser = null;
+
+    // Socket audio relay state (see _startRelay).
+    this._relay = null;
+    this._relayTimer = 0;
+    this._relayStartedAt = 0;
+    this._relayPlayers = new Map();
 
     this._audioCtx = null;
     this._speakTimer = null;
@@ -615,6 +630,9 @@ export class VoiceChat {
         // Unknown signal shapes are ignored, never thrown.
       }
     });
+    this._installSocket('voice:audio', (data) => {
+      this._onRelayAudio(data);
+    });
     this._installSocket('disconnect', () => {
       this._handleSocketDisconnect();
     });
@@ -915,6 +933,8 @@ export class VoiceChat {
     }
     this._setupLocalAnalyser();
     if (old && old !== stream) this._stopStream(old);
+    this._stopRelay();
+    this._syncRelay();
   }
 
   _clearLocalTrackBindings() {
@@ -1067,6 +1087,7 @@ export class VoiceChat {
     } catch {
       // Track toggling is best-effort; peer track state remains authoritative.
     }
+    this._syncRelay();
   }
 
   _emitMute() {
@@ -1605,6 +1626,8 @@ export class VoiceChat {
 
   _handlePeerState(peer) {
     if (!this._joined || !peer || !peer.pc) return;
+    if (peer.relay) return;   // the socket relay already carries this peer
+    this._syncRelay();
     const pc = peer.pc;
     const connection = pc.connectionState;
     const ice = pc.iceConnectionState;
@@ -2099,6 +2122,7 @@ export class VoiceChat {
         this._configAbort = null;
       }
       this._joined = false;
+      this._stopRelay();
       this._muted = false;
       this._hostMuted = false;
       this._talking = false;
@@ -2211,4 +2235,234 @@ export class VoiceChat {
       // A thenable that throws in catch is simply ignored.
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Socket audio relay — voice for peers that WebRTC cannot reach
+  // (different NATs / CGNAT, no TURN). Media rides the game socket, so it
+  // works wherever the game itself works and costs nothing extra.
+
+  _relayPending() {
+    let pending = 0;
+    let connected = 0;
+    for (const peer of this._peers.values()) {
+      if (peer.relay) return { pending: 1, connected, relays: true };
+      if (peer.connection === 'connected') connected += 1;
+      else pending += 1;
+    }
+    return { pending, connected, relays: false };
+  }
+
+  /** Relay while any peer is unreachable, or as soon as one is already relaying. */
+  _relayWanted() {
+    if (!this._joined || !this._localStream || this._disposed) return false;
+    if (this._effectiveMuted()) return false;
+    if (!this._peers.size) return false;
+    const state = this._relayPending();
+    if (state.relays) return true;
+    if (state.pending === 0) return false;
+    if (!this._relayStartedAt) this._relayStartedAt = performance.now();
+    return performance.now() - this._relayStartedAt >= RELAY_START_AFTER_MS;
+  }
+
+  _scheduleRelayCheck() {
+    if (this._relayTimer || this._disposed || !this._joined) return;
+    const started = this._relayStartedAt || performance.now();
+    const wait = Math.max(150, RELAY_START_AFTER_MS - (performance.now() - started) + 60);
+    try {
+      this._relayTimer = setTimeout(() => {
+        this._relayTimer = 0;
+        this._syncRelay();
+      }, wait);
+    } catch {
+      this._relayTimer = 0;
+    }
+  }
+
+  _syncRelay() {
+    try {
+      if (this._disposed) return;
+      if (!this._relayWanted()) {
+        if (this._relay) this._stopRelay();
+        else this._scheduleRelayCheck();
+        return;
+      }
+      if (!this._relay) this._startRelay();
+    } catch {
+      // The relay is best-effort; WebRTC stays the preferred path.
+    }
+  }
+
+  _startRelay() {
+    try {
+      if (this._relay || !this._localStream) return false;
+      const ctx = this._ensureAudioContext();
+      if (!ctx || typeof ctx.createScriptProcessor !== 'function') return false;
+      const source = ctx.createMediaStreamSource(this._localStream);
+      const node = ctx.createScriptProcessor(4096, 1, 1);
+      const sink = ctx.createGain();
+      sink.gain.value = 0;
+      const state = {
+        ctx,
+        source,
+        node,
+        sink,
+        ratio: ctx.sampleRate / RELAY_RATE,
+        pos: 0,
+        frame: new Float32Array(RELAY_FRAME),
+        fill: 0,
+        seq: 0,
+        lastVoiceAt: 0,
+      };
+      node.onaudioprocess = (event) => {
+        try {
+          const input = event.inputBuffer.getChannelData(0);
+          this._relayProcess(state, input);
+        } catch {
+          // A processing error must never escape the audio callback.
+        }
+      };
+      source.connect(node);
+      node.connect(sink);
+      sink.connect(ctx.destination);
+      this._relay = state;
+      this._resumeAudioContext();
+      return true;
+    } catch {
+      this._relay = null;
+      return false;
+    }
+  }
+
+  _stopRelay() {
+    const state = this._relay;
+    this._relay = null;
+    if (this._relayTimer) {
+      try { clearTimeout(this._relayTimer); } catch { /* gone */ }
+      this._relayTimer = 0;
+    }
+    if (!state) return;
+    try { state.node.onaudioprocess = null; } catch { /* already gone */ }
+    for (const target of [state.source, state.node, state.sink]) {
+      try { target.disconnect(); } catch { /* already detached */ }
+    }
+  }
+
+  /** Downsample the mic block to 16 kHz and emit it in 60 ms frames. */
+  _relayProcess(state, input) {
+    const ratio = state.ratio;
+    let pos = state.pos;
+    while (pos < input.length) {
+      const i0 = Math.floor(pos);
+      const i1 = Math.min(i0 + 1, input.length - 1);
+      const frac = pos - i0;
+      const sample = input[i0] * (1 - frac) + input[i1] * frac;
+      state.frame[state.fill++] = sample;
+      if (state.fill >= RELAY_FRAME) {
+        this._relayEmit(state);
+        state.fill = 0;
+      }
+      pos += ratio;
+    }
+    state.pos = pos - input.length;
+  }
+
+  _relayEmit(state) {
+    const now = performance.now();
+    const frame = state.frame;
+    let sum = 0;
+    for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
+    const rms = Math.sqrt(sum / frame.length);
+    if (rms >= RELAY_SILENCE_RMS) state.lastVoiceAt = now;
+    // Silence is not sent: it would burn the same bandwidth for nothing.
+    if (now - state.lastVoiceAt > RELAY_SPEECH_HOLD_MS) return;
+
+    const pcm = new Int16Array(frame.length);
+    for (let i = 0; i < frame.length; i++) {
+      const v = Math.max(-1, Math.min(1, frame[i]));
+      pcm[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+    }
+    const bytes = new Uint8Array(pcm.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    let data;
+    try {
+      data = btoa(binary);
+    } catch {
+      return;
+    }
+    this._safeEmit('voice:audio', { seq: state.seq++, data });
+  }
+
+  _onRelayAudio(payload) {
+    try {
+      if (!this._joined || !payload || typeof payload !== 'object') return;
+      const from = normalizeId(payload.from);
+      if (!from || from === this._selfId) return;
+      const peer = this._peers.get(from);
+      if (!peer) return;
+      if (peer.hostMuted) return;                                  // host mute wins here too
+      if (peer.connection === 'connected' && !peer.relay) return;   // direct audio is better
+      if (typeof payload.data !== 'string' || payload.data.length > 20000) return;
+
+      if (!peer.relay) {
+        peer.relay = true;
+        peer.connection = 'connected';
+        this._clearPeerTimers(peer);
+        this._firePeers();
+      }
+
+      let binary;
+      try {
+        binary = atob(payload.data);
+      } catch {
+        return;
+      }
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      // Int16Array needs an even byte length.
+      const usable = bytes.length - (bytes.length % 2);
+      const pcm = new Int16Array(bytes.buffer, 0, usable / 2);
+      this._relayPlay(peer, pcm);
+      this._syncRelay();
+    } catch {
+      // Malformed audio is dropped, never thrown.
+    }
+  }
+
+  _relayPlay(peer, pcm) {
+    const ctx = this._audioCtx;
+    if (!ctx || !pcm.length) return;
+    let state = this._relayPlayers.get(peer.id);
+    if (!state) {
+      state = { nextAt: 0 };
+      this._relayPlayers.set(peer.id, state);
+    }
+    const now = ctx.currentTime;
+    if (!state.nextAt || state.nextAt < now - 0.05) state.nextAt = now + 0.10;
+    if (state.nextAt > now + RELAY_QUEUE_MAX) return;   // backlog: drop, stay live
+
+    const buffer = ctx.createBuffer(1, pcm.length, RELAY_RATE);
+    const channel = buffer.getChannelData(0);
+    let sum = 0;
+    for (let i = 0; i < pcm.length; i++) {
+      const v = pcm[i] / 32768;
+      channel[i] = v;
+      sum += v * v;
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    try {
+      source.start(state.nextAt);
+    } catch {
+      state.nextAt = now + 0.10;
+      try { source.start(state.nextAt); } catch { return; }
+    }
+    state.nextAt += buffer.duration;
+
+    const rms = Math.sqrt(sum / pcm.length);
+    const speaking = rms > 0.02;
+    if (peer.speaking !== speaking) this._setPeerSpeaking(peer, speaking);
+  }
+
 }

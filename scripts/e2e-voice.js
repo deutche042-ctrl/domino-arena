@@ -381,6 +381,40 @@ try {
     'voice host mute survives a transient disconnect');
   await emit(host, 'voice:moderate', { pid: guestId, muted: false });
   await emit(host, 'lobby:chatMute', { pid: guestId, muted: false });
+
+  // ── socket audio relay (voice without TURN) ──
+  // Peers that WebRTC cannot connect (different NATs) send 60 ms PCM frames
+  // through the game socket; the server must fan them out and enforce mute.
+  await emit(host, 'voice:join');
+  await emit(g2, 'voice:join');
+  host.emit('voice:mute', { muted: false });
+  g2.emit('voice:mute', { muted: false });
+  await sleep(200);
+  const relayFrames = [];
+  g2.on('voice:audio', (p) => relayFrames.push(p));
+  const relayFrame = { seq: 11, data: Buffer.alloc(160, 3).toString('base64') };
+  host.emit('voice:audio', relayFrame);
+  await sleep(500);
+  ok(relayFrames.length > 0 &&
+     relayFrames[0].from === hostId &&
+     relayFrames[0].seq === 11 &&
+     relayFrames[0].data === relayFrame.data,
+    'voice:audio is relayed to the other voice-joined player');
+
+  host.emit('voice:mute', { muted: true });
+  await sleep(250);
+  const beforeMuted = relayFrames.length;
+  host.emit('voice:audio', { seq: 12, data: relayFrame.data });
+  await sleep(450);
+  ok(relayFrames.length === beforeMuted, 'a self-muted player cannot relay audio');
+  host.emit('voice:mute', { muted: false });
+  await sleep(150);
+
+  const beforeSpectator = relayFrames.length;
+  sp.emit('voice:audio', { seq: 13, data: relayFrame.data });
+  await sleep(400);
+  ok(relayFrames.length === beforeSpectator, 'spectators cannot inject relayed audio');
+
   g2.close();
   await sleep(200);
 

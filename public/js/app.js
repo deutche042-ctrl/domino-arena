@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=54';
+import { Board3D } from './board3d.js?v=55';
 import { Home3D } from './home3d.js?v=7';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, setQuality, onQualityChange } from './quality.js?v=3';
@@ -9,7 +9,7 @@ import { getEnvironment } from './environments3d.js?v=1';
 import { ROOM_STYLES } from '../room3d-styles.js?v=1';
 import { EnvironmentPreview } from './envpreview.js?v=1';
 import { sfx } from './sfx.js?v=17';
-import { VoiceChat } from './voice.js?v=2';
+import { VoiceChat } from './voice.js?v=3';
 
 const $ = id => document.getElementById(id);
 // Guarded event binding: a missing chat node must never abort boot.

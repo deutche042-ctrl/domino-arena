@@ -201,6 +201,11 @@ function chatEmojiValue(raw) {
 const MAX_VOICE_SIGNAL_BYTES = 16384;
 const VOICE_SIGNAL_WINDOW_MS = 10000;
 const VOICE_SIGNAL_MAX = 200;
+// Socket audio relay: 60 ms of 16 kHz mono PCM is 1920 bytes → 2560 base64
+// chars. The cap leaves room for a larger frame but blocks anything silly.
+const MAX_VOICE_AUDIO_CHARS = 12000;
+const VOICE_AUDIO_WINDOW_MS = 1000;
+const VOICE_AUDIO_MAX = 90;
 
 function voiceRoster(room) {
   // room.players order is the stable seat order — never sort (chips would jump).
@@ -1238,6 +1243,33 @@ io.on('connection', (socket) => {
     if (voiceSignalBytes(clean) > MAX_VOICE_SIGNAL_BYTES) return;
     // `from` is server-derived; never trust a client-supplied sender id.
     io.to(target.socketId).emit('voice:signal', { from: playerId, payload: clean });
+  });
+
+  // Voice that cannot be peer-to-peer (two different NATs, mobile CGNAT) rides
+  // this socket instead: the browser sends 60 ms PCM slices and the server
+  // fans them out to the room. No TURN, no extra port, works through any proxy
+  // that already carries the game. Mute is enforced here, not on the client.
+  let voiceAudioWindowStart = 0;
+  let voiceAudioCount = 0;
+
+  socket.on('voice:audio', (payload) => {
+    const { room, playerId, spectating } = currentCtx(socket);
+    if (!room || spectating) return;
+    if (!payload || typeof payload !== 'object') return;
+    const data = payload.data;
+    const seq = payload.seq;
+    if (typeof data !== 'string' || data.length === 0 || data.length > MAX_VOICE_AUDIO_CHARS) return;
+    if (typeof seq !== 'number' || !Number.isFinite(seq)) return;
+    const now = Date.now();
+    if (now - voiceAudioWindowStart > VOICE_AUDIO_WINDOW_MS) {
+      voiceAudioWindowStart = now;
+      voiceAudioCount = 0;
+    }
+    if (++voiceAudioCount > VOICE_AUDIO_MAX) return;
+    const from = room.players.find(x => x.id === playerId);
+    if (!from || from.isBot || !from.voiceJoined) return;
+    if (from.voiceMuted || from.voiceHostMuted) return;
+    socket.to(room.code).emit('voice:audio', { from: playerId, seq, data });
   });
 
   // ---- disconnect ----
