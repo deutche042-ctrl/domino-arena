@@ -186,6 +186,8 @@ export class VoiceChat {
     // Socket audio relay state (see _startRelay).
     this._relay = null;
     this._relayTimer = 0;
+    this._relayPoll = 0;
+    this._relayAnnounced = false;
     this._relayStartedAt = 0;
     this._relayPlayers = new Map();
 
@@ -1184,6 +1186,9 @@ export class VoiceChat {
 
       this._rosterOrder = entries.map((entry) => entry.id);
       this._firePeers();
+      // A peer can join voice long after us; without this the relay would only
+      // be considered at our own join time and that late peer stays silent.
+      this._syncRelay();
     } catch {
       // Roster application is isolated from socket callbacks.
     }
@@ -2122,6 +2127,7 @@ export class VoiceChat {
         this._configAbort = null;
       }
       this._joined = false;
+      this._relayAnnounced = false;
       this._stopRelay();
       this._muted = false;
       this._hostMuted = false;
@@ -2326,6 +2332,15 @@ export class VoiceChat {
       sink.connect(ctx.destination);
       this._relay = state;
       this._resumeAudioContext();
+      if (!this._relayPoll) {
+        this._relayPoll = setInterval(() => {
+          try { this._syncRelay(); } catch { /* keep polling */ }
+        }, 3000);
+      }
+      if (!this._relayAnnounced) {
+        this._relayAnnounced = true;
+        this._fireHook('onInfo', 'الصوت متصل عبر السيرفر (بديل مباشر لما الشبكة تمنع الاتصال المباشر).');
+      }
       return true;
     } catch {
       this._relay = null;
@@ -2336,6 +2351,10 @@ export class VoiceChat {
   _stopRelay() {
     const state = this._relay;
     this._relay = null;
+    if (this._relayPoll) {
+      try { clearInterval(this._relayPoll); } catch { /* gone */ }
+      this._relayPoll = 0;
+    }
     if (this._relayTimer) {
       try { clearTimeout(this._relayTimer); } catch { /* gone */ }
       this._relayTimer = 0;
@@ -2432,6 +2451,7 @@ export class VoiceChat {
   _relayPlay(peer, pcm) {
     const ctx = this._audioCtx;
     if (!ctx || !pcm.length) return;
+    if (ctx.state === 'suspended') this._resumeAudioContext();
     let state = this._relayPlayers.get(peer.id);
     if (!state) {
       state = { nextAt: 0 };

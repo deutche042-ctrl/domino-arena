@@ -9,7 +9,7 @@ import { getEnvironment } from './environments3d.js?v=1';
 import { ROOM_STYLES } from '../room3d-styles.js?v=1';
 import { EnvironmentPreview } from './envpreview.js?v=1';
 import { sfx } from './sfx.js?v=17';
-import { VoiceChat } from './voice.js?v=3';
+import { VoiceChat } from './voice.js?v=4';
 
 const $ = id => document.getElementById(id);
 // Guarded event binding: a missing chat node must never abort boot.
