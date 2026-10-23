@@ -39,6 +39,12 @@ const CHAT_SEEN_MAX = 500;
 const CHAT_GROUP_MS = 3 * 60 * 1000;
 const CHAT_TYPING_TTL_MS = 3000;
 const CHAT_TYPING_THROTTLE_MS = 1200;
+
+// Inline HUD iconography — one stroke family, sized by the surrounding slot.
+// Static strings only; never interpolate user data into these.
+const SVG_BOT = '<svg class="icon-bot" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="7" width="16" height="12" rx="3"></rect><circle cx="9" cy="12" r="1"></circle><circle cx="15" cy="12" r="1"></circle><path d="M9 16h6"></path><path d="M12 7V4"></path><circle cx="12" cy="3" r="1"></circle></svg>';
+const SVG_TILE = '<svg class="icon-tile" viewBox="0 0 14 20" width="11" height="16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="1.5" width="11" height="17" rx="2.5"></rect><path d="M1.5 10h11"></path><circle cx="5" cy="5.5" r=".9" fill="currentColor" stroke="none"></circle><circle cx="9" cy="14.5" r=".9" fill="currentColor" stroke="none"></circle></svg>';
+const SVG_COPY = '<svg class="icon-copy" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
 const chatSeen = new Set();
 let chatSeenOrder = [];
 let chatLastAt = 0;              // msg.at of the previous rendered message
@@ -795,7 +801,12 @@ function renderOpponents() {
     avCol.className = 'opp-avatar-col';
     const av = document.createElement('div');
     av.className = 'opp-avatar' + (isTurn ? ' active' : '');
-    av.textContent = view.isBot?.[pid] ? '🤖' : name.trim().charAt(0).toUpperCase();
+    if (view.isBot?.[pid]) {
+      av.classList.add('is-bot');
+      av.innerHTML = SVG_BOT;
+    } else {
+      av.textContent = avatarGlyph(name);
+    }
     avCol.appendChild(av);
     if (isTurn) {
       const ring = document.createElement('div');
@@ -827,7 +838,7 @@ function renderOpponents() {
     } else {
       const tiles = document.createElement('span');
       tiles.className = 'opp-badge tiles';
-      tiles.textContent = '🁢 ';
+      tiles.innerHTML = SVG_TILE;
       const mini = document.createElement('i');
       mini.className = 'mini-tile';
       mini.textContent = '×' + (view.handCounts?.[pid] ?? 0);
@@ -847,11 +858,11 @@ function renderOpponents() {
 // card I can actually drop is the first one I see), stable deal order otherwise
 // so the hand never reshuffles itself every 20s during opponents' turns (1.3).
 const SORT_MODES = ['deal', 'pips', 'playable', 'doubles'];
-const SORT_LABELS = {
-  deal: '🔀 رتّب: كما وصلني',
-  pips: '⚖ الأتقل أولًا',
-  playable: '✅ المتاح أولًا',
-  doubles: '🎲 الدبل أولًا',
+const SORT_TITLES = {
+  deal: 'كما وصلني',
+  pips: 'الأتقل أولًا',
+  playable: 'المتاح أولًا',
+  doubles: 'الدبل أولًا',
 };
 let sortMode = (() => {
   try {
@@ -863,8 +874,10 @@ let sortMode = (() => {
 function paintSortBtn() {
   const btn = $('btnSort');
   if (!btn) return;
-  btn.textContent = SORT_LABELS[sortMode];
-  btn.title = 'ترتيب اليد: ' + SORT_LABELS[sortMode];
+  const label = $('sortLabel');
+  if (label) label.textContent = 'ترتيب';
+  btn.title = 'ترتيب اليد: ' + SORT_TITLES[sortMode];
+  btn.setAttribute('aria-label', btn.title);
 }
 
 function sortedHand() {
@@ -998,9 +1011,10 @@ function renderScoreCard() {
   ranked.forEach((pid, i) => {
     const row = document.createElement('div');
     row.className = 'sc-row' + (pid === myId ? ' me' : '');
+    const safeName = esc(view.names[pid] || 'لاعب');
     row.innerHTML = `
-      <span class="sc-rank">${['🥇', '🥈', '🥉', '4.'][i] || (i + 1) + '.'}</span>
-      <span class="sc-name" title="${esc(view.names[pid] || 'لاعب')}">${view.isBot?.[pid] ? '🤖 ' : ''}${esc(view.names[pid] || 'لاعب')}</span>
+      <span class="sc-rank">${i + 1}</span>
+      <span class="sc-name" title="${safeName}">${view.isBot?.[pid] ? SVG_BOT : ''}<span class="sc-who">${safeName}</span></span>
       <span class="sc-pts">${view.scores[pid] || 0}</span>
     `;
     card.appendChild(row);
@@ -1031,7 +1045,7 @@ function renderScoreCard() {
     const codeRow = document.createElement('div');
     codeRow.className = 'sc-code';
     codeRow.title = 'انسخ كود الغرفة';
-    codeRow.innerHTML = `🚪 غرفة <b>${esc(roomCode)}</b> 📋`;
+    codeRow.innerHTML = `<span class="sc-code-label">غرفة</span><b>${esc(roomCode)}</b>${SVG_COPY}`;
     codeRow.onclick = () => { copyText(roomCode, 'تم نسخ الكود!'); sfx.click(); };
     card.appendChild(codeRow);
   }
@@ -1466,7 +1480,7 @@ function renderModals() {
     [...view.players].sort((a, b) => view.scores[b] - view.scores[a]).forEach((pid, i) => {
       const row = document.createElement('div');
       row.className = 'bd-row' + (i === 0 ? ' winner' : '');
-      row.innerHTML = `<span>${['🥇', '🥈', '🥉', '4.'][i]} ${esc(view.names[pid] || 'لاعب')}</span><span>${view.scores[pid]} نقطة</span>`;
+      row.innerHTML = `<span>${i + 1}. ${esc(view.names[pid] || 'لاعب')}</span><span>${view.scores[pid]} نقطة</span>`;
       st.appendChild(row);
     });
     // F2.2: the vote is per-player and tracked by name, not just a counter, and

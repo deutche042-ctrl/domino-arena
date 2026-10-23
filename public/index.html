@@ -8,7 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=63">
+<link rel="stylesheet" href="css/style.css?v=70">
 <script type="importmap">
 {
   "imports": {
@@ -271,7 +271,10 @@
       <!-- the countdown ring lives INSIDE the hud cluster so it can never land on
            top of the conn pill / sound / fullscreen buttons (RTL bug 0.3) -->
       <div id="turnTimer" class="hidden" title="الوقت المتبقي في دورك"><span id="turnTimerSecs">30</span></div>
-      <div id="boneChip" class="hud-chip" title="الكروت المتبقية في السحابة">🁫 <b id="boneChipN">0</b></div>
+      <div id="boneChip" class="hud-chip" title="الكروت المتبقية في السحابة">
+        <svg viewBox="0 0 14 20" width="12" height="17" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="1.5" width="11" height="17" rx="2.5"></rect><path d="M1.5 10h11"></path><circle cx="5" cy="5.5" r=".9" fill="currentColor" stroke="none"></circle><circle cx="9" cy="14.5" r=".9" fill="currentColor" stroke="none"></circle></svg>
+        <b id="boneChipN">0</b>
+      </div>
       <div id="connPill" class="ok" title="حالة الاتصال">●</div>
       <button id="btnSound" class="hud-btn" title="كتم الصوت" aria-label="تبديل الصوت">
         <svg class="icon-sound-on" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -307,10 +310,22 @@
   <div id="connBanner" class="conn-banner hidden"></div>
 
   <div id="actionBar">
-    <button id="btnDraw" class="btn hidden">اسحب من السحابة</button>
-    <button id="btnPass" class="btn hidden">🙅 مفيش كارت — باص</button>
-    <button id="btnHint" class="btn hint-btn hidden" title="اقترح عليّ أفضل حركة">💡 اقترح كارت</button>
-    <button id="btnSort" class="btn sort-btn" title="ترتيب اليد">🔀 رتّب: كما وصلني</button>
+    <button id="btnDraw" class="btn hidden" title="اسحب من السحابة">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>
+      <span>اسحب</span>
+    </button>
+    <button id="btnPass" class="btn hidden" title="مفيش كارت متاح — باص">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m13 6 6 6-6 6"></path></svg>
+      <span>باص</span>
+    </button>
+    <button id="btnHint" class="btn hint-btn hidden" title="اقترح عليّ أفضل حركة">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18h6"></path><path d="M10 22h4"></path><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"></path></svg>
+      <span>تلميح</span>
+    </button>
+    <button id="btnSort" class="btn sort-btn" title="ترتيب اليد">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4v16"></path><path d="m3 8 4-4 4 4"></path><path d="M17 20V4"></path><path d="m13 16 4 4 4-4"></path></svg>
+      <span id="sortLabel">ترتيب</span>
+    </button>
   </div>
 
   <div id="opponents"></div>
@@ -484,7 +499,7 @@
   <span id="voiceFabBadge" class="voice-fab-badge hidden"></span>
 </button>
 
-<button id="voicePanelBtn" class="voice-panel-btn hidden" type="button" title="لوحة الصوت" aria-label="لوحة الصوت" aria-expanded="false" aria-controls="voicePanel">
+<button id="voicePanelBtn" class="fab voice-panel-btn hidden" type="button" title="لوحة الصوت" aria-label="لوحة الصوت" aria-expanded="false" aria-controls="voicePanel">
   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M4 14v-2a8 8 0 0 1 16 0v2"></path>
     <path d="M4 14a2 2 0 0 1 2-2h1v6H6a2 2 0 0 1-2-2z"></path>
@@ -557,6 +572,6 @@
 </div>
 
 <script>window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(((e.error&&e.error.stack)||e.message).split('\n').slice(0,4).join(' | '));});window.addEventListener('unhandledrejection',function(e){window.__errs.push('rej: '+((e.reason&&(e.reason.stack||e.reason.message))||String(e.reason)));});</script>
-<script type="module" src="js/app.js?v=66"></script>
+<script type="module" src="js/app.js?v=68"></script>
 </body>
 </html>
