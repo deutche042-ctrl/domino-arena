@@ -27,6 +27,9 @@ try {
 }
 
 const TILE_W = 1, TILE_L = 2, TILE_H = 0.42, GAP = 0.07;
+// Height the play surface sits above the room floor, in board units. The room
+// is scaled ~15.6x to wrap the rim, so 11 units reads as a real ~0.73 m table.
+const TABLE_HEIGHT_UNITS = 11;
 const MAX_X = 9.5;              // table boundary along X before turning
 const MAX_Z = 6.0;              // table boundary along Z before turning
 const adv = isDbl => (isDbl ? TILE_W : TILE_L) + GAP;
@@ -464,7 +467,12 @@ export class Board3D {
       const style = localStorage.getItem('domino_environment') || 'modern';
       this._room3d = createRoom(this.scene, style, { table: false });
       this._room3d.scale.setScalar(36.8 / 2.36);
-      this._room3d.position.y = rim.position.y - 0.75;
+      // The board's table has no legs and no floor, so a scaled room would put
+      // the play surface flat on the ground with chairs cutting through it.
+      // Drop the room floor by a real table height (~0.73 m at this scale) and
+      // give the table four legs down to that floor.
+      this._room3d.position.y = rim.position.y - 0.75 - TABLE_HEIGHT_UNITS;
+      this._addTableLegs(rim);
       this._roomBuilt = true;
       if (this.controls && Number.isFinite(this.controls.maxDistance)) {
         this.controls.maxDistance = Math.min(this.controls.maxDistance, 30);
@@ -482,6 +490,25 @@ export class Board3D {
     this._applyTableTheme();
   }
 
+  _addTableLegs(rim) {
+    if (this._roomLegs) return;
+    const material = new THREE.MeshStandardMaterial({ color: 0x4a2f1d, roughness: 0.55, metalness: 0.12 });
+    const top = rim.position.y - 0.35;                     // underside of the rim
+    const floor = rim.position.y - 0.75 - TABLE_HEIGHT_UNITS;
+    const height = top - floor;
+    const geometry = new THREE.CylinderGeometry(1.15, 0.95, height, 16);
+    this._roomLegs = [];
+    for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      const leg = new THREE.Mesh(geometry, material);
+      leg.position.set(sx * 13.2, floor + height / 2, sz * 13.2);
+      leg.castShadow = true;
+      leg.receiveShadow = true;
+      this.scene.add(leg);
+      this._roomLegs.push(leg);
+    }
+    if (this.renderer) this.renderer.shadowMap.needsUpdate = true;
+  }
+
   hasRoom() {
     return Boolean(this._room3d && this._roomBuilt && !this._disposed);
   }
@@ -495,7 +522,8 @@ export class Board3D {
       }
       this._room3d = createRoom(this.scene, styleId, { table: false });
       this._room3d.scale.setScalar(36.8 / 2.36);
-      this._room3d.position.y = (this._tableRim?.position.y ?? -0.63) - 0.75;
+      this._room3d.position.y = (this._tableRim?.position.y ?? -0.63) - 0.75 - TABLE_HEIGHT_UNITS;
+      this._addTableLegs(this._tableRim);
       this._roomBuilt = true;
       if (this.controls && Number.isFinite(this.controls.maxDistance)) {
         this.controls.maxDistance = Math.min(this.controls.maxDistance, 30);
