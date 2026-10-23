@@ -63,9 +63,9 @@ const ROOM_STYLE_IDS = ['modern', 'cozy', 'billiard', 'playful'];
 // windows are narrower, so they need a longer throw to frame the same table.
 // How long a manual orbit keeps the auto-fit out of the way. Short enough to
 // feel like light tracking, long enough that the camera never fights a drag.
-const USER_ORBIT_HOLD_MS = 6000;
-const CAM_MIN_DIST = 42;
-const CAM_MIN_DIST_PORTRAIT = 56;
+const USER_ORBIT_HOLD_MS = 5000;
+const CAM_MIN_DIST = 26;
+const CAM_MIN_DIST_PORTRAIT = 34;
 
 // Theme-tinted table/side/bloom look. Kept small and explicit so every value the
 // material swap touches lives in one place.
@@ -1685,7 +1685,7 @@ export class Board3D {
       this._camTargetGoal = { x: 0, y: 0, z: 0 };
       // Lower than the old top-down default: the room must be visible
       // above/behind the table, not just a green felt filling the frame.
-      this._camGoal = { x: 0, y: 21, z: (this.camera.aspect || 1) < 0.95 ? 50 : 36 };
+      this._camGoal = { x: 0, y: 13, z: (this.camera.aspect || 1) < 0.95 ? 31 : 22 };
       this._applyCameraGoal();
       return;
     }
@@ -1709,12 +1709,12 @@ export class Board3D {
     // the depth span (foreshortened by the camera elevation below).
     const tan = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
     const aspect = Math.max(0.35, this.camera.aspect || 1);
-    const distH = (spanX / (2 * tan * aspect)) * 1.35;
-    const distV = ((spanZ * 0.85) / (2 * tan)) * 1.35;
-    // Never closer than CAM_MIN_DIST: the felt is 36.8 units across, so the old
-    // 13-unit minimum parked the camera ON the table and turned every move into
-    // a zoom across the felt. Pulled back, the table edge and the room stay in
-    // frame and a normal chain barely moves the camera at all.
+    const distH = (spanX / (2 * tan * aspect)) * 1.2;
+    const distV = ((spanZ * 0.85) / (2 * tan)) * 1.2;
+    // The default view is deliberately close (the felt + ring of room), and the
+    // fit opens up as the chain grows, so the whole board is contained by the
+    // time it matters. Never closer than CAM_MIN_DIST: anything under the rim
+    // radius parks the camera over the play surface.
     // A portrait window sees far less width for the same distance, so it backs
     // off further and drops lower — otherwise the frame is a wall of felt.
     const portrait = aspect < 0.95;
