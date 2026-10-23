@@ -1047,7 +1047,7 @@ export class Board3D {
     g.fillStyle = '#e8fff5';
     // 2.7: the same name was set in two typefaces on one screen — the HUD uses
     // the brand face, the 3D label used system-ui. Match the HUD.
-    g.font = '700 32px Cairo, "Segoe UI", sans-serif';
+    g.font = '700 32px Arial, "Segoe UI", sans-serif';
     g.direction = 'rtl';
     g.textAlign = 'center';
     g.textBaseline = 'middle';

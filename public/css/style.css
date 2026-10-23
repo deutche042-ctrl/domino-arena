@@ -27,7 +27,7 @@
   --sh-2: 0 12px 32px rgba(2, 4, 12, .55);
   --sh-3: 0 28px 70px rgba(2, 4, 12, .65);
   --glass: blur(18px) saturate(1.15);
-  font-family: "Cairo", "Reem Kufi", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: Arial, "Segoe UI", Tahoma, sans-serif;
 }
 /* glass fallback: without backdrop-filter the surfaces go (almost) opaque
    so text contrast never depends on the blur landing underneath */
@@ -35,7 +35,7 @@
   :root { --panel: rgba(15, 22, 44, .97); --panel-strong: rgba(10, 15, 32, .98); }
 }
 .logo, h1, h2, #turnBanner, .modal-card h2, .btn, .tagline {
-  font-family: "Reem Kufi", "Cairo", sans-serif;
+  font-family: Arial, "Segoe UI", Tahoma, sans-serif;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { height: 100%; background: var(--bg); color: var(--text); overflow: hidden; }
@@ -1446,7 +1446,7 @@ body:not(.in-room) #chatToasts {
 }
 .chat-head-text { display: flex; flex-direction: column; min-width: 0; }
 .chat-head-title {
-  font-family: "Reem Kufi", "Cairo", sans-serif;
+  font-family: Arial, "Segoe UI", Tahoma, sans-serif;
   font-size: 13.5px;
   font-weight: 700;
   color: #f1f5f9;
@@ -2186,7 +2186,7 @@ body:not(.in-room) #voicePanel {
 }
 .voice-head-text { display: flex; flex-direction: column; min-width: 0; }
 .voice-head-title {
-  font-family: "Reem Kufi", "Cairo", sans-serif;
+  font-family: Arial, "Segoe UI", Tahoma, sans-serif;
   font-size: 13.5px;
   font-weight: 700;
   color: #f1f5f9;
@@ -2920,7 +2920,7 @@ body:not(.in-room) #voicePanel {
   text-shadow: 0 1px 3px rgba(0, 0, 0, .85);
 }
 .sc-code b {
-  font-family: "Cairo", sans-serif;
+  font-family: Arial, "Segoe UI", Tahoma, sans-serif;
   letter-spacing: 1.5px;
   font-size: 10.5px;
   color: var(--gold-2);

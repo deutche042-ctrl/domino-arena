@@ -59,10 +59,11 @@ Strict layering — dependencies point one way only: `server → engine`. Never 
 
 ### `public/` — client, plain ES modules loaded from index.html (no bundler)
 
-Three.js (0.160.0), socket.io-client (4.8.1) and the Cairo/Reem Kufi fonts are **vendored** under
+Three.js (0.160.0), socket.io-client (4.8.1) and the Cairo/Reem Kufi font files are **vendored** under
 `public/vendor/` (served through the importmap + one script tag) — the game runs fully offline; do not
-reintroduce CDN URLs. No npm client deps. Screens are the three `<section class="screen">` elements:
-home → lobby → game.
+reintroduce CDN URLs. The shipped UI now uses the system **Arial → Segoe UI → Tahoma → sans-serif**
+stack; the vendored font files are kept only as offline assets/fallback. No npm client deps. Screens are
+the three `<section class="screen">` elements: home → lobby → game.
 
 - `js/app.js` — UI orchestration + socket client: screen switching, scoreboard, hand rendering, modals, chat, confetti. Talks to server only via the socket events above. Also owns the home stats (`loadStats`/`recordMatchResult`), the bot level/personality pickers, the tile-theme picker, the perf overlay (`P` key), the score roll-up (`rollNumber` + `_scorePrev`), and `createBoard()`.
 - `js/board3d.js` — Three.js board: snake layout with L/R ends plus U/D spinner arms, auto-fit camera, click targets for ends (`onMarkerClick`). Resources are pooled (see F3.1 below); `setTheme(name)` repaints in a new skin; `setCanDraw(b)` drives the boneyard spotlight; `setMyTurn(b)` is vestigial (the centre turn ring was removed) and only feeds `stats()`, which feeds the perf overlay.
@@ -79,7 +80,7 @@ home → lobby → game.
 **Reduced motion (F4.4).** `board3d.js` reads `prefers-reduced-motion: reduce` once at construction and flattens the arc/drop flourishes; `app.js`'s `prefersReducedMotion()` makes score roll-ups snap. Keep new animation behind that gate.
 
 **Cache-busting convention:** every client asset is imported with a `?v=N` query
-(`js/app.js?v=69`, `./board3d.js?v=30`, `./home3d.js?v=6`, `./tiles.js?v=15`, `./quality.js?v=2`, `./sfx.js?v=17`, `./voice.js?v=2`, `css/style.css?v=76`). When you edit a client
+(`js/app.js?v=70`, `./board3d.js?v=31`, `./home3d.js?v=6`, `./tiles.js?v=15`, `./quality.js?v=2`, `./sfx.js?v=17`, `./voice.js?v=2`, `css/style.css?v=77`). When you edit a client
 module, bump its tag in `index.html` and in every importer's `import` line — otherwise browsers keep
 running the stale module and your change appears to do nothing.
 
