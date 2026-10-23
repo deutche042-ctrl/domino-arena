@@ -5,7 +5,19 @@
 //   one 1024x1024 shadow map, no post-processing — 60 fps on a mid-range phone.
 //
 // Public API:
-//   createRoom(scene, styleId, opts = { table: boolean }) -> THREE.Group
+//   createRoom(scene, styleId, opts = {
+//     table: boolean,        // include the demo's decorative game table
+//     scale: number,         // world units per room metre (>1 for the real game:
+//                            // geometry, lights and shadows are kept consistent)
+//     room: {width,depth,height},  // room dims in room metres (default 9/7/3.2)
+//     tableRadius: number,   // keep-out radius (room metres): centred props are
+//                            // pushed outside it so they never clip the real felt
+//     frontOpening: number,  // front-door width in room metres (default 5.5)
+//     floorY: number,        // world Y of the floor (real felt sits below y=0)
+//     low: boolean,          // mobile budget: fewer lights, no shadow casting
+//     configureRenderer: boolean,  // set renderer.shadowMap (default: true,
+//                            // the game board owns its shadow config instead)
+//   }) -> THREE.Group
 //   disposeRoom(group)
 //
 // Only `three` (through the page import map) and the optional data module
@@ -14,7 +26,12 @@
 // JPEGs referenced by the style data.
 import * as THREE from 'three';
 
-const ROOM = { width: 9, depth: 7, height: 3.2 };
+const DEFAULT_ROOM = { width: 9, depth: 7, height: 3.2 };
+// The build functions read these synchronously during createRoom(), so a module
+// variable (set per call from opts) keeps every authored coordinate working at
+// any room size without threading `dims` through a dozen builders.
+let ROOM = { ...DEFAULT_ROOM };
+let FRONT_OPENING = 5.5;
 const ART_LIMIT = 5;          // keeps the material budget under 25
 const MAX_SHADOW = 1024;      // one shadow map only
 
@@ -533,7 +550,7 @@ function addMesh(parent, geometry, material, opts = {}) {
 }
 
 // ── Room shell ──────────────────────────────────────────────────────────────
-function buildShell(room, geo, mats) {
+function buildShell(room, geo, mats, keepOut = 0) {
   const W = ROOM.width;
   const D = ROOM.depth;
   const H = ROOM.height;
@@ -558,7 +575,7 @@ function buildShell(room, geo, mats) {
 
   // Front wall: only two narrow returns. The full-height opening lets the game
   // camera sit outside the room without a lintel crossing the view.
-  const opening = 5.5;
+  const opening = clamp(FRONT_OPENING, 1.2, W - 1.6);
   const side = (W - opening) / 2;
   const frontZ = D / 2 + t / 2;
   addMesh(room, geo.box, mats.wall, {
@@ -584,9 +601,13 @@ function buildShell(room, geo, mats) {
   addMesh(room, geo.box, mats.wood, { scale: [0.05, 0.08, D], pos: [-W / 2 + 0.025, H - 0.04, 0], cast: false });
   addMesh(room, geo.box, mats.wood, { scale: [0.05, 0.08, D], pos: [W / 2 - 0.025, H - 0.04, 0], cast: false });
 
-  // Rug — sits a couple of centimetres above the floor.
+  // Rug — sits a couple of centimetres above the floor. Around a real (much
+  // bigger) play table the carpet grows so it reads as a rug under the table
+  // instead of slivers peeking past the felt edge.
+  const rugW = Math.max(5.8, keepOut * 2 + 2.6);
+  const rugD = Math.max(4.4, keepOut * 2 + 2.2);
   addMesh(room, geo.box, mats.rug, {
-    scale: [5.8, 0.025, 4.4], pos: [0, 0.0125, -0.1], cast: false,
+    scale: [rugW, 0.025, rugD], pos: [0, 0.0125, -0.1], cast: false,
   });
 }
 
@@ -1002,7 +1023,7 @@ function getEmberMaterial(state) {
   return state.ember;
 }
 
-function buildFireplace(room, geo, mats, state, style, x) {
+function buildFireplace(room, geo, mats, state, style, x, low = false) {
   const g = new THREE.Group();
   g.position.set(x, 0, -ROOM.depth / 2 + 0.01);
   const brick = getBrickMaterial(state);
@@ -1030,17 +1051,19 @@ function buildFireplace(room, geo, mats, state, style, x) {
     });
   }
 
-  const fire = new THREE.PointLight(new THREE.Color(toHex(style.palette.light, 0xffb46b)), 7, 4.5, 2);
-  fire.position.set(0, 0.85, 0.75);
-  g.add(fire);
+  if (!low) {           // mobile budget: embers keep glowing visually, the light drops
+    const fire = new THREE.PointLight(new THREE.Color(toHex(style.palette.light, 0xffb46b)), 7, 4.5, 2);
+    fire.position.set(0, 0.85, 0.75);
+    g.add(fire);
+  }
   room.add(g);
 }
 
 // ── Billiard hall ───────────────────────────────────────────────────────────
-function buildBilliardTable(room, geo, mats) {
+function buildBilliardTable(room, geo, mats, z = -2.55) {
   const g = new THREE.Group();
   g.name = 'billiard-table';
-  g.position.set(0, 0, -2.55);
+  g.position.set(0, 0, z);
 
   for (const sx of [-1, 1]) {
     for (const sz of [-1, 1]) {
@@ -1090,10 +1113,10 @@ function buildBilliardTable(room, geo, mats) {
   room.add(g);
 }
 
-function buildPendants(room, geo, mats, lightColor, intensity) {
+function buildPendants(room, geo, mats, lightColor, intensity, z = -2.55, low = false) {
   for (const x of [-0.85, 0, 0.85]) {
     const g = new THREE.Group();
-    g.position.set(x, 0, -2.55);
+    g.position.set(x, 0, z);
     addMesh(g, geo.cyl12, mats.metal, { scale: [0.055, 0.04, 0.055], pos: [0, ROOM.height - 0.02, 0] });
     addMesh(g, geo.cyl8, mats.tileBlack, { scale: [0.01, 0.56, 0.01], pos: [0, 2.9, 0], cast: false });
     addMesh(g, geo.cone16, mats.shade, {
@@ -1104,8 +1127,9 @@ function buildPendants(room, geo, mats, lightColor, intensity) {
     });
     room.add(g);
   }
+  if (low) return;      // mobile budget: pendant fixtures stay, the light drops
   const light = new THREE.PointLight(new THREE.Color(lightColor), intensity, 5, 2);
-  light.position.set(0, 2.28, -2.55);
+  light.position.set(0, 2.28, z);
   room.add(light);
 }
 
@@ -1185,38 +1209,86 @@ function buildGameTable(room, geo, mats) {
 }
 
 // ── Layout, lighting and assembly ───────────────────────────────────────────
-function layout(style) {
+function layout(style, keepOut = 0) {
   const props = new Set(style.props || []);
   const billiard = style.id === 'billiard' || props.has('billiardTable') || props.has('billiard');
   const cozy = style.id === 'cozy';
 
+  // Keep-out: when a real (much larger) game table fills the middle of the room
+  // — the felt reaches ~3 room metres in every direction — every centred prop
+  // must sit outside that disc. pushOut() rescales each authored position along
+  // its own direction from the room centre, so with keepOut = 0 (this demo
+  // page) every coordinate below stays exactly as written.
+  const pushOut = (x, z, clearance) => {
+    const r = Math.hypot(x, z);
+    const want = keepOut + clearance;
+    if (r < 1e-4 || r >= want) return { x, z };
+    const k = want / r;
+    return { x: x * k, z: z * k };
+  };
+
+  const sofaRaw = billiard
+    ? { x: -3.9, z: 0.9, rot: Math.PI / 2 }
+    : { x: 0, z: -2.85, rot: 0 };
+  const sofa = { ...sofaRaw, ...pushOut(sofaRaw.x, sofaRaw.z, billiard ? 1.35 : 0.62) };
+
+  // The two dining chairs sit at the table's edge in the demo. With a real felt
+  // filling the middle they must clear it like every other centred prop, or
+  // they end up standing on the play surface.
+  const chairL = { ...{ x: -2.55, z: 0.1, rot: Math.PI / 2 }, ...pushOut(-2.55, 0.1, 0.35) };
+  const chairR = { ...{ x: 2.55, z: 0.1, rot: -Math.PI / 2 }, ...pushOut(2.55, 0.1, 0.35) };
+
+  const sideRaw = billiard
+    ? { x: -3.35, z: -0.65, rot: 0 }
+    : cozy
+      ? { x: -1.75, z: -2.85, rot: 0 }
+      : { x: 1.75, z: -2.85, rot: 0 };
+  const sideTable = { ...sideRaw, ...pushOut(sideRaw.x, sideRaw.z, 0.5) };
+
+  const lampRaw = billiard ? { x: -2.9, z: 2.1 } : { x: -2.25, z: 2.8 };
+  const lamp = { ...lampRaw, ...pushOut(lampRaw.x, lampRaw.z, 0.42) };
+
+  // Decorative billiard table: pushed deep enough that its near edge clears the
+  // felt's keep-out radius and its far edge still clears the back wall
+  // (depth extent 0.7 + gap). Its pendants and chandelier ride with it.
+  const billiardTable = billiard ? pushOut(0, -2.55, 0.85) : null;
+  const chanRaw = billiard
+    ? { x: 0.55, z: (billiardTable ? billiardTable.z : -2.55) + 0.45 }
+    : { x: 1.55, z: -2.0 };
+  // The hanging light must never hang above the play felt: clearance keeps the
+  // fixture (real felt radius included) outside the disc around the room centre.
+  const chandelier = pushOut(chanRaw.x, chanRaw.z, 0.5);
+
+  const plantRaw = style.id === 'playful' ? { x: -3.85, z: -2.95 } : { x: 3.95, z: 2.85 };
+  const plant = { ...plantRaw, ...pushOut(plantRaw.x, plantRaw.z, 0.55) };
+
+  const shelf = cozy
+    ? { wall: 'right', x: ROOM.width / 2 - 0.18, z: -2.6, rot: -Math.PI / 2 }
+    : billiard
+      ? { wall: 'back', x: 3.3, z: -ROOM.depth / 2 + 0.18, rot: 0 }
+      : { wall: 'right', x: ROOM.width / 2 - 0.18, z: -2.2, rot: -Math.PI / 2 };
+  const bar = props.has('bar') ? { z: 0.85 } : null;
+
   return {
     props,
     billiard,
-    sofa: billiard
-      ? { x: -3.9, z: 0.9, rot: Math.PI / 2 }
-      : { x: 0, z: -2.85, rot: 0 },
-    sideTable: billiard
-      ? { x: -3.35, z: -0.65, rot: 0 }
-      : cozy
-        ? { x: -1.75, z: -2.85, rot: 0 }
-        : { x: 1.75, z: -2.85, rot: 0 },
-    lamp: billiard ? { x: -2.9, z: 2.1 } : { x: -2.25, z: 2.8 },
-    chandelier: billiard ? { x: -2.35, z: 0.9 } : { x: 1.55, z: -2.0 },
-    plant: style.id === 'playful' ? { x: -3.85, z: -2.95 } : { x: 3.95, z: 2.85 },
-    shelf: cozy
-      ? { wall: 'right', x: ROOM.width / 2 - 0.18, z: -2.6, rot: -Math.PI / 2 }
-      : billiard
-        ? { wall: 'back', x: 3.3, z: -ROOM.depth / 2 + 0.18, rot: 0 }
-        : { wall: 'right', x: ROOM.width / 2 - 0.18, z: -2.2, rot: -Math.PI / 2 },
-    bar: props.has('bar') ? { z: 0.85 } : null,
+    sofa,
+    chairL,
+    chairR,
+    sideTable,
+    lamp,
+    chandelier,
+    billiardTable,
+    plant,
+    shelf,
+    bar,
     fireplace: cozy || props.has('fireplace'),
     books: props.has('books'),
     starLights: props.has('starLights'),
   };
 }
 
-function addLights(room, geo, mats, style, scene, opts, chandelierPlace) {
+function addLights(room, geo, mats, style, scene, opts, chandelierPlace, low = false) {
   const p = style.palette;
   const ambient = clamp(Math.max(num(p.ambient) ?? 0.85, 0.82), 0.5, 1.4);
   const intensity = clamp((num(p.lightIntensity) ?? 1) * 42, 18, 110);
@@ -1234,11 +1306,12 @@ function addLights(room, geo, mats, style, scene, opts, chandelierPlace) {
   room.add(hemi);
 
   // One shadow-casting key light, offset from the chandelier so the shade
-  // does not block it.
+  // does not block it. The low tier keeps the light but not the shadow pass
+  // (the game board already disables shadow rendering on that tier).
   const key = new THREE.SpotLight(new THREE.Color(lightColor), intensity, 20, Math.PI / 3.6, 0.55, 2);
   key.position.set(0.9, 3.05, 1.0);
   key.target.position.set(0, 0.75, 0);
-  key.castShadow = true;
+  key.castShadow = !low;
   key.shadow.mapSize.set(MAX_SHADOW, MAX_SHADOW);
   key.shadow.bias = -0.0008;
   key.shadow.normalBias = 0.02;
@@ -1249,39 +1322,42 @@ function addLights(room, geo, mats, style, scene, opts, chandelierPlace) {
 
   buildChandelier(room, geo, mats, lightColor, clamp(intensity * 0.16, 4, 9), chandelierPlace);
 
-  // Configure the renderer when the page shares it; otherwise the page owns it.
+  // Configure the renderer only when the page shares it and does not own the
+  // shadow settings itself (the game board keeps its tier-driven shadow map).
+  const configureRenderer = !(opts && opts.configureRenderer === false);
   const renderer = (opts && opts.renderer) || (scene && scene.userData && scene.userData.renderer);
-  if (renderer && renderer.shadowMap) {
+  if (configureRenderer && renderer && renderer.shadowMap) {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   }
 }
 
 function buildRoom(state, style, wantTable) {
-  const { group, geo, mats, scene, opts } = state;
+  const { group, geo, mats, scene, opts, keepOut, low } = state;
 
-  buildShell(group, geo, mats);
+  buildShell(group, geo, mats, keepOut);
   const placements = artPlacements(style);
   buildWallArt(group, state, style, geo, mats);
 
-  const l = layout(style);
+  const l = layout(style, keepOut);
   const win = chooseWindow(style, placements, l.shelf, l.bar);
   if (win) buildWindow(group, geo, mats, style, win);
 
-  addLights(group, geo, mats, style, scene, opts, l.chandelier);
+  addLights(group, geo, mats, style, scene, opts, l.chandelier, low);
 
   buildSofa(group, geo, mats, l.sofa);
-  buildChair(group, geo, mats, -2.55, 0.1, Math.PI / 2);
-  buildChair(group, geo, mats, 2.55, 0.1, -Math.PI / 2);
+  buildChair(group, geo, mats, l.chairL.x, l.chairL.z, l.chairL.rot);
+  buildChair(group, geo, mats, l.chairR.x, l.chairR.z, l.chairR.rot);
   buildSideTable(group, geo, mats, l.sideTable, l.books);
   buildShelf(group, geo, mats, l.shelf);
   buildPlant(group, geo, mats, l.plant.x, l.plant.z);
   buildFloorLamp(group, geo, mats, l.lamp.x, l.lamp.z);
 
-  if (l.fireplace) buildFireplace(group, geo, mats, state, style, 2.9);
+  if (l.fireplace) buildFireplace(group, geo, mats, state, style, 2.9, low);
   if (l.billiard) {
-    buildBilliardTable(group, geo, mats);
-    buildPendants(group, geo, mats, toHex(style.palette.light, 0xffe3ae), 8);
+    const bz = l.billiardTable ? l.billiardTable.z : -2.55;
+    buildBilliardTable(group, geo, mats, bz);
+    buildPendants(group, geo, mats, toHex(style.palette.light, 0xffe3ae), 8, bz, low);
   }
   if (l.bar) buildBar(group, geo, mats);
   if (l.starLights) buildStarLights(group, geo, mats);
@@ -1344,32 +1420,33 @@ function disposeState(state) {
 const CAMERA_MARGIN = 0.6;
 const CAMERA_MIN_Y = 0.8;
 const CAMERA_MAX_Y = 2.9;
-const CAMERA_BOUNDS = {
-  minX: -ROOM.width / 2 + CAMERA_MARGIN,
-  maxX: ROOM.width / 2 - CAMERA_MARGIN,
-  minZ: -ROOM.depth / 2 + CAMERA_MARGIN,
-  maxZ: ROOM.depth / 2 - CAMERA_MARGIN,
-};
 
 /**
  * Keep an orbit camera inside the room. Call it after controls.update() every
  * frame: the camera can never leave the walls or go through the floor/ceiling,
- * so zooming out can never show the black outside of the room.
+ * so zooming out can never show the black outside of the room. Bounds follow
+ * the most recent createRoom() call (opt-scaled rooms included).
  */
 export function clampCameraToRoom(camera, controls) {
   if (!camera || !camera.position) return null;
+  const bounds = {
+    minX: -ROOM.width / 2 + CAMERA_MARGIN,
+    maxX: ROOM.width / 2 - CAMERA_MARGIN,
+    minZ: -ROOM.depth / 2 + CAMERA_MARGIN,
+    maxZ: ROOM.depth / 2 - CAMERA_MARGIN,
+  };
   const p = camera.position;
-  p.x = clamp(p.x, CAMERA_BOUNDS.minX, CAMERA_BOUNDS.maxX);
+  p.x = clamp(p.x, bounds.minX, bounds.maxX);
   p.y = clamp(p.y, CAMERA_MIN_Y, CAMERA_MAX_Y);
-  p.z = clamp(p.z, CAMERA_BOUNDS.minZ, CAMERA_BOUNDS.maxZ);
+  p.z = clamp(p.z, bounds.minZ, bounds.maxZ);
 
   // Panning is disabled in the demo, but keep the pivot inside too so the
   // helper is safe for callers that let the user pan.
   if (controls && controls.target) {
     const t = controls.target;
-    const tx = clamp(t.x, CAMERA_BOUNDS.minX + 0.3, CAMERA_BOUNDS.maxX - 0.3);
+    const tx = clamp(t.x, bounds.minX + 0.3, bounds.maxX - 0.3);
     const ty = clamp(t.y, 0.35, 2.2);
-    const tz = clamp(t.z, CAMERA_BOUNDS.minZ + 0.3, CAMERA_BOUNDS.maxZ - 0.3);
+    const tz = clamp(t.z, bounds.minZ + 0.3, bounds.maxZ - 0.3);
     if (tx !== t.x || ty !== t.y || tz !== t.z) {
       t.set(tx, ty, tz);
       camera.lookAt(t);
@@ -1384,11 +1461,24 @@ export function createRoom(scene, styleId, opts = {}) {
 
   const style = resolveStyle(styleId);
   const wantTable = !!(opts && opts.table);
-  const existing = ROOMS.get(scene);
+  const scale = clamp(num(opts.scale) || 1, 0.1, 64);
+  const low = !!(opts && opts.low);
+  const keepOut = Math.max(0, num(opts.tableRadius) || 0);
+  const floorY = num(opts.floorY) || 0;
+  FRONT_OPENING = Math.max(0, num(opts.frontOpening) || 5.5);
+  ROOM = {
+    ...DEFAULT_ROOM,
+    ...((opts.room && typeof opts.room === 'object') ? opts.room : {}),
+  };
+  const dims = { ...ROOM };
+  // Any change in these rebuilds instead of reusing a cached room.
+  const sig = [style.id, wantTable, scale, low, keepOut, floorY, FRONT_OPENING,
+    dims.width, dims.depth, dims.height].join('|');
 
+  const existing = ROOMS.get(scene);
   if (existing) {
     const stillAttached = existing.group && existing.group.parent === scene;
-    if (!existing.disposed && stillAttached && existing.styleId === style.id && existing.table === wantTable) {
+    if (!existing.disposed && stillAttached && existing.sig === sig) {
       return existing.group;
     }
     disposeState(existing);
@@ -1399,6 +1489,10 @@ export function createRoom(scene, styleId, opts = {}) {
     group: new THREE.Group(),
     styleId: style.id,
     table: wantTable,
+    scale,
+    keepOut,
+    low,
+    sig,
     opts: opts || {},
     disposed: false,
     materials: new Set(),
@@ -1408,7 +1502,12 @@ export function createRoom(scene, styleId, opts = {}) {
     ember: null,
   };
   state.group.name = `room3d-${style.id}`;
-  state.group.userData.room = { width: ROOM.width, depth: ROOM.depth, height: ROOM.height };
+  // Scaled geometry metadata for the host (the game board derives its camera
+  // clamp bounds from exactly these numbers — no duplicated constants).
+  state.group.userData.room = {
+    ...dims, scale, floorY, frontOpening: FRONT_OPENING,
+  };
+  state.group.position.y = floorY;
   state.group.userData.dispose = () => disposeState(state);
   state.geo = createGeometry(state);
   state.mats = createMaterials(state, style);
@@ -1425,6 +1524,29 @@ export function createRoom(scene, styleId, opts = {}) {
     }
     disposeState(state);
     return new THREE.Group();
+  }
+
+  // World-space scale. Scale axioms spelled out:
+  //   geometry — group.scale covers every mesh;
+  //   lights with decay 2 — illuminance is intensity/d², and every fixture now
+  //   sits `scale`× farther from what it lights, so the energy must grow by
+  //   scale² to keep the same surface brightness (Hemisphere/Ambient are
+  //   distance-free and stay untouched);
+  //   shadows — the shadow camera near/far must reach across the bigger room.
+  if (scale !== 1) {
+    state.group.scale.setScalar(scale);
+    state.group.traverse((o) => {
+      if (!o.isLight) return;
+      if (o.isPointLight || o.isSpotLight) {
+        o.intensity *= scale * scale;
+        if (o.distance) o.distance *= scale;
+      }
+      if (o.shadow && o.shadow.camera) {
+        o.shadow.camera.far = (num(o.shadow.camera.far) || 14) * scale;
+        o.shadow.camera.near = Math.max(0.05, (num(o.shadow.camera.near) || 0.5) * scale);
+        o.shadow.camera.updateProjectionMatrix();
+      }
+    });
   }
 
   scene.add(state.group);

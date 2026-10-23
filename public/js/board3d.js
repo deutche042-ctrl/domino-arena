@@ -11,7 +11,6 @@ import {
 import {
   getEnvironment, loadEnvironmentTexture, disposeEnvironmentTexture,
 } from './environments3d.js?v=1';
-import { createRoom, disposeRoom } from '../room3d.js?v=1';
 
 // ── real 3D room (public/room3d.js) ──
 // Imported dynamically so a broken room module can never take the game board
@@ -19,7 +18,7 @@ import { createRoom, disposeRoom } from '../room3d.js?v=1';
 // (DOM #gameEnv photo + HDRI PMREM) with only a console warning.
 let room3d = null;
 try {
-  room3d = await import('../room3d.js?v=2');
+  room3d = await import('../room3d.js?v=3');
 } catch (err) {
   console.warn('[board] room3d.js failed to load — 360° backdrop fallback stays active:',
     err?.message || err);
@@ -27,9 +26,6 @@ try {
 }
 
 const TILE_W = 1, TILE_L = 2, TILE_H = 0.42, GAP = 0.07;
-// Height the play surface sits above the room floor, in board units. The room
-// is scaled ~15.6x to wrap the rim, so 11 units reads as a real ~0.73 m table.
-const TABLE_HEIGHT_UNITS = 24;
 const MAX_X = 9.5;              // table boundary along X before turning
 const MAX_Z = 6.0;              // table boundary along Z before turning
 const adv = isDbl => (isDbl ? TILE_W : TILE_L) + GAP;
@@ -57,11 +53,16 @@ const FACE_PX_HIGH = 256, FACE_PX_LOW = 128;
 // real table sits inside with a walk-around ring — props keep their authored
 // proportions AND the felt/rim/tile ratios read true.
 const ROOM_SCALE = 6;                                  // world units per room metre
-const ROOM_DIMS = { width: 10, depth: 11, height: 3.35 };
+const ROOM_DIMS = { width: 10, depth: 11, height: 4.2 };   // tall hall: the auto-fit needs headroom
 const ROOM_FRONT_OPENING = 7.4;                        // wide doorway on the +Z wall
-const ROOM_FLOOR_Y = -1.2;                             // below the felt underside (-0.97)
+const ROOM_FLOOR_Y = -4.8;                             // felt top (-0.21) sits 4.6 units ≈ 0.77 m above it
 const ROOM_TABLE_RADIUS = 18.4 / ROOM_SCALE + 0.05;    // keep-out radius, room metres
 const ROOM_STYLE_IDS = ['modern', 'cozy', 'billiard', 'playful'];
+// Closest the auto-fit camera may come to the chain. Sized against the 36.8-unit
+// felt: any closer and the camera hovers over the play surface. Portrait
+// windows are narrower, so they need a longer throw to frame the same table.
+const CAM_MIN_DIST = 32;
+const CAM_MIN_DIST_PORTRAIT = 40;
 
 // Theme-tinted table/side/bloom look. Kept small and explicit so every value the
 // material swap touches lives in one place.
@@ -459,94 +460,69 @@ export class Board3D {
     rim.position.y = -0.42 - TILE_H / 2;
     this.scene.add(rim);
     this._tableRim = rim;
-    // The real 3D room replaces the flat-photo backdrop. Scale: the board rim
-    // is 36.8 units wide while the room was authored around a 2.36 felt, so the
-    // room group scales to wrap it; the floor sits just below the rim bottom so
-    // the table reads as standing on the ground when the camera orbits.
-    try {
-      const style = localStorage.getItem('domino_environment') || 'modern';
-      this._room3d = createRoom(this.scene, style, { table: false });
-      this._room3d.scale.setScalar(36.8 / 2.36);
-      // The board's table has no legs and no floor, so a scaled room would put
-      // the play surface flat on the ground with chairs cutting through it.
-      // Drop the room floor by a real table height (~0.73 m at this scale) and
-      // give the table four legs down to that floor.
-      this._room3d.position.y = rim.position.y - 0.75 - TABLE_HEIGHT_UNITS;
-      this._addTableLegs(rim);
-      this._roomBuilt = true;
-      if (this.controls && Number.isFinite(this.controls.maxDistance)) {
-        this.controls.maxDistance = Math.min(this.controls.maxDistance, 30);
-      }
-    } catch (err) {
-      console.warn('[board3d] room build failed — flat backdrop fallback:', err?.message || err);
-      this._room3d = null;
-      this._roomBuilt = false;
-    }
-    // The selected HDRI is the room AND the ground. A dark ground disc would
-    // cover the photo and read as a hole, so the classic table now ends at its
-    // rim (the play camera never sees the underside).
+    // The real 3D room replaces the flat-photo backdrop. It is built by the
+    // deferred room-mode boot (_buildRoom) so a broken room module can never
+    // take the table down; the table itself only owns felt + rim here.
     this._tableFloor = null;
     this._floorMat = null;
     this._applyTableTheme();
   }
 
-  _addTableLegs(rim) {
-    if (this._roomLegs) return;
+  /**
+   * The felt + rim are a bare disc. Without a base the table reads as a coin
+   * glued to the floor, so it gets the demo table's treatment: a wooden apron
+   * tucked under the rim plus four legs that stand on the real room floor.
+   * Rebuilt (not duplicated) whenever the room or the quality tier changes.
+   */
+  _addTableLegs() {
+    const rim = this._tableRim;
+    if (!rim || !this._roomGroup) return;
+    this._clearTableLegs();
+    const seg = this._quality?.tier === 'high' ? 64 : 32;
     const material = new THREE.MeshStandardMaterial({ color: 0x7a5230, roughness: 0.5, metalness: 0.1 });
-    const top = rim.position.y - 0.35;                     // underside of the rim
-    const floor = rim.position.y - 0.75 - TABLE_HEIGHT_UNITS;
-    // A bare disc reads as a floating coin from the play camera, so the table
-    // gets a thick wooden apron under the rim plus four legs down to the floor.
-    const apronHeight = Math.min(9, (top - floor) * 0.42);
-    const apron = new THREE.Mesh(
-      new THREE.CylinderGeometry(18.1, 17.7, apronHeight, this._quality?.tier === 'high' ? 64 : 32),
-      material,
-    );
-    apron.position.y = top - apronHeight / 2;
+    const group = new THREE.Group();
+    group.name = 'table-base';
+    group.visible = this._tableTop ? this._tableTop.visible : true;
+
+    const rimBottom = rim.position.y - 0.35;
+    const height = Math.max(1, rimBottom - ROOM_FLOOR_Y);
+    // Apron: the band the rim actually rests on (same job as the demo table's
+    // square frame). Legs run from its underside down to the floor.
+    const apronHeight = Math.min(height * 0.3, 2.2);
+    const apronGeo = new THREE.CylinderGeometry(18.0, 17.55, apronHeight, seg);
+    const apron = new THREE.Mesh(apronGeo, material);
+    apron.position.y = rimBottom - apronHeight / 2;
     apron.castShadow = true;
     apron.receiveShadow = true;
-    this.scene.add(apron);
-    const height = top - floor;
-    const geometry = new THREE.CylinderGeometry(1.7, 1.35, height, 16);
-    this._roomLegs = [apron];
-    apron.userData.tableLeg = true;
+    group.add(apron);
+
+    // Four legs, inset to ~⅔ of the rim radius (the demo table's 1.1 / 1.3).
+    const legHeight = Math.max(0.5, height - apronHeight);
+    const legGeo = new THREE.CylinderGeometry(1.5, 1.1, legHeight, 16);
     for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
-      const leg = new THREE.Mesh(geometry, material);
-      leg.position.set(sx * 12.4, floor + height / 2, sz * 12.4);
+      const leg = new THREE.Mesh(legGeo, material);
+      leg.position.set(sx * 12.4, ROOM_FLOOR_Y + legHeight / 2, sz * 12.4);
       leg.castShadow = true;
       leg.receiveShadow = true;
-      this.scene.add(leg);
-      this._roomLegs.push(leg);
+      group.add(leg);
     }
+
+    this.scene.add(group);
+    this._roomLegs = group;
+    this._roomLegGeos = [apronGeo, legGeo];
+    this._roomLegMat = material;
     if (this.renderer) this.renderer.shadowMap.needsUpdate = true;
   }
 
-  hasRoom() {
-    return Boolean(this._room3d && this._roomBuilt && !this._disposed);
-  }
-
-  setRoomStyle(styleId) {
-    if (this._disposed) return false;
-    try {
-      if (this._room3d) {
-        this.scene.remove(this._room3d);
-        disposeRoom(this._room3d);
-      }
-      this._room3d = createRoom(this.scene, styleId, { table: false });
-      this._room3d.scale.setScalar(36.8 / 2.36);
-      this._room3d.position.y = (this._tableRim?.position.y ?? -0.63) - 0.75 - TABLE_HEIGHT_UNITS;
-      this._addTableLegs(this._tableRim);
-      this._roomBuilt = true;
-      if (this.controls && Number.isFinite(this.controls.maxDistance)) {
-        this.controls.maxDistance = Math.min(this.controls.maxDistance, 30);
-      }
-      return this.hasRoom();
-    } catch (err) {
-      console.warn('[board3d] room style switch failed:', err?.message || err);
-      this._room3d = null;
-      this._roomBuilt = false;
-      return false;
-    }
+  _clearTableLegs() {
+    const group = this._roomLegs;
+    if (!group) return;
+    this.scene.remove(group);
+    for (const geo of this._roomLegGeos || []) geo.dispose();
+    this._roomLegMat?.dispose();
+    this._roomLegs = null;
+    this._roomLegGeos = null;
+    this._roomLegMat = null;
   }
 
   _makeFeltTexture() {
@@ -618,10 +594,13 @@ export class Board3D {
     });
   }
 
-  /** Models replace the felt top/rim; the HDRI supplies the ground. */
+  /** Models replace the felt top/rim (and the base built for them). */
   _showProceduralTable(show) {
     if (this._tableTop) this._tableTop.visible = show;
     if (this._tableRim) this._tableRim.visible = show;
+    // A downloaded model brings its own legs; the procedural apron/legs would
+    // poke through it, so they follow the felt's visibility.
+    if (this._roomLegs) this._roomLegs.visible = show;
   }
 
   // ── 360° environment (Poly Haven HDRI) ──
@@ -695,7 +674,7 @@ export class Board3D {
   async _enterRoomMode() {
     this._roomState = 'loading';
     try {
-      if (!this._roomMod) this._roomMod = await import('../room3d.js?v=2');
+      if (!this._roomMod) this._roomMod = await import('../room3d.js?v=3');
       if (this._disposed) return;
       if (typeof this._roomMod?.createRoom !== 'function') {
         throw new Error('room3d module unavailable');
@@ -747,6 +726,9 @@ export class Board3D {
       }
       this._roomGroup = group;
       this._roomState = 'ready';
+      // The room floor is what the table stands on, so the base is (re)built
+      // here — never before a room exists, or the legs would hang in the void.
+      this._addTableLegs();
       this._updateRoomClamp();
       this._applyRoomLighting(true);
       this._syncEnvBackdrop();
@@ -758,6 +740,7 @@ export class Board3D {
       try { mod?.disposeRoom?.(this._roomGroup); } catch { /* already gone */ }
       this._roomGroup = null;
       this._roomState = 'failed';
+      this._clearTableLegs();
       this._updateRoomClamp();
       this._applyRoomLighting(false);
       this._syncEnvBackdrop();
@@ -1688,9 +1671,9 @@ export class Board3D {
     this._camUntil = this._camStartAt + 2000;
     if (!spots.length) {
       this._camTargetGoal = { x: 0, y: 0, z: 0 };
-      // Lower than the old top-down default: the environment photo must be
-      // visible above/behind the table, not just a green felt filling the frame.
-      this._camGoal = { x: 0, y: 12, z: 17 };
+      // Lower than the old top-down default: the room must be visible
+      // above/behind the table, not just a green felt filling the frame.
+      this._camGoal = { x: 0, y: 18, z: (this.camera.aspect || 1) < 0.95 ? 36 : 27 };
       this._applyCameraGoal();
       return;
     }
@@ -1711,18 +1694,29 @@ export class Board3D {
     const spanX = Math.max(maxX - minX + TILE_W + 1.5, 6);
     const spanZ = Math.max(maxZ - minZ + TILE_L + 1.5, 6);
     // Distance that fits both the horizontal span (narrowed by the aspect) and
-    // the depth span (foreshortened by the ~51° camera elevation).
+    // the depth span (foreshortened by the camera elevation below).
     const tan = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
     const aspect = Math.max(0.35, this.camera.aspect || 1);
     const distH = (spanX / (2 * tan * aspect)) * 1.35;
     const distV = ((spanZ * 0.85) / (2 * tan)) * 1.35;
-    // Portrait phones need a larger ceiling or the chain falls off-screen.
+    // Never closer than CAM_MIN_DIST: the felt is 36.8 units across, so the old
+    // 13-unit minimum parked the camera ON the table and turned every move into
+    // a zoom across the felt. Pulled back, the table edge and the room stay in
+    // frame and a normal chain barely moves the camera at all.
+    // A portrait window sees far less width for the same distance, so it backs
+    // off further and drops lower — otherwise the frame is a wall of felt.
+    const portrait = aspect < 0.95;
+    const minDist = portrait ? CAM_MIN_DIST_PORTRAIT : CAM_MIN_DIST;
     const maxDist = aspect < 0.85 ? 72 : 48;
-    const dist = clamp(Math.max(distH, distV, 13), 13, maxDist);
+    const dist = clamp(Math.max(distH, distV, minDist), minDist, maxDist);
     this.controls.maxDistance = Math.max(46, Math.min(90, dist * 1.3));
-    // ~41° above the felt (was ~52°): keeps the dominoes readable while
-    // revealing the environment behind the far edge of the table.
-    this._camGoal = { x: cx, y: dist * 0.66, z: cz + dist * 0.75 };
+    // ~35° above the felt in landscape, ~25° when portrait: dominoes stay
+    // readable while the room shows behind the far edge of the table. The
+    // camera stays under the ceiling (the room clamp in _clampCameraToRoom
+    // would otherwise flatten the shot).
+    this._camGoal = portrait
+      ? { x: cx, y: dist * 0.42, z: cz + dist * 0.91 }
+      : { x: cx, y: dist * 0.56, z: cz + dist * 0.83 };
     this._camTargetGoal = { x: cx, y: 0, z: cz };
     this._applyCameraGoal();
   }
@@ -2298,11 +2292,7 @@ export class Board3D {
     if (this._disposed) return;
     this._disposed = true;
     this.pauseLoop();
-    if (this._room3d) {
-      try { this.scene.remove(this._room3d); } catch { /* scene gone */ }
-      try { disposeRoom(this._room3d); } catch { /* already disposed */ }
-      this._room3d = null;
-    }
+    this._clearTableLegs();
 
     if (this._io) { try { this._io.disconnect(); } catch { /* already gone */ } this._io = null; }
     for (const [target, type, fn, opts] of this._listeners) {
