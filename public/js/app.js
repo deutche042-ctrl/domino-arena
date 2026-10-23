@@ -908,8 +908,8 @@ function initLobby() {
     if (c && c !== '----') copyText(c, 'تم نسخ الكود!');
   };
   // K3.C4: native share sheet first on phones, clipboard as fallback.
-  $('btnCopyLink').onclick = () => {
-    const url = location.origin + '?room=' + roomCode;
+  $('btnCopyLink').onclick = async () => {
+    const url = await inviteUrl();
     if (navigator.share) {
       navigator.share({ title: 'دومينو أرينا', text: `ادخل غرفتي بالكود ${roomCode}`, url })
         .then(() => toast('✅ اتبعتت الدعوة لأصحابك'))
@@ -937,7 +937,7 @@ function initLobby() {
       sfx.click();
     };
   }
-  $('btnQr').onclick = () => {
+  $('btnQr').onclick = async () => {
     const pop = $('qrPop');
     if (!pop) return;
     if (!pop.classList.contains('hidden')) {
@@ -945,7 +945,7 @@ function initLobby() {
       sfx.click();
       return;
     }
-    renderQr(location.origin + '?room=' + (roomCode || ''), $('qrCanvas'));
+    renderQr(await inviteUrl(), $('qrCanvas'));
     pop.classList.remove('hidden');
     sfx.click();
   };
@@ -2977,6 +2977,29 @@ function stopConfetti() { cancelAnimationFrame(confettiRAF); }
 
 // ══════════ helpers ══════════
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+// Invite address for the QR and the copy/share link. The page origin is only
+// usable when it already belongs to something other than this device: a hosted
+// URL (Render / Cloudflare) or a LAN address the host opened by hand. On
+// localhost/127.0.0.1 the origin is a dead link for anyone scanning it — it
+// sends the guest to their OWN device. So ask the server which of its addresses
+// a nearby device can reach and hand that out instead.
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+function isLocalHostname(host) { return LOCAL_HOSTNAMES.has(String(host || '').toLowerCase()); }
+async function inviteBase() {
+  if (!isLocalHostname(location.hostname)) return location.origin;
+  try {
+    const info = await (await fetch('/host-info')).json();
+    const ip = info && Array.isArray(info.ips) ? info.ips[0] : null;
+    if (ip) return `${location.protocol}//${ip}:${info.port || location.port}`;
+  } catch { /* older server or no network — fall back to the origin */ }
+  toast('⚠ الرابط ده هيفتح على الجهاز ده بس — شغّل السيرفر على الشبكة عشان تليفون تاني يقدر يدخل');
+  return location.origin;
+}
+async function inviteUrl() {
+  return (await inviteBase()) + '?room=' + (roomCode || '');
+}
+
 // render an invite-link QR onto a canvas (global qrcode lib, vendored)
 function renderQr(text, canvas) {
   if (!canvas || typeof qrcode !== 'function' || !text) return;

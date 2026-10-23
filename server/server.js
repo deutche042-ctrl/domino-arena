@@ -2,6 +2,7 @@
 import express from 'express';
 import { createServer } from 'node:http';
 import { createHmac } from 'node:crypto';
+import os from 'node:os';
 import { Server } from 'socket.io';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -21,6 +22,29 @@ app.use((req, res, next) => {
 
 // Uptime probe: Render health check + free keep-alive ping target.
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
+
+// Which addresses can another device use to reach this server? Invite links and
+// the QR code need a reachable host, and when the server runs on someone's own
+// machine the page origin is localhost — which on a scanning phone means "that
+// phone itself", i.e. a dead link. LAN subnets come first: a phone hotspot or
+// home Wi-Fi is exactly what a nearby player can open.
+function lanScore(ip) {
+  if (ip.startsWith('192.168.')) return 0;                              // hotspots + home Wi-Fi
+  if (ip.startsWith('10.')) return 1;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return 2;
+  return 3;                                                            // public / container ranges
+}
+app.get('/host-info', (req, res) => {
+  const ips = [];
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family !== 'IPv4' || a.internal || ips.includes(a.address)) continue;
+      ips.push(a.address);
+    }
+  }
+  ips.sort((a, b) => lanScore(a) - lanScore(b));
+  res.json({ port: Number(PORT), ips });
+});
 
 // ---- voice ICE config ----
 // The browser needs TURN to connect peers across strict NATs. This endpoint
