@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=52';
+import { Board3D } from './board3d.js?v=54';
 import { Home3D } from './home3d.js?v=7';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, setQuality, onQualityChange } from './quality.js?v=3';
@@ -206,6 +206,63 @@ function syncQualityUI() {
     if (n) n.textContent = noteText;
   }
 }
+// ── UI density: phone vs desktop ──
+// The compact sizes are not a media query on purpose: Chrome on a phone can
+// report a viewport that looks desktop-sized once the tab bar is counted, so
+// the decision combines touch support with the short side of the screen — and
+// the player can always override it from the settings.
+const DENSITY_KEY = 'domino_ui_density';
+function densityPref() {
+  try {
+    const v = localStorage.getItem(DENSITY_KEY);
+    return v === 'compact' || v === 'roomy' ? v : 'auto';
+  } catch { return 'auto'; }
+}
+function isHandheld() {
+  try {
+    const touch = (navigator.maxTouchPoints || 0) > 0
+      || (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches);
+    const shortSide = Math.min(window.innerWidth || 9999, window.innerHeight || 9999);
+    return touch && shortSide <= 820;
+  } catch { return false; }
+}
+function uiDensity() {
+  const pref = densityPref();
+  if (pref !== 'auto') return pref;
+  return isHandheld() ? 'compact' : 'roomy';
+}
+function syncDensityUI() {
+  const pref = densityPref();
+  const active = uiDensity();
+  document.querySelectorAll('#uiDensityRow .diff-chip').forEach((c) => {
+    const on = c.dataset.density === pref;
+    c.classList.toggle('active', on);
+    c.setAttribute('aria-pressed', String(on));
+  });
+  const note = $('uiDensityNote');
+  if (note) {
+    note.textContent = pref === 'auto'
+      ? `تلقائي — المقاس الحالي: ${active === 'compact' ? 'مضغوط' : 'كبير'}.`
+      : 'المقاس ده محفوظ على جهازك.';
+  }
+}
+function applyDensity() {
+  const mode = uiDensity();
+  document.body.classList.toggle('ui-compact', mode === 'compact');
+  document.body.classList.toggle('ui-roomy', mode === 'roomy');
+  syncDensityUI();
+  // The camera fit depends on the density (a phone needs a longer throw), so
+  // an existing board re-frames immediately instead of on the next move.
+  try { board?.resize?.(); } catch { /* board not up yet */ }
+}
+function setDensity(pref) {
+  try {
+    if (pref === 'auto') localStorage.removeItem(DENSITY_KEY);
+    else localStorage.setItem(DENSITY_KEY, pref);
+  } catch { /* no storage */ }
+  applyDensity();
+}
+
 // ── in-game player list (scorecard) visibility ──
 // Some players want the felt to themselves; the list is chrome, so it is a
 // persisted per-device preference rather than something the room decides.
@@ -2318,6 +2375,7 @@ function openSettings() {
   if (vb) vb.checked = vibrationOn();
   syncQualityUI();
   syncScorecardUI();
+  syncDensityUI();
   modal.classList.remove('hidden');
 }
 function initSettingsModal() {
@@ -2336,6 +2394,13 @@ function initSettingsModal() {
     };
     rng.onchange = () => sfx.click();
   }
+  document.querySelectorAll('#uiDensityRow .diff-chip').forEach((ch) => {
+    ch.onclick = () => {
+      setDensity(ch.dataset.density || 'auto');
+      sfx.click();
+    };
+  });
+  applyDensity();
   document.querySelectorAll('#scoreCardRow .diff-chip').forEach((ch) => {
     ch.onclick = () => {
       setScorecard(ch.dataset.scorecard === 'hide');
@@ -2343,6 +2408,11 @@ function initSettingsModal() {
     };
   });
   applyScorecard();
+  let densityRaf = 0;
+  window.addEventListener('resize', () => {
+    if (densityPref() !== 'auto' || densityRaf) return;
+    densityRaf = requestAnimationFrame(() => { densityRaf = 0; applyDensity(); });
+  });
   const cf = $('chkConfirm');
   if (cf) {
     cf.onchange = () => {

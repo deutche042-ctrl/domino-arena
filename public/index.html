@@ -8,7 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🁢</text></svg>">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="vendor/fonts/fonts.css?v=1">
-<link rel="stylesheet" href="css/style.css?v=86">
+<link rel="stylesheet" href="css/style.css?v=88">
 <script type="importmap">
 {
   "imports": {
@@ -442,6 +442,15 @@
         </div>
       </div>
       <div class="set-group">
+        <span class="set-label">حجم الواجهة</span>
+        <div class="diff-row" id="uiDensityRow" role="group" aria-label="حجم الواجهة">
+          <button type="button" class="diff-chip" data-density="auto" aria-pressed="true">📱 تلقائي</button>
+          <button type="button" class="diff-chip" data-density="compact" aria-pressed="false">🔹 مضغوط</button>
+          <button type="button" class="diff-chip" data-density="roomy" aria-pressed="false">🔷 كبير</button>
+        </div>
+        <p class="quality-note" id="uiDensityNote">تلقائي بيصغّر الواجهة على الموبايل ويسيبها كبيرة على الكمبيوتر.</p>
+      </div>
+      <div class="set-group">
         <span class="set-label">جودة الرسوم</span>
         <div class="diff-row" id="qualityRowGame" role="group" aria-label="جودة الرسوم">
           <button type="button" class="diff-chip" data-quality="auto" aria-pressed="false">✨ تلقائي</button>
@@ -658,6 +667,6 @@
 </div>
 
 <script>window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(((e.error&&e.error.stack)||e.message).split('\n').slice(0,4).join(' | '));});window.addEventListener('unhandledrejection',function(e){window.__errs.push('rej: '+((e.reason&&(e.reason.stack||e.reason.message))||String(e.reason)));});</script>
-<script type="module" src="js/app.js?v=100"></script>
+<script type="module" src="js/app.js?v=104"></script>
 </body>
 </html>

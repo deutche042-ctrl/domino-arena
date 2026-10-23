@@ -1673,6 +1673,20 @@ export class Board3D {
    * aspect ratio. The goal is only ever applied by the spring, and never while
    * the player has taken the camera with a drag/wheel/pinch.
    */
+  /**
+   * 1 on a normal viewport, ~1.28 in the compact UI: a phone screen shows much
+   * less of the felt at the same world distance, so the fit backs off to keep
+   * the table's proportions honest. Follows the player's density choice.
+   */
+  _fitScale() {
+    if (typeof document !== 'undefined' && document.body && document.body.classList) {
+      if (document.body.classList.contains('ui-compact')) return 1.28;
+      if (document.body.classList.contains('ui-roomy')) return 1;
+    }
+    if (typeof window === 'undefined' || !window.innerHeight) return 1;
+    return window.innerHeight <= 620 ? 1.28 : 1;
+  }
+
   _fitCamera(spots) {
     this._lastFitSpots = spots || [];
     // 1.7: the camera used to start easing ~340ms BEFORE the tile touched down,
@@ -1687,7 +1701,12 @@ export class Board3D {
       this._camTargetGoal = { x: 0, y: 0, z: 0 };
       // Lower than the old top-down default: the room must be visible
       // above/behind the table, not just a green felt filling the frame.
-      this._camGoal = { x: 0, y: (this.camera.aspect || 1) < 0.95 ? 12.5 : 10.2, z: (this.camera.aspect || 1) < 0.95 ? 10.1 : 6.4 };
+      const idle = this._fitScale();
+      this._camGoal = {
+        x: 0,
+        y: ((this.camera.aspect || 1) < 0.95 ? 12.5 : 10.2) * idle,
+        z: ((this.camera.aspect || 1) < 0.95 ? 10.1 : 6.4) * idle,
+      };
       this._applyCameraGoal();
       return;
     }
@@ -1722,7 +1741,10 @@ export class Board3D {
     const portrait = aspect < 0.95;
     const minDist = portrait ? CAM_MIN_DIST_PORTRAIT : CAM_MIN_DIST;
     const maxDist = aspect < 0.85 ? 72 : 48;
-    const dist = clamp(Math.max(distH, distV, minDist), minDist, maxDist);
+    // A short viewport (landscape phone) shows far less of the table at the same
+    // world distance, so the whole fit backs off a little to keep proportions.
+    const scale = this._fitScale();
+    const dist = clamp(Math.max(distH, distV, minDist) * scale, minDist * scale, maxDist);
     this.controls.maxDistance = Math.max(60, Math.min(120, dist * 1.4));
     // Steep by design (≈58° landscape / ≈51° portrait): the cards are read
     // almost from above, and the near edge of the felt never eats the frame.
