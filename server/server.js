@@ -392,7 +392,9 @@ function currentCtx(socket) {
 const BOT_NAMES = ['بوت حسن', 'بوت نور', 'بوت كريم', 'بوت سلمى', 'بوت زيكو', 'بوت ميرا'];
 // K1.B9: per-level think spans — stronger bots visibly "think" longer.
 const BOT_DELAY_SPANS = {
-  easy: [400, 700], medium: [600, 1100], hard: [900, 1600], expert: [1100, 2000],
+  // Trimmed from [600,1100]…[1100,2000]: with three bots seated the old spans
+  // left ~3 s between your move and your next turn, which read as a frozen game.
+  easy: [300, 500], medium: [420, 750], hard: [650, 1100], expert: [800, 1400],
 };
 // Contextual bot chatter (Egyptian Arabic) — pools picked by what just happened
 const BOT_LINES = {
