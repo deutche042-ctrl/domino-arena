@@ -1,5 +1,5 @@
 // js/app.js — Domino Arena client: screens, net, hand UI, chat, modals
-import { Board3D } from './board3d.js?v=57';
+import { Board3D } from './board3d.js?v=58';
 import { Home3D } from './home3d.js?v=7';
 import { tileImage, setTheme as setTileTheme, getTheme, THEME_NAMES } from './tiles.js?v=15';
 import { getQuality, setQuality, onQualityChange } from './quality.js?v=3';
@@ -9,7 +9,7 @@ import { getEnvironment } from './environments3d.js?v=1';
 import { ROOM_STYLES } from '../room3d-styles.js?v=1';
 import { EnvironmentPreview } from './envpreview.js?v=1';
 import { sfx } from './sfx.js?v=17';
-import { VoiceChat } from './voice.js?v=4';
+import { VoiceChat } from './voice.js?v=5';
 
 const $ = id => document.getElementById(id);
 // Guarded event binding: a missing chat node must never abort boot.
@@ -4117,7 +4117,17 @@ function initVoiceUI() {
 // Same-origin connection (browser / Render / Cloudflare Tunnel).
 
 function startSocket(base) {
-  socket = io(base || undefined, { transports: ['websocket', 'polling'] });
+  // The Cloudflare Worker only speaks WebSocket (its shim has no long-polling
+  // endpoint), so asking for polling there just burned ~20 s per failed attempt
+  // and looked like "the internet keeps dropping". The Node host keeps both.
+  const workerHost = /(^|\.)workers\.dev$/i.test(location.hostname);
+  socket = io(base || undefined, {
+    transports: workerHost ? ['websocket'] : ['websocket', 'polling'],
+    reconnectionDelay: 500,
+    reconnectionDelayMax: 3000,
+    randomizationFactor: 0.3,
+    timeout: 12000,
+  });
   // The engine binds its own socket listeners; create it once the socket
   // exists but keep everything non-fatal so a voice failure can never abort
   // boot. It does no media work until the user taps the mic.

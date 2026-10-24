@@ -190,6 +190,9 @@ export class VoiceChat {
     this._relayAnnounced = false;
     this._relayStartedAt = 0;
     this._relayPlayers = new Map();
+    this._relayJitterMs = new Map();
+    this._relayBusNode = null;
+    this._relayBusCtx = null;
 
     this._audioCtx = null;
     this._speakTimer = null;
@@ -2448,6 +2451,41 @@ export class VoiceChat {
     }
   }
 
+  /** Running late-arrival estimate per peer, clamped to a usable window. */
+  _relayJitter(peer, now) {
+    let j = this._relayJitterMs.get(peer.id);
+    if (!j) { j = { last: 0, value: 0.08 }; this._relayJitterMs.set(peer.id, j); }
+    if (j.last) {
+      const gap = now - j.last;
+      // A gap well outside the frame cadence means the link hiccuped.
+      const late = Math.max(0, gap - 0.09);
+      j.value = Math.min(0.14, Math.max(0.04, j.value * 0.92 + (late + 0.04) * 0.08));
+    }
+    j.last = now;
+    return j.value;
+  }
+
+  /** Shared soft limiter so loud talkers do not clip the whole mix. */
+  _relayBus() {
+    const ctx = this._audioCtx;
+    if (!ctx) return null;
+    if (this._relayBusNode && this._relayBusCtx === ctx) return this._relayBusNode;
+    try {
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -18;
+      comp.knee.value = 22;
+      comp.ratio.value = 4;
+      comp.attack.value = 0.004;
+      comp.release.value = 0.22;
+      comp.connect(ctx.destination);
+      this._relayBusNode = comp;
+      this._relayBusCtx = ctx;
+      return comp;
+    } catch {
+      return null;
+    }
+  }
+
   _relayPlay(peer, pcm) {
     const ctx = this._audioCtx;
     if (!ctx || !pcm.length) return;
@@ -2458,7 +2496,11 @@ export class VoiceChat {
       this._relayPlayers.set(peer.id, state);
     }
     const now = ctx.currentTime;
-    if (!state.nextAt || state.nextAt < now - 0.05) state.nextAt = now + 0.10;
+    // Adaptive jitter buffer: start at 80 ms, grow when frames arrive late and
+    // settle back to 40 ms once the link proves steady. Fixed 100 ms felt
+    // sluggish on good connections and still stuttered on bad ones.
+    const jitter = this._relayJitter(peer, now);
+    if (!state.nextAt || state.nextAt < now - 0.05) state.nextAt = now + jitter;
     if (state.nextAt > now + RELAY_QUEUE_MAX) return;   // backlog: drop, stay live
 
     const buffer = ctx.createBuffer(1, pcm.length, RELAY_RATE);
@@ -2471,7 +2513,7 @@ export class VoiceChat {
     }
     const source = ctx.createBufferSource();
     source.buffer = buffer;
-    source.connect(ctx.destination);
+    source.connect(this._relayBus() || ctx.destination);
     try {
       source.start(state.nextAt);
     } catch {

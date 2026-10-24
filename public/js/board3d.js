@@ -442,8 +442,21 @@ export class Board3D {
     }
     // The room was built for the previous tier's budget; rebuild it when the
     // tier flips (createRoom's signature check makes this a no-op unless the
-    // `low` option actually changed).
-    if (this._roomState === 'ready' && this._roomMod) this._buildRoom();
+    // `low` option actually changed). The probe downgrades a couple of seconds
+    // after the board is created, so an immediate rebuild meant building the
+    // whole room TWICE back-to-back — a multi-second freeze on phones. Skip the
+    // redundant rebuild for a moment, then do it when the frame is free.
+    if (this._roomState === 'ready' && this._roomMod) {
+      const since = performance.now() - (this._roomBuiltAt || 0);
+      if (since < 2500) {
+        clearTimeout(this._roomRebuildTimer);
+        this._roomRebuildTimer = setTimeout(() => {
+          try { this._buildRoom(); } catch { /* keep the current room */ }
+        }, 3000 - since);
+      } else {
+        this._buildRoom();
+      }
+    }
     // Direct transparent rendering: the board composites over the DOM
     // environment photo, and a bloom composer would write opaque alpha.
     this._applyThemeFx();
@@ -740,6 +753,7 @@ export class Board3D {
       }
       this._roomGroup = group;
       this._roomState = 'ready';
+      this._roomBuiltAt = performance.now();
       // The room floor is what the table stands on, so the base is (re)built
       // here — never before a room exists, or the legs would hang in the void.
       this._addTableLegs();
@@ -1696,7 +1710,7 @@ export class Board3D {
     // 1.7: the camera used to start easing ~340ms BEFORE the tile touched down,
     // so the board was already gliding while the tile was still in the air and
     // the whole move felt loose. Hold the spring until touchdown instead.
-    const delay = this._reducedMotion ? 0 : 500;
+    const delay = this._reducedMotion ? 0 : 200;
     this._camStartAt = performance.now() + delay;
     // Generous window: on a slow device dt is clamped, so the spring needs more
     // wall-clock time to converge. It stops early once it actually arrives.
